@@ -6,7 +6,7 @@ Rules for `.github/workflows`. Also follow the repository [AGENTS.md](../../AGEN
 
 `ci.yml` runs on pull requests, pushes to `main`, and `workflow_dispatch`.
 
-- `web` uses `pnpm/setup@v3` at the repository root with Node LTS, store cache, and a frozen lockfile. The root `packageManager` is pnpm 12; this action cannot install pnpm 10. Order is install, `wrangler types --check`, lint, typecheck, test, build. `pnpm-workspace.yaml` sets `minimumReleaseAge: 0` so a release published the same day can still install.
+- `web` uses `pnpm/setup@v3` at the repository root with Node 26 (`runtime: node@26`, the latest 26 LTS), store cache, and a frozen lockfile. The root `packageManager` is pnpm 12; this action cannot install pnpm 10. Order is install, `wrangler types --check`, lint, typecheck, test, build. `pnpm-workspace.yaml` sets `minimumReleaseAge: 0` so a release published the same day can still install.
 - `pipeline` installs `gdal-bin` and runs the Python unit tests, including the EPSG:26915 reprojection fixture. It does not install tippecanoe and it does not download DNR data.
 - `rust` uses `dtolnay/rust-toolchain@stable` with `toolchain: 1.83.0`, rustfmt, and clippy, then `cargo fmt`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked`.
 - `secrets` runs gitleaks `v8.30.1` with `--redact` after checking the linux x64 tarball sha256. Checkout uses `fetch-depth: 0`.
