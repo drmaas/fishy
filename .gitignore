@@ -11,6 +11,8 @@ dist/
 !.env.example
 !.dev.vars.example
 *.log
+__pycache__/
+*.pyc
 
 # Downloaded survey data. Commit only fixtures and the tiny sample archives.
 /data/
