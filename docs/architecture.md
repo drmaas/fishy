@@ -1,6 +1,6 @@
 # Architecture
 
-Fishy is a monorepo. The web app and the bathymetry pipeline do not share a process. Shared display rules live in `packages/core` (TypeScript, used by the site) and `crates/fishy-core` (Rust, for a future native client). `fixtures/contract.json` is the check that those copies, and the Python pipeline helpers, still agree.
+Fishy is a monorepo. The web app and the bathymetry pipeline do not share a process. Shared display rules live in `packages/core` (TypeScript, used by the site and by future native clients). `fixtures/contract.json` is the check that those rules and the Python pipeline helpers still agree.
 
 ## Web
 
@@ -16,10 +16,10 @@ Non-API requests that reach the Worker return 404. Static files, including `publ
 
 ## Pipeline
 
-`pipeline/fishy_pipeline` normalizes DNR field names (`depth` / `abs_depth` to `depth_ft`) and builds `ogr2ogr`, `tippecanoe`, GDAL, and `pmtiles convert` commands. `just pipeline-sample` runs that chain on `fixtures/sample-pond`, a synthetic lake with the DNR schema. Real extracts stay in `/data` and are gitignored.
+`pipeline/fishy_pipeline` normalizes DNR field names (`depth` / `abs_depth` to `depth_ft`) and builds `ogr2ogr`, `tippecanoe`, GDAL, and `pmtiles convert` commands. `pnpm pipeline:sample` runs that chain on `fixtures/sample-pond`, a synthetic lake with the DNR schema. Real extracts stay in `/data` and are gitignored.
 
-`just r2-upload` runs `wrangler r2 object put`. `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `R2_BUCKET` come from the environment. They are not command arguments and they are not files in git.
+`pnpm pipeline:r2-upload` runs `wrangler r2 object put`. `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `R2_BUCKET` come from the environment. They are not command arguments and they are not files in git.
 
 ## Native placeholders
 
-`apps/android` and `apps/ios` are empty on purpose. `crates/fishy-core` is the Rust home for rules those apps should share.
+`apps/android` and `apps/ios` are empty on purpose. Shared rules for those apps should come from `packages/core` when a client is added.

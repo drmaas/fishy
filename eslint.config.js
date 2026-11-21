@@ -13,7 +13,6 @@ export default tseslint.config(
       "**/.wrangler/**",
       "**/worker-configuration.d.ts",
       "node_modules/**",
-      "target/**",
       "apps/web/public/samples/**",
     ],
   },

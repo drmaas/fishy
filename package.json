@@ -11,9 +11,14 @@
   "scripts": {
     "dev": "pnpm --filter @fishy/web dev",
     "build": "pnpm --filter @fishy/web build",
-    "typecheck": "pnpm -r --if-present typecheck",
+    "typecheck": "pnpm -r --if-present typecheck && pnpm --filter @fishy/web exec wrangler types --include-runtime false --check",
     "lint": "eslint .",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test",
+    "secrets": "gitleaks detect --source . --redact --no-banner",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run pipeline:test && pnpm run build && pnpm run secrets",
+    "pipeline:test": "PYTHONPATH=pipeline python3 -m unittest discover -s pipeline/tests -v",
+    "pipeline:sample": "PYTHONPATH=pipeline python3 -m fishy_pipeline.build fixtures/sample-pond apps/web/public/samples",
+    "pipeline:r2-upload": "PYTHONPATH=pipeline python3 -m fishy_pipeline.upload"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

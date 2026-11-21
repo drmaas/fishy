@@ -13,8 +13,8 @@ Outputs, for the sample:
 - `sample-pond-hillshade.pmtiles` — hillshade raster
 
 ```bash
-just pipeline-sample
-just r2-upload path/to/file.pmtiles some/key.pmtiles
+pnpm pipeline:sample
+pnpm pipeline:r2-upload -- path/to/file.pmtiles some/key.pmtiles
 ```
 
 See [docs/data-sources.md](../docs/data-sources.md) for the Minnesota URLs the commands target.
