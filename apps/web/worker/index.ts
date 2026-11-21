@@ -1,5 +1,6 @@
 import {
   cacheControlForStatus,
+  exposesMaptilerSecret,
   isRedirectStatus,
   maptilerKey,
   publicConfig,
@@ -32,14 +33,8 @@ export default {
         return proxyUpstream(request, url, key);
       }
       return text("not found", 404);
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          message: "api request failed",
-          path: url.pathname,
-          error: error instanceof Error ? error.message : "unknown",
-        }),
-      );
+    } catch {
+      console.error(JSON.stringify({ message: "api request failed", path: url.pathname }));
       return text("upstream failed", 502);
     }
   },
@@ -60,10 +55,11 @@ async function proxyStyle(request: Request, key: string): Promise<Response> {
     method: request.method,
     redirect: "manual",
   });
-  if (isRedirectStatus(upstream.status)) return text("upstream redirect refused", 502);
-  if (!upstream.ok) return text("basemap unavailable", 404);
-  const style = rewriteMaptilerStyle(await upstream.json(), new URL(request.url).origin);
-  return new Response(request.method === "HEAD" ? null : JSON.stringify(style), {
+  if (refused(upstream)) return text("upstream redirect refused", 502);
+  if (!upstream.ok) return text("basemap unavailable", upstream.status);
+  const body = JSON.stringify(rewriteMaptilerStyle(await upstream.json(), new URL(request.url).origin));
+  if (exposesMaptilerSecret(body, key)) return text("basemap unavailable", 502);
+  return new Response(request.method === "HEAD" ? null : body, {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": cacheControlForStatus(upstream.status),
@@ -71,22 +67,48 @@ async function proxyStyle(request: Request, key: string): Promise<Response> {
   });
 }
 
+function refused(upstream: Response): boolean {
+  if (isRedirectStatus(upstream.status)) return true;
+  if (!upstream.url) return false;
+  try {
+    return new URL(upstream.url).host !== "api.maptiler.com";
+  } catch {
+    return true;
+  }
+}
+
 async function proxyUpstream(request: Request, url: URL, key: string): Promise<Response> {
   const target = upstreamMaptilerUrl(url.pathname, url.search, key);
   if (!target) return text("not found", 404);
   const upstream = await fetch(target, { method: request.method, redirect: "manual" });
-  if (isRedirectStatus(upstream.status)) return text("upstream redirect refused", 502);
-  const cache = cacheControlForStatus(upstream.status);
+  if (refused(upstream)) return text("upstream redirect refused", 502);
+  if (!upstream.ok) return text("basemap unavailable", upstream.status);
+  const raw = new TextDecoder().decode(await upstream.arrayBuffer());
   const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
-  if (contentType.includes("json") && request.method !== "HEAD") {
-    const rewritten = rewriteMaptilerStyle(await upstream.json(), url.origin);
-    return new Response(JSON.stringify(rewritten), {
-      status: upstream.status,
-      headers: { "content-type": "application/json; charset=utf-8", "cache-control": cache },
+  if (contentType.includes("json")) {
+    let body: string;
+    try {
+      body = JSON.stringify(rewriteMaptilerStyle(JSON.parse(raw), url.origin));
+    } catch {
+      return text("basemap unavailable", 502);
+    }
+    if (exposesMaptilerSecret(body, key)) return text("basemap unavailable", 502);
+    return new Response(request.method === "HEAD" ? null : body, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": cacheControlForStatus(200),
+      },
     });
   }
-  return new Response(request.method === "HEAD" ? null : upstream.body, {
+  if (exposesMaptilerSecret(raw, key) || exposesMaptilerSecret(contentType, key)) {
+    return text("basemap unavailable", 502);
+  }
+  return new Response(request.method === "HEAD" ? null : raw, {
     status: upstream.status,
-    headers: { "content-type": contentType, "cache-control": cache },
+    headers: {
+      "content-type": contentType,
+      "cache-control": cacheControlForStatus(upstream.status),
+    },
   });
 }

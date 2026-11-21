@@ -55,6 +55,13 @@ export function cacheControlForStatus(status: number): string {
   return "no-store";
 }
 
+/** True when a proxied body or header value would reveal the upstream key or host. */
+export function exposesMaptilerSecret(value: string, key: string): boolean {
+  if (value.includes("api.maptiler.com")) return true;
+  if (key.length > 0 && (value.includes(key) || value.includes(encodeURIComponent(key)))) return true;
+  return false;
+}
+
 function decodeSegment(segment: string): string {
   try {
     return decodeURIComponent(segment);

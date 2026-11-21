@@ -11,5 +11,5 @@
     "types": ["@cloudflare/workers-types"]
   },
   "include": ["worker", "lib/server", "worker-configuration.d.ts"],
-  "exclude": ["lib/server/**/*.test.ts"]
+  "exclude": ["lib/server/**/*.test.ts", "worker/**/*.test.ts"]
 }

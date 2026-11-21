@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cacheControlForStatus,
+  exposesMaptilerSecret,
   isAllowedMaptilerPath,
   isRedirectStatus,
   publicConfig,
@@ -60,5 +61,18 @@ describe("worker config", () => {
     expect(cacheControlForStatus(502)).toBe("no-store");
     expect(isRedirectStatus(302)).toBe(true);
     expect(isRedirectStatus(200)).toBe(false);
+  });
+
+  it("treats an error body or header that still contains the key as a leak", () => {
+    expect(exposesMaptilerSecret("missing secret-key", "secret-key")).toBe(true);
+    expect(exposesMaptilerSecret("session=secret-key", "secret-key")).toBe(true);
+    expect(exposesMaptilerSecret("https://api.maptiler.com/tiles/v3/tiles.json", "secret-key")).toBe(true);
+    const tilejson = rewriteMaptilerStyle(
+      { tiles: ["https://api.maptiler.com/tiles/v3/{z}/{x}/{y}.pbf?key=secret-key"] },
+      "https://fishy.example",
+    );
+    const body = JSON.stringify(tilejson);
+    expect(exposesMaptilerSecret(body, "secret-key")).toBe(false);
+    expect(exposesMaptilerSecret("public, max-age=86400", "secret-key")).toBe(false);
   });
 });
