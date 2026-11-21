@@ -12,7 +12,7 @@ Milestone zero. The web app frames a synthetic Sample Pond from tiny PMTiles in 
 
 ## Run the web app
 
-Node 22 or newer, pnpm 12.21.0, and [just](https://github.com/casey/just).
+Node 26 LTS, pnpm 12.21.0, and [just](https://github.com/casey/just). `.nvmrc` is `26`. `nvm install` installs the latest Node 26 LTS.
 
 ```bash
 pnpm install
