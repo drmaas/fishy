@@ -1,3 +1,11 @@
 packages:
   - "apps/web"
   - "packages/core"
+
+# pnpm 12 rejects packages published within the last day. This scaffold
+# resolves current releases, including ones published today.
+minimumReleaseAge: 0
+
+allowBuilds:
+  esbuild: true
+  workerd: true
