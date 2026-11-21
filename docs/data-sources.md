@@ -1,0 +1,82 @@
+# Data sources
+
+Checked on 2026-11-21. A URL below was requested and returned HTTP 200 unless the note says otherwise. Fishy does not vendor these datasets. Download them outside the repository and keep the files out of git.
+
+Weather is not implemented. The clients, when they land, will call Open-Meteo and api.weather.gov with no API key.
+
+## Minnesota DNR lake bathymetry
+
+The product is **Lake Bathymetric Outlines, Contours, and DEM**, published by the DNR Division of Fish and Wildlife, Section of Fisheries, on the Minnesota Geospatial Commons.
+
+| What | URL |
+| --- | --- |
+| Dataset page | https://gis.data.mn.gov/datasets/lake-bathymetric-outlines-contours-and-dem-2 |
+| Item | https://www.arcgis.com/sharing/rest/content/items/c4bbf4b8e45a48afba2d73f24089c187?f=json |
+| MapServer | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer |
+| Contours (layer 0) | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/0 |
+| Outline (layer 1) | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/1 |
+| Survey metadata (layer 2) | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/2 |
+| Bathymetric DEM (layer 3) | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/3 |
+| Shaded relief ImageServer | https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathy_shaded_relief/ImageServer |
+
+The older GDRS file path `https://resources.gisdata.mn.gov/pub/gdrs/data/pub/us_mn_state_dnr/water_lake_bathymetry/` returned 404 on this date, including `gpkg_water_lake_bathymetry.zip` and `metadata/metadata.html`. Use the MapServer, or a GeoPackage / shapefile / file geodatabase exported from the dataset page.
+
+Contour fields used by the pipeline:
+
+- `depth` is negative feet. Zero is the shore.
+- `abs_depth` is the positive depth in feet.
+- `dowlknum` is the 8-digit Division of Waters lake id.
+- `lake_name` is the DNR name.
+
+The outline and DEM are NAD83 UTM zone 15 (EPSG:26915). The pipeline reprojects every vector layer to EPSG:4326 with `ogr2ogr -s_srs EPSG:26915 -t_srs EPSG:4326` and warps the depth grid with `gdalwarp` before tiling.
+
+A one-lake GeoJSON extract (verified with `dowlknum=27013300`, Lake Minnetonka; the service returned features):
+
+```text
+https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/0/query?where=dowlknum%3D%2727013300%27&outFields=*&f=geojson
+```
+
+`contours_geojson_url` in `pipeline/fishy_pipeline/commands.py` builds that URL. Do not commit the response. Statewide contours are large.
+
+Terms: the MapServer item reports access `public` and `licenseInfo` of `None`. The retired metadata page stated access constraints none and use constraints none. Credit the Minnesota Department of Natural Resources on the map. LakeFinder links use `https://www.dnr.state.mn.us/lakefind/showreport.html?downum=<DOWLKNUM>` (verified for `27013300`).
+
+## NOAA NCEI Great Lakes bathymetry
+
+Not loaded yet. Product page (200): https://www.ncei.noaa.gov/products/great-lakes-bathymetry
+
+Grid extract (200): https://www.ncei.noaa.gov/maps/grid-extract/
+
+An old NGDC zip, `https://www.ngdc.noaa.gov/mgg/greatlakes/erie/data/bathymetry/erie_lld.zip`, returned 404. Pull grids from the product page or Grid Extract. The data are United States government work, public domain. Credit NOAA National Centers for Environmental Information.
+
+## USGS National Hydrography Dataset
+
+Not loaded yet.
+
+- Product page (200): https://www.usgs.gov/national-hydrography/national-hydrography-dataset
+- Access page (200): https://www.usgs.gov/national-hydrography/access-national-hydrography-products
+- Staged state GeoPackages (200): https://prd-tnm.s3.amazonaws.com/index.html?prefix=StagedProducts/Hydrography/NHD/State/GPKG/
+
+USGS data are public domain. Credit the U.S. Geological Survey.
+
+## OpenStreetMap boat ramps
+
+Not loaded yet. Ramps are features tagged `leisure=slipway`. Tag page (200): https://wiki.openstreetmap.org/wiki/Tag:leisure%3Dslipway
+
+Copyright (200): https://www.openstreetmap.org/copyright
+
+The data stay under the Open Database License. The visible credit is “© OpenStreetMap contributors”, linked to that copyright page. A future extract can use the Overpass API at `https://overpass-api.de/api/interpreter`. A query from this environment timed out, so that interpreter call is not marked verified.
+
+## Basemap
+
+Default style, no key (200): https://tiles.openfreemap.org/styles/liberty
+
+OpenFreeMap serves OpenStreetMap data. Keep the OpenStreetMap credit visible. An optional MapTiler outdoor style is proxied by the Worker only when `MAPTILER_API_KEY` is set in the environment. The key is not written into the repository or into the style document sent to the browser.
+
+## Weather (later)
+
+- Open-Meteo forecast (200): https://api.open-meteo.com/v1/forecast
+- License (200): https://open-meteo.com/en/licence (CC BY 4.0; credit Open-Meteo)
+- NWS API root (200): https://api.weather.gov/
+- NWS API docs (200): https://www.weather.gov/documentation/services-web-api
+
+NWS data are public domain. Credit the National Weather Service. Send a descriptive User-Agent on NWS requests.

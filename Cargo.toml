@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/fishy-core"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/drmaas/fishy"
+rust-version = "1.83"
+publish = false

@@ -1,0 +1,26 @@
+{
+  "type": "FeatureCollection",
+  "name": "lakes",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "lake_name": "Sample Pond",
+        "dowlknum": "99999900",
+        "area_acres": 42.5
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-93.275, 44.976],
+            [-93.265, 44.976],
+            [-93.265, 44.984],
+            [-93.275, 44.984],
+            [-93.275, 44.976]
+          ]
+        ]
+      }
+    }
+  ]
+}
