@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+
+node_modules/
+.pnpm-store/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+*.log
+
+# Downloaded survey data. Commit only fixtures and the tiny sample archives.
+/data/
+/pipeline/output/
+**/*.mbtiles
+**/*.tif
+**/*.gpkg

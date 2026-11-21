@@ -1,0 +1,47 @@
+{
+  "round": [
+    { "value": -1.5, "digits": 0, "out": -2 },
+    { "value": 1.5, "digits": 0, "out": 2 },
+    { "value": 2.25, "digits": 1, "out": 2.3 },
+    { "value": null, "digits": 0, "out": 0 }
+  ],
+  "feetToMeters": [
+    { "feet": 0, "meters": 0 },
+    { "feet": 10, "meters": 3.048 },
+    { "feet": -10, "meters": -3.048 }
+  ],
+  "dnrDepthFeet": [
+    { "depth": -15, "absDepth": 15, "feet": 15 },
+    { "depth": 0, "absDepth": 0, "feet": 0 },
+    { "depth": null, "absDepth": 8, "feet": 8 }
+  ],
+  "acres": [{ "squareMeters": 4046.8564224, "acres": 1 }],
+  "dowlknum": [
+    {
+      "id": "27013300",
+      "valid": true,
+      "lakeFinder": "https://www.dnr.state.mn.us/lakefind/showreport.html?downum=27013300"
+    },
+    { "id": "270133", "valid": false },
+    {
+      "id": "99999900",
+      "valid": true,
+      "lakeFinder": "https://www.dnr.state.mn.us/lakefind/showreport.html?downum=99999900"
+    }
+  ],
+  "pmtiles": [
+    {
+      "input": "/samples/sample-pond.pmtiles",
+      "url": "pmtiles:///samples/sample-pond.pmtiles"
+    },
+    {
+      "input": "https://tiles.example.com/lakes.pmtiles",
+      "url": "pmtiles://https://tiles.example.com/lakes.pmtiles"
+    },
+    {
+      "input": "pmtiles:///already.pmtiles",
+      "url": "pmtiles:///already.pmtiles"
+    }
+  ],
+  "sampleView": { "longitude": -93.27, "latitude": 44.98, "zoom": 13.4 }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "fishy",
+  "compatibility_date": "2026-11-21",
+  // Keep legacy registry until @cloudflare/vite-plugin stops asserting on node:process
+  // under the default new_module_registry.
+  "compatibility_flags": ["legacy_module_registry"],
+  "main": "./worker/index.ts",
+  "upload_source_maps": true,
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+  "vars": {
+    "FISHY_CONTOURS_URL": "/samples/sample-pond.pmtiles",
+    "FISHY_TERRAIN_URL": "/samples/sample-pond-terrain.pmtiles",
+    "FISHY_HILLSHADE_URL": "/samples/sample-pond-hillshade.pmtiles"
+  }
+}

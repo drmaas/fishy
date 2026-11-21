@@ -1,0 +1,90 @@
+:root {
+  color: #142028;
+  background: #e7eef2;
+  font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: 16px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root, .app {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100%;
+}
+
+.top, .credits {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #f7f4ee;
+  border-color: #d5cdc0;
+}
+
+.top { border-bottom: 1px solid #d5cdc0; }
+.credits {
+  border-top: 1px solid #d5cdc0;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.mark {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.tag, .note { margin: 0; color: #4d5c66; }
+
+.top label, .units { display: flex; gap: 8px; align-items: center; }
+
+select, button, a {
+  font: inherit;
+}
+
+button, select {
+  background: #fff;
+  border: 1px solid #b7c3c9;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.map { min-height: 0; }
+
+.panel {
+  position: absolute;
+  top: 72px;
+  left: 12px;
+  width: min(320px, calc(100% - 24px));
+  background: #f7f4ee;
+  border: 1px solid #d5cdc0;
+  border-radius: 8px;
+  padding: 12px 14px 16px;
+  box-shadow: 0 8px 24px rgb(20 32 40 / 12%);
+}
+
+.panel-head, .panel dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel h2 { margin: 0 0 8px; font-size: 1.25rem; }
+.panel dl { margin: 0 0 12px; }
+.panel dt { color: #4d5c66; }
+.panel dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+.credits ul {
+  flex-basis: 100%;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.maplibregl-ctrl-top-right { top: 8px; }
