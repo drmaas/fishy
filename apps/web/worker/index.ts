@@ -1,6 +1,7 @@
 import {
   cacheControlForStatus,
   exposesMaptilerSecret,
+  exposesMaptilerSecretBytes,
   isRedirectStatus,
   maptilerKey,
   publicConfig,
@@ -83,9 +84,10 @@ async function proxyUpstream(request: Request, url: URL, key: string): Promise<R
   const upstream = await fetch(target, { method: request.method, redirect: "manual" });
   if (refused(upstream)) return text("upstream redirect refused", 502);
   if (!upstream.ok) return text("basemap unavailable", upstream.status);
-  const raw = new TextDecoder().decode(await upstream.arrayBuffer());
+  const buffer = await upstream.arrayBuffer();
   const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
   if (contentType.includes("json")) {
+    const raw = new TextDecoder().decode(buffer);
     let body: string;
     try {
       body = JSON.stringify(rewriteMaptilerStyle(JSON.parse(raw), url.origin));
@@ -101,10 +103,11 @@ async function proxyUpstream(request: Request, url: URL, key: string): Promise<R
       },
     });
   }
-  if (exposesMaptilerSecret(raw, key) || exposesMaptilerSecret(contentType, key)) {
+  const bytes = new Uint8Array(buffer);
+  if (exposesMaptilerSecretBytes(bytes, key) || exposesMaptilerSecret(contentType, key)) {
     return text("basemap unavailable", 502);
   }
-  return new Response(request.method === "HEAD" ? null : raw, {
+  return new Response(request.method === "HEAD" ? null : buffer, {
     status: upstream.status,
     headers: {
       "content-type": contentType,

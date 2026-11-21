@@ -62,6 +62,30 @@ export function exposesMaptilerSecret(value: string, key: string): boolean {
   return false;
 }
 
+const encoder = new TextEncoder();
+const MAPTILER_HOST_BYTES = encoder.encode("api.maptiler.com");
+
+function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
+  if (needle.length === 0 || haystack.length < needle.length) return false;
+  outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+/** String-free scan for secrets in binary proxied bodies (tiles, sprites, glyphs). */
+export function exposesMaptilerSecretBytes(data: Uint8Array, key: string): boolean {
+  if (containsBytes(data, MAPTILER_HOST_BYTES)) return true;
+  if (key.length > 0) {
+    if (containsBytes(data, encoder.encode(key))) return true;
+    if (containsBytes(data, encoder.encode(encodeURIComponent(key)))) return true;
+  }
+  return false;
+}
+
 function decodeSegment(segment: string): string {
   try {
     return decodeURIComponent(segment);

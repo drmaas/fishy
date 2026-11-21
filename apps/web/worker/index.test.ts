@@ -81,4 +81,57 @@ describe("maptiler worker proxy", () => {
     expect(headers(response).toLowerCase()).not.toContain("set-cookie");
     expect(headers(response)).not.toContain("max-age");
   });
+
+  it("passes binary tile and sprite bytes through without UTF-8 corruption", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0xfd]);
+    const pbf = new Uint8Array([0x1a, 0x80, 0xff]);
+    const cases: Array<{ path: string; body: Uint8Array; contentType: string }> = [
+      {
+        path: "/api/basemap/upstream/maps/outdoor-v2/sprite.png",
+        body: png,
+        contentType: "image/png",
+      },
+      {
+        path: "/api/basemap/upstream/tiles/v3/0/0/0.pbf",
+        body: pbf,
+        contentType: "application/vnd.mapbox-vector-tile",
+      },
+    ];
+    for (const { path, body, contentType } of cases) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": contentType },
+          });
+        }),
+      );
+      const response = await worker.fetch(new Request(`https://fishy.example${path}`), ENV);
+      const out = new Uint8Array(await response.arrayBuffer());
+      expect(response.status).toBe(200);
+      expect(out).toEqual(body);
+      expect(response.headers.get("content-type")).toBe(contentType);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=86400");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses binary bodies that embed the upstream key", async () => {
+    const keyBytes = new TextEncoder().encode(KEY);
+    const body = new Uint8Array([0x1a, 0x00, ...keyBytes, 0xff]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }),
+    );
+    const response = await call("/api/basemap/upstream/tiles/v3/0/0/0.pbf");
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe("basemap unavailable");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
 });
