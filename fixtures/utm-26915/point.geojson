@@ -1,0 +1,18 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "lake_name": "UTM Probe",
+        "dowlknum": "27013300",
+        "depth": -10,
+        "abs_depth": 10
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [478712.47, 4980764.11]
+      }
+    }
+  ]
+}

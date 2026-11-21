@@ -1,6 +1,12 @@
-import { lakeFromProperties, OPENFREEMAP_STYLE, SAMPLE_VIEW, type LakeInfo } from "@fishy/core";
+import {
+  lakeFromProperties,
+  OPENFREEMAP_STYLE,
+  SAMPLE_VIEW,
+  type DepthUnit,
+  type LakeInfo,
+} from "@fishy/core";
 import { useEffect, useRef } from "react";
-import { DEPTH_COLOR, fishSources } from "./layers.ts";
+import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 
 interface FishMapProps {
   contoursUrl: string;
@@ -8,6 +14,7 @@ interface FishMapProps {
   hillshadeUrl: string;
   basemap: "openfreemap" | "none" | "maptiler";
   maptilerStyleUrl?: string;
+  unit: DepthUnit;
   onLake: (lake: LakeInfo) => void;
 }
 
@@ -17,11 +24,15 @@ export function FishMap({
   hillshadeUrl,
   basemap,
   maptilerStyleUrl,
+  unit,
   onLake,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
+  const unitRef = useRef(unit);
+  const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   onLakeRef.current = onLake;
+  unitRef.current = unit;
 
   useEffect(() => {
     const node = nodeRef.current;
@@ -63,6 +74,7 @@ export function FishMap({
         attributionControl: false,
         maxPitch: 70,
       });
+      mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
       map.on("load", () => {
         if (!map) return;
@@ -105,7 +117,7 @@ export function FishMap({
             source: "contours",
             "source-layer": "contours",
             layout: {
-              "text-field": ["concat", ["to-string", ["get", "depth_ft"]], " ft"],
+              "text-field": contourLabelField(unitRef.current),
               "symbol-placement": "line",
               "text-size": 12,
             },
@@ -126,9 +138,16 @@ export function FishMap({
 
     return () => {
       cancelled = true;
+      mapRef.current = null;
       map?.remove();
     };
   }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, terrainUrl]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map?.getLayer("depth-labels")) return;
+    map.setLayoutProperty("depth-labels", "text-field", contourLabelField(unit));
+  }, [unit]);
 
   return <div ref={nodeRef} className="map" role="application" aria-label="Lake map" />;
 }

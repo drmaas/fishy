@@ -2,7 +2,8 @@
 
 use fishy_core::{
     depth_feet_from_dnr, feet_to_meters, is_dowlknum, lake_finder_url, pmtiles_protocol_url,
-    round_half_away_from_zero, square_meters_to_acres,
+    round_half_away_from_zero, square_meters_to_acres, SAMPLE_LATITUDE, SAMPLE_LONGITUDE,
+    SAMPLE_ZOOM,
 };
 use serde_json::Value;
 
@@ -66,4 +67,9 @@ fn matches_shared_contract() {
             row["url"].as_str().unwrap()
         );
     }
+
+    let view = &contract["sampleView"];
+    assert_eq!(view["longitude"].as_f64().unwrap(), SAMPLE_LONGITUDE);
+    assert_eq!(view["latitude"].as_f64().unwrap(), SAMPLE_LATITUDE);
+    assert_eq!(view["zoom"].as_f64().unwrap(), SAMPLE_ZOOM);
 }

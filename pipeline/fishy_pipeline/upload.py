@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Upload a PMTiles archive to R2. Tokens stay in the environment."""
 
 from __future__ import annotations

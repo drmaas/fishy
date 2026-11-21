@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Subprocess argument builders. Credentials stay in the environment."""
 
 from __future__ import annotations
@@ -39,8 +40,31 @@ def contours_geojson_url(dowlknum: str) -> str:
     return f"{CONTOURS_LAYER}/query?{query}"
 
 
-def ogr_reproject_args(source: str, dest: str) -> list[str]:
-    return ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-overwrite", dest, source]
+def read_source_srs(directory: str) -> str:
+    path = os.path.join(directory, "source.srs")
+    if not os.path.isfile(path):
+        return "EPSG:4326"
+    with open(path, encoding="utf-8") as handle:
+        value = handle.read().strip()
+    code = value[5:]
+    if not value.startswith("EPSG:") or not code or any(char < "0" or char > "9" for char in code):
+        raise ValueError("source.srs must be an EPSG code such as EPSG:26915")
+    return value
+
+
+def ogr_reproject_args(source: str, dest: str, source_srs: str = "EPSG:4326") -> list[str]:
+    return [
+        "ogr2ogr",
+        "-f",
+        "GeoJSON",
+        "-t_srs",
+        "EPSG:4326",
+        "-s_srs",
+        source_srs,
+        "-overwrite",
+        dest,
+        source,
+    ]
 
 
 def tippecanoe_args(output: str, layers: list[tuple[str, str]]) -> list[str]:
@@ -63,7 +87,22 @@ def tippecanoe_args(output: str, layers: list[tuple[str, str]]) -> list[str]:
 
 
 def gdal_translate_asc_args(source: str, dest: str) -> list[str]:
-    return ["gdal_translate", "-a_srs", "EPSG:4326", source, dest]
+    return ["gdal_translate", source, dest]
+
+
+def gdalwarp_to_wgs84_args(source: str, dest: str, source_srs: str) -> list[str]:
+    return [
+        "gdalwarp",
+        "-s_srs",
+        source_srs,
+        "-t_srs",
+        "EPSG:4326",
+        "-r",
+        "near",
+        "-overwrite",
+        source,
+        dest,
+    ]
 
 
 def gdaldem_hillshade_args(source: str, dest: str) -> list[str]:

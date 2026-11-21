@@ -4,6 +4,11 @@
 //! The TypeScript copy lives in `packages/core`. Change both and
 //! `fixtures/contract.json` in the same change.
 
+/// Camera that frames the committed Sample Pond fixture.
+pub const SAMPLE_LONGITUDE: f64 = -93.27;
+pub const SAMPLE_LATITUDE: f64 = 44.98;
+pub const SAMPLE_ZOOM: f64 = 13.4;
+
 /// One international foot in meters.
 pub const METERS_PER_FOOT: f64 = 0.3048;
 

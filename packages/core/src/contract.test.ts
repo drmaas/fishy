@@ -10,6 +10,7 @@ import {
   lakeFromProperties,
   pmtilesProtocolUrl,
   roundHalfAwayFromZero,
+  SAMPLE_VIEW,
   squareMetersToAcres,
 } from "./index.ts";
 
@@ -20,6 +21,7 @@ interface Contract {
   acres: { squareMeters: number; acres: number }[];
   dowlknum: { id: string; valid: boolean; lakeFinder?: string }[];
   pmtiles: { input: string; url: string }[];
+  sampleView: { longitude: number; latitude: number; zoom: number };
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +57,7 @@ describe("contract", () => {
     for (const row of contract.pmtiles) {
       expect(pmtilesProtocolUrl(row.input)).toBe(row.url);
     }
+    expect(SAMPLE_VIEW).toEqual(contract.sampleView);
   });
 
   it("reads a lake click payload", () => {

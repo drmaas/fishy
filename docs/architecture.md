@@ -10,7 +10,7 @@ Fishy is a monorepo. The web app and the bathymetry pipeline do not share a proc
 - Depth contours, depth-zone polygons, and the lake polygon come from a vector PMTiles archive (`pmtiles` protocol).
 - A terrarium raster-dem PMTiles archive drives `map.setTerrain` (3D relief). A hillshade PMTiles archive is a raster overlay.
 - Clicking the lake polygon opens a panel: name, max depth, area, DOW lake id, and a LakeFinder link.
-- `/api/config` returns public URLs only. `MAPTILER_API_KEY` is optional. When it is set, `/api/basemap/style.json` fetches a MapTiler style on the Worker and rewrites tile hosts to `/api/basemap/upstream/*`, which adds the key server-side. The style body must not contain the key. Do not log upstream URLs.
+- `/api/config` returns public URLs only. `MAPTILER_API_KEY` is optional. When it is set, `/api/basemap/style.json` fetches the outdoor MapTiler style on the Worker. `/api/basemap/upstream/*` forwards only that style, its sprite, TileJSON, tiles, and glyphs, adds the key server-side, rewrites JSON bodies back through the proxy, and refuses redirects. The style body must not contain the key. Do not log upstream URLs.
 
 Non-API requests that reach the Worker return 404. Static files, including `public/samples/*.pmtiles`, are assets. PMTiles reads use HTTP range requests.
 

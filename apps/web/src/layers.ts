@@ -1,5 +1,5 @@
-import { pmtilesProtocolUrl } from "@fishy/core";
-import type { DataDrivenPropertyValueSpecification } from "maplibre-gl";
+import { pmtilesProtocolUrl, type DepthUnit } from "@fishy/core";
+import type { DataDrivenPropertyValueSpecification, ExpressionSpecification } from "maplibre-gl";
 
 export const DEPTH_COLOR = [
   "interpolate",
@@ -14,6 +14,21 @@ export const DEPTH_COLOR = [
   20,
   "#14324f",
 ] as DataDrivenPropertyValueSpecification<string>;
+
+export function contourLabelField(unit: DepthUnit): ExpressionSpecification {
+  if (unit === "ft") {
+    return ["concat", ["to-string", ["get", "depth_ft"]], " ft"] as ExpressionSpecification;
+  }
+  return [
+    "concat",
+    [
+      "number-format",
+      ["*", ["get", "depth_ft"], 0.3048],
+      { "min-fraction-digits": 1, "max-fraction-digits": 1 },
+    ],
+    " m",
+  ] as ExpressionSpecification;
+}
 
 export function fishSources(contoursUrl: string, terrainUrl: string, hillshadeUrl: string) {
   return {

@@ -80,6 +80,7 @@ export function App() {
         hillshadeUrl={config.hillshadeUrl}
         basemap={basemap}
         maptilerStyleUrl={config.maptiler ? "/api/basemap/style.json" : undefined}
+        unit={unit}
         onLake={setLake}
       />
       {lake && <LakePanel lake={lake} unit={unit} onClose={() => setLake(null)} />}

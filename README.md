@@ -12,7 +12,7 @@ Milestone zero. The web app frames a synthetic Sample Pond from tiny PMTiles in 
 
 ## Run the web app
 
-Node 22 or newer, pnpm 10, and [just](https://github.com/casey/just).
+Node 22 or newer, pnpm 12.21.0, and [just](https://github.com/casey/just).
 
 ```bash
 pnpm install
@@ -27,13 +27,21 @@ Point the depth layers at R2 by changing `FISHY_CONTOURS_URL`, `FISHY_TERRAIN_UR
 
 ## Run the pipeline
 
-Sample Pond is reproducible. You need GDAL (`ogr2ogr`, `gdal_translate`, `gdaldem`), [tippecanoe](https://github.com/felt/tippecanoe), and the [pmtiles](https://github.com/protomaps/go-pmtiles) CLI on `PATH`.
+`just pipeline-sample` reads `fixtures/sample-pond` (`lakes.geojson`, `contours.geojson`, `zones.geojson`, and `dem.asc`) and writes `sample-pond.pmtiles`, `sample-pond-terrain.pmtiles`, and `sample-pond-hillshade.pmtiles` under `apps/web/public/samples/`. Those are the only input names the builder reads and the only output names it writes.
 
 ```bash
 just pipeline-sample
 ```
 
-That reads `fixtures/sample-pond` and writes three small archives under `apps/web/public/samples/`. For a real lake, put a GeoJSON, shapefile, or GeoPackage in `/data` (gitignored) and use the same steps. `contours_geojson_url` builds a one-lake query against the DNR MapServer. Source URLs that were checked are in [docs/data-sources.md](docs/data-sources.md).
+The same command works on another directory with those four files:
+
+```bash
+PYTHONPATH=pipeline python3 -m fishy_pipeline.build /path/to/lake apps/web/public/samples
+```
+
+It still writes the `sample-pond*.pmtiles` names. If the coordinates are not already EPSG:4326, put the source CRS in `source.srs` in that directory. Minnesota DNR bathymetry is `EPSG:26915`. The builder reprojects every vector layer with `ogr2ogr -t_srs EPSG:4326` and warps the depth grid with `gdalwarp` before tiling. `contours_geojson_url` only builds a MapServer query string. It does not download a lake. Checked source URLs are in [docs/data-sources.md](docs/data-sources.md).
+
+You need GDAL (`ogr2ogr`, `gdal_translate`, `gdalwarp`, `gdaldem`), [tippecanoe](https://github.com/felt/tippecanoe), and the [pmtiles](https://github.com/protomaps/go-pmtiles) CLI on `PATH`.
 
 Upload an archive you already built:
 

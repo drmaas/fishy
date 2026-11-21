@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Depth, area, and lake-id rules. Keep in step with fixtures/contract.json."""
 
 from __future__ import annotations
@@ -35,8 +36,11 @@ def square_meters_to_acres(square_meters: float) -> float:
     return square_meters / SQUARE_METERS_PER_ACRE
 
 
+SAMPLE_VIEW = {"longitude": -93.27, "latitude": 44.98, "zoom": 13.4}
+
+
 def is_dowlknum(value: str) -> bool:
-    return len(value) == 8 and value.isdigit()
+    return len(value) == 8 and all("0" <= char <= "9" for char in value)
 
 
 def lake_finder_url(dowlknum: str) -> str | None:

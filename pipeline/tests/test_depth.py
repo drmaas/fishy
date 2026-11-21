@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-only
 import json
 import math
 import unittest
 from pathlib import Path
 
 from fishy_pipeline.depth import (
+    SAMPLE_VIEW,
     depth_feet_from_dnr,
     feet_to_meters,
     is_dowlknum,
@@ -36,6 +38,9 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(lake_finder_url(row["id"]), row.get("lakeFinder") if row["valid"] else None)
         for row in CONTRACT["pmtiles"]:
             self.assertEqual(pmtiles_protocol_url(row["input"]), row["url"])
+        self.assertEqual(SAMPLE_VIEW, CONTRACT["sampleView"])
+        arabic = "".join(chr(0x0660 + int(digit)) for digit in "27013300")
+        self.assertFalse(is_dowlknum(arabic))
 
     def test_normalize_sample_contour(self):
         raw = json.loads((ROOT / "fixtures" / "sample-pond" / "contours.geojson").read_text())

@@ -32,7 +32,10 @@ dev:
 secrets:
     gitleaks detect --source . --redact --no-banner
 
-check: fmt typecheck test build secrets
+clippy:
+    cargo clippy --all-targets --locked -- -D warnings
+
+check: fmt clippy typecheck test build secrets
 
 pipeline-test:
     PYTHONPATH=pipeline python3 -m unittest discover -s pipeline/tests -v

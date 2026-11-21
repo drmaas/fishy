@@ -19,6 +19,17 @@ const DEFAULTS = {
   hillshadeUrl: "/samples/sample-pond-hillshade.pmtiles",
 };
 
+const MAPTILER_URL = /https:\/\/api\.maptiler\.com(\/[^?\s]*)(\?[^"\s]*)?/g;
+
+/** Outdoor style, its sprite, TileJSON, tiles, and glyphs. Nothing else. */
+const ALLOWED_UPSTREAM = [
+  /^\/maps\/outdoor-v2\/style\.json$/,
+  /^\/maps\/outdoor-v2\/sprite(?:@2x)?(?:\.(?:json|png))?$/,
+  /^\/tiles\/[A-Za-z0-9._-]+\/tiles\.json$/,
+  /^\/tiles\/[A-Za-z0-9._-]+\/\d+\/\d+\/\d+\.(?:pbf|mvt|png|jpe?g|webp)$/,
+  /^\/fonts\/[^/]+\/\d+-\d+\.pbf$/,
+];
+
 export function maptilerKey(env: FishyEnv): string | undefined {
   const value = env.MAPTILER_API_KEY;
   return value && value.length > 0 ? value : undefined;
@@ -35,43 +46,70 @@ export function publicConfig(env: FishyEnv): PublicConfig {
   };
 }
 
-function stripKeyParams(value: unknown): unknown {
-  if (typeof value === "string") {
-    if (value.includes("://")) {
-      try {
-        const url = new URL(value);
-        url.searchParams.delete("key");
-        return url.toString();
-      } catch {
-        return value;
-      }
-    }
-    return value;
+export function isRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+export function cacheControlForStatus(status: number): string {
+  if (status >= 200 && status < 300) return "public, max-age=86400";
+  return "no-store";
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
   }
-  if (Array.isArray(value)) return value.map(stripKeyParams);
+}
+
+export function isAllowedMaptilerPath(path: string): boolean {
+  if (!path.startsWith("/") || path.includes("\\") || path.includes("\0")) return false;
+  const decoded = path.split("/").map(decodeSegment).join("/");
+  if (decoded.includes("..") || decoded.includes("//")) return false;
+  return ALLOWED_UPSTREAM.some((pattern) => pattern.test(decoded));
+}
+
+function rewriteMaptilerUrl(value: string, origin: string): string {
+  return value.replace(MAPTILER_URL, (_match, path: string, query: string | undefined) => {
+    const params = new URLSearchParams((query ?? "").replace(/^\?/, ""));
+    params.delete("key");
+    const rest = params.toString();
+    return `${origin}/api/basemap/upstream${path}${rest ? `?${rest}` : ""}`;
+  });
+}
+
+function rewriteValue(value: unknown, origin: string): unknown {
+  if (typeof value === "string") return rewriteMaptilerUrl(value, origin);
+  if (Array.isArray(value)) return value.map((item) => rewriteValue(item, origin));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(value)) out[key] = stripKeyParams(nested);
+    for (const [key, nested] of Object.entries(value)) out[key] = rewriteValue(nested, origin);
     return out;
   }
   return value;
 }
 
-/** Point MapTiler style URLs at the Worker and drop any embedded key. */
+/** Point every MapTiler URL at the Worker and drop embedded keys. Template braces stay literal. */
 export function rewriteMaptilerStyle(style: unknown, origin: string): unknown {
-  const text = JSON.stringify(style).replaceAll(
-    "https://api.maptiler.com",
-    `${origin}/api/basemap/upstream`,
-  );
-  return stripKeyParams(JSON.parse(text));
+  return rewriteValue(style, origin);
 }
 
-export function upstreamMaptilerUrl(pathname: string, search: string, key: string): string {
-  const rest = pathname.replace(/^\/api\/basemap\/upstream/, "") || "/";
-  const url = new URL(`https://api.maptiler.com${rest}`);
+/**
+ * Build an upstream MapTiler URL for an allowed path.
+ * Returns null when the path is not style, sprite, TileJSON, a tile, or a glyph.
+ * The key is attached here and must not be copied into a JSON body.
+ */
+export function upstreamMaptilerUrl(pathname: string, search: string, key: string): string | null {
+  const raw = pathname.replace(/^\/api\/basemap\/upstream/, "") || "/";
+  const path = raw.split("?")[0] ?? "/";
+  if (!isAllowedMaptilerPath(path)) return null;
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   params.delete("key");
   params.set("key", key);
-  url.search = params.toString();
-  return url.toString();
+  const encoded = path
+    .split("/")
+    .map((segment) => (segment.includes("{") ? segment : encodeURIComponent(decodeSegment(segment))))
+    .join("/");
+  return `https://api.maptiler.com${encoded}?${params.toString()}`;
 }

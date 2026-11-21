@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-only
 import os
 import unittest
 from pathlib import Path
 
 from fishy_pipeline.commands import (
     contours_geojson_url,
+    gdalwarp_to_wgs84_args,
     ogr_reproject_args,
     r2_put_command,
     tippecanoe_args,
@@ -21,48 +23,50 @@ class CommandTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             contours_geojson_url("12")
 
-    def test_tool_args_do_not_include_secrets(self):
-        ogr = ogr_reproject_args("in.shp", "out.geojson")
-        self.assertEqual(ogr[:4], ["ogr2ogr", "-f", "GeoJSON", "-t_srs"])
-        tiles = tippecanoe_args("out.pmtiles", [("contours", "contours.geojson")])
-        self.assertIn("-L", tiles)
-        self.assertIn("contours:contours.geojson", tiles)
+    def test_tool_args_reproject_before_tiling(self):
+        ogr = ogr_reproject_args("in.shp", "out.geojson", "EPSG:26915")
+        self.assertEqual(ogr[:6], ["ogr2ogr", "-f", "GeoJSON", "-t_srs", "EPSG:4326", "-s_srs"])
+        self.assertIn("EPSG:26915", ogr)
+        warp = gdalwarp_to_wgs84_args("dem.tif", "wgs.tif", "EPSG:26915")
+        self.assertEqual(warp[0], "gdalwarp")
+        self.assertIn("EPSG:26915", warp)
+        self.assertIn("EPSG:4326", warp)
+        tiles = tippecanoe_args("out.pmtiles", [("contours", "contours-4326.geojson")])
+        self.assertIn("contours:contours-4326.geojson", tiles)
 
     def test_r2_command_reads_env(self):
-        env = {
-            "CLOUDFLARE_API_TOKEN": "token-value-not-in-argv",
-            "CLOUDFLARE_ACCOUNT_ID": "account-value-not-in-argv",
-        }
-        previous = {key: os.environ.get(key) for key in env}
-        os.environ.update(env)
+        keys = ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
+        previous = {key: os.environ.get(key) for key in keys}
         try:
+            os.environ["CLOUDFLARE_API_TOKEN"] = "token-value-not-in-argv"
+            os.environ["CLOUDFLARE_ACCOUNT_ID"] = "account-value-not-in-argv"
             command = r2_put_command("lake.pmtiles", "fishy-tiles", "mn/sample.pmtiles")
+            self.assertEqual(
+                command,
+                [
+                    "wrangler",
+                    "r2",
+                    "object",
+                    "put",
+                    "fishy-tiles/mn/sample.pmtiles",
+                    "--file",
+                    "lake.pmtiles",
+                    "--remote",
+                ],
+            )
+            joined = " ".join(command)
+            self.assertNotIn("token-value-not-in-argv", joined)
+            self.assertNotIn("account-value-not-in-argv", joined)
+            os.environ.pop("CLOUDFLARE_API_TOKEN")
+            os.environ.pop("CLOUDFLARE_ACCOUNT_ID")
+            with self.assertRaises(RuntimeError):
+                r2_put_command("lake.pmtiles", "fishy-tiles", "mn/sample.pmtiles")
         finally:
             for key, value in previous.items():
                 if value is None:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
-        self.assertEqual(
-            command,
-            [
-                "wrangler",
-                "r2",
-                "object",
-                "put",
-                "fishy-tiles/mn/sample.pmtiles",
-                "--file",
-                "lake.pmtiles",
-                "--remote",
-            ],
-        )
-        joined = " ".join(command)
-        self.assertNotIn("token-value-not-in-argv", joined)
-        self.assertNotIn("account-value-not-in-argv", joined)
-        os.environ.pop("CLOUDFLARE_API_TOKEN", None)
-        os.environ.pop("CLOUDFLARE_ACCOUNT_ID", None)
-        with self.assertRaises(RuntimeError):
-            r2_put_command("lake.pmtiles", "fishy-tiles", "mn/sample.pmtiles")
 
 
 class ArchiveTest(unittest.TestCase):

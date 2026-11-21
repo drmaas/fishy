@@ -28,7 +28,7 @@ Contour fields used by the pipeline:
 - `dowlknum` is the 8-digit Division of Waters lake id.
 - `lake_name` is the DNR name.
 
-The outline and DEM are NAD83 UTM zone 15 (EPSG:26915). The pipeline reprojects vectors to EPSG:4326 with `ogr2ogr -t_srs EPSG:4326`.
+The outline and DEM are NAD83 UTM zone 15 (EPSG:26915). The pipeline reprojects every vector layer to EPSG:4326 with `ogr2ogr -s_srs EPSG:26915 -t_srs EPSG:4326` and warps the depth grid with `gdalwarp` before tiling.
 
 A one-lake GeoJSON extract (verified with `dowlknum=27013300`, Lake Minnetonka; the service returned features):
 

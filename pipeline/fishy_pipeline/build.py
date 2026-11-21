@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Turn a small lake directory into vector, terrain, and hillshade PMTiles."""
 
 from __future__ import annotations
@@ -12,9 +13,11 @@ from fishy_pipeline.commands import (
     find_tool,
     gdal_mbtiles_args,
     gdal_translate_asc_args,
+    gdalwarp_to_wgs84_args,
     gdaldem_hillshade_args,
     ogr_reproject_args,
     pmtiles_convert_args,
+    read_source_srs,
     tippecanoe_args,
 )
 from fishy_pipeline.depth import normalize_properties
@@ -51,12 +54,14 @@ def _run(command: list[str]) -> None:
         raise SystemExit(f"command failed ({completed.returncode}): {command[0]}")
 
 
-def write_elevation_and_terrarium(dem_asc: Path, work: Path) -> tuple[Path, Path]:
+def write_elevation_and_terrarium(dem_asc: Path, work: Path, source_srs: str) -> tuple[Path, Path]:
     from osgeo import gdal
 
     gdal.UseExceptions()
+    raw_tif = work / "depth_raw.tif"
     depth_tif = work / "depth_ft.tif"
-    _run(gdal_translate_asc_args(str(dem_asc), str(depth_tif)))
+    _run(gdal_translate_asc_args(str(dem_asc), str(raw_tif)))
+    _run(gdalwarp_to_wgs84_args(str(raw_tif), str(depth_tif), source_srs))
     depth_ds = gdal.Open(str(depth_tif))
     band = depth_ds.GetRasterBand(1)
     depths = band.ReadAsArray().astype("float64")
@@ -99,11 +104,23 @@ def raster_pmtiles(source: Path, dest: Path, work: Path, label: str) -> None:
     _run([pmtiles, *pmtiles_convert_args(str(mbtiles), str(dest))[1:]])
 
 
+def reproject_vectors(ogr: str, staged: dict[str, Path], work: Path, source_srs: str) -> dict[str, Path]:
+    reprojected: dict[str, Path] = {}
+    for name, path in staged.items():
+        dest = work / f"{name}-4326.geojson"
+        _run([ogr, *ogr_reproject_args(str(path), str(dest), source_srs)[1:]])
+        if not dest.exists():
+            raise SystemExit(f"ogr2ogr did not write {name}")
+        reprojected[name] = dest
+    return reprojected
+
+
 def build_lake(source: Path, dest: Path) -> None:
     tippecanoe = find_tool("tippecanoe", "TIPPECANOE")
     ogr = find_tool("ogr2ogr", "OGR2OGR")
     if not tippecanoe or not ogr:
         raise SystemExit("tippecanoe and ogr2ogr must be on PATH")
+    source_srs = read_source_srs(str(source))
     dest.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="fishy-") as raw:
         work = Path(raw)
@@ -121,10 +138,7 @@ def build_lake(source: Path, dest: Path) -> None:
         write_geojson(staged["lakes"], lakes)
         write_geojson(staged["contours"], contours)
         write_geojson(staged["zones"], zones)
-        reprojected = work / "contours-4326.geojson"
-        _run([ogr, *ogr_reproject_args(str(staged["contours"]), str(reprojected))[1:]])
-        if not reprojected.exists():
-            raise SystemExit("ogr2ogr did not write contours")
+        reprojected = reproject_vectors(ogr, staged, work, source_srs)
         vector = dest / "sample-pond.pmtiles"
         _run(
             [
@@ -132,14 +146,14 @@ def build_lake(source: Path, dest: Path) -> None:
                 *tippecanoe_args(
                     str(vector),
                     [
-                        ("lakes", str(staged["lakes"])),
-                        ("contours", str(staged["contours"])),
-                        ("zones", str(staged["zones"])),
+                        ("lakes", str(reprojected["lakes"])),
+                        ("contours", str(reprojected["contours"])),
+                        ("zones", str(reprojected["zones"])),
                     ],
                 )[1:],
             ]
         )
-        elev_tif, terrain_tif = write_elevation_and_terrarium(source / "dem.asc", work)
+        elev_tif, terrain_tif = write_elevation_and_terrarium(source / "dem.asc", work, source_srs)
         hillshade = work / "hillshade.tif"
         _run(gdaldem_hillshade_args(str(elev_tif), str(hillshade)))
         raster_pmtiles(terrain_tif, dest / "sample-pond-terrain.pmtiles", work, "terrain")
