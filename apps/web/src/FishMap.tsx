@@ -1,12 +1,12 @@
 import {
   lakeFromProperties,
   OPENFREEMAP_STYLE,
-  SAMPLE_VIEW,
   type DepthUnit,
   type LakeInfo,
 } from "@fishy/core";
 import { useEffect, useRef } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
+import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 interface FishMapProps {
@@ -16,8 +16,15 @@ interface FishMapProps {
   basemap: "openfreemap" | "none" | "maptiler";
   maptilerStyleUrl?: string;
   unit: DepthUnit;
+  stateBounds: [number, number, number, number];
+  nearby: GeoJsonFeatureCollection | null;
+  selected: LakeDetail | null;
   onLake: (lake: LakeInfo) => void;
+  onSelectDowlknum: (dowlknum: string) => void;
+  onExtent: (extent: LakeExtent, zoom: number) => void;
 }
+
+const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
 
 export function FishMap({
   contoursUrl,
@@ -26,13 +33,23 @@ export function FishMap({
   basemap,
   maptilerStyleUrl,
   unit,
+  stateBounds,
+  nearby,
+  selected,
   onLake,
+  onSelectDowlknum,
+  onExtent,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
+  const onSelectRef = useRef(onSelectDowlknum);
+  const onExtentRef = useRef(onExtent);
   const unitRef = useRef(unit);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
+  const fittedLake = useRef<string | null>(null);
   onLakeRef.current = onLake;
+  onSelectRef.current = onSelectDowlknum;
+  onExtentRef.current = onExtent;
   unitRef.current = unit;
 
   useEffect(() => {
@@ -69,15 +86,28 @@ export function FishMap({
       map = new maplibregl.Map({
         container: node,
         style,
-        center: [SAMPLE_VIEW.longitude, SAMPLE_VIEW.latitude],
-        zoom: SAMPLE_VIEW.zoom,
-        pitch: 55,
-        bearing: -18,
+        bounds: stateBounds,
+        fitBoundsOptions: { padding: 28, pitch: 0, bearing: 0 },
         attributionControl: false,
         maxPitch: 70,
       });
       mapRef.current = map;
-      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+
+      const reportExtent = () => {
+        if (!map) return;
+        const bounds = map.getBounds();
+        onExtentRef.current(
+          {
+            west: bounds.getWest(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            north: bounds.getNorth(),
+          },
+          map.getZoom(),
+        );
+      };
+
       map.on("load", () => {
         if (!map) return;
         const sources = fishSources(contoursUrl, terrainUrl, hillshadeUrl);
@@ -126,12 +156,70 @@ export function FishMap({
             paint: { "text-color": "#082433", "text-halo-color": "#f4f7f8", "text-halo-width": 1.2 },
           });
         }
+
+        map.addSource("survey-nearby", { type: "geojson", data: EMPTY });
+        map.addSource("survey-outline", { type: "geojson", data: EMPTY });
+        map.addSource("survey-contours", { type: "geojson", data: EMPTY });
+
+        map.addLayer({
+          id: "survey-nearby-fill",
+          type: "fill",
+          source: "survey-nearby",
+          paint: { "fill-color": "#1c6b8a", "fill-opacity": 0.18 },
+        });
+        map.addLayer({
+          id: "survey-nearby-line",
+          type: "line",
+          source: "survey-nearby",
+          paint: { "line-color": "#0b4a63", "line-width": 1.2 },
+        });
+        map.addLayer({
+          id: "survey-outline-fill",
+          type: "fill",
+          source: "survey-outline",
+          paint: { "fill-color": "#0b4a63", "fill-opacity": 0.08 },
+        });
+        map.addLayer({
+          id: "survey-outline-line",
+          type: "line",
+          source: "survey-outline",
+          paint: { "line-color": "#062433", "line-width": 1.8 },
+        });
+        map.addLayer({
+          id: "survey-depth-lines",
+          type: "line",
+          source: "survey-contours",
+          paint: { "line-color": "#083044", "line-width": 1.35 },
+        });
+        map.addLayer({
+          id: "survey-depth-labels",
+          type: "symbol",
+          source: "survey-contours",
+          layout: {
+            "text-field": contourLabelField(unitRef.current),
+            "symbol-placement": "line",
+            "text-size": 12,
+          },
+          paint: { "text-color": "#082433", "text-halo-color": "#f4f7f8", "text-halo-width": 1.2 },
+        });
+
         if (sources.terrain && !map.getSource("terrain")) {
           map.addSource("terrain", sources.terrain);
           map.setTerrain({ source: "terrain", exaggeration: 1.4 });
         }
+        reportExtent();
       });
+
+      map.on("moveend", reportExtent);
+
       map.on("click", (event) => {
+        const surveyLayers = ["survey-nearby-fill", "survey-outline-fill"];
+        const surveyHits = map?.queryRenderedFeatures(event.point, { layers: surveyLayers }) ?? [];
+        const dowlknum = String(surveyHits[0]?.properties?.dowlknum ?? "");
+        if (/^[0-9]{8}$/.test(dowlknum)) {
+          onSelectRef.current(dowlknum);
+          return;
+        }
         const hits = map?.queryRenderedFeatures(event.point, { layers: ["lake-fill"] }) ?? [];
         const lake = lakeFromProperties(hits[0]?.properties as Record<string, unknown> | undefined);
         if (lake) onLakeRef.current(lake);
@@ -141,15 +229,45 @@ export function FishMap({
     return () => {
       cancelled = true;
       mapRef.current = null;
+      fittedLake.current = null;
       map?.remove();
     };
-  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, terrainUrl]);
+  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, stateBounds, terrainUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map?.getLayer("depth-labels")) return;
     map.setLayoutProperty("depth-labels", "text-field", contourLabelField(unit));
+    if (map.getLayer("survey-depth-labels")) {
+      map.setLayoutProperty("survey-depth-labels", "text-field", contourLabelField(unit));
+    }
   }, [unit]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const source = map?.getSource("survey-nearby") as import("maplibre-gl").GeoJSONSource | undefined;
+    source?.setData(nearby ?? EMPTY);
+  }, [nearby]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const outline = map.getSource("survey-outline") as import("maplibre-gl").GeoJSONSource | undefined;
+    const contours = map.getSource("survey-contours") as import("maplibre-gl").GeoJSONSource | undefined;
+    outline?.setData(selected?.outline ?? EMPTY);
+    contours?.setData(selected?.contours ?? EMPTY);
+    if (selected && fittedLake.current !== selected.dowlknum) {
+      fittedLake.current = selected.dowlknum;
+      map.fitBounds(
+        [
+          [selected.extent.west, selected.extent.south],
+          [selected.extent.east, selected.extent.north],
+        ],
+        { padding: 56, duration: 800, pitch: 0 },
+      );
+    }
+    if (!selected) fittedLake.current = null;
+  }, [selected]);
 
   return <div ref={nodeRef} className="map" role="application" aria-label="Lake map" />;
 }

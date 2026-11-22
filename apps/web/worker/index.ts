@@ -8,8 +8,31 @@ import {
   rewriteMaptilerStyle,
   upstreamMaptilerUrl,
 } from "../lib/server/config";
+import {
+  buildLakeDetail,
+  buildSearchWhere,
+  contoursQueryUrl,
+  dnrFetchHeaders,
+  extentQueryUrl,
+  isSupportedState,
+  LAKE_CACHE_CONTROL,
+  maxDepthQueryUrl,
+  nearbyQueryUrl,
+  normalizeOutlineCollection,
+  normalizeSearchHits,
+  outlineQueryUrl,
+  parseBbox,
+  parseExtent,
+  parseMaxDepth,
+  sanitizeSearchQuery,
+  searchQueryUrl,
+  shoreAreaQueryUrl,
+  type GeoJsonFeatureCollection,
+} from "../lib/server/lakes";
+import { isDowlknum } from "@fishy/core";
 
 const STYLE_PATH = "/maps/outdoor-v2/style.json";
+const DNR_HOST = "enterprise.gisdata.mn.gov";
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -24,6 +47,8 @@ export default {
       if (url.pathname === "/api/config") {
         return json(publicConfig(env), request.method);
       }
+      const lakeResponse = await handleLakes(request, url);
+      if (lakeResponse) return lakeResponse;
       const key = maptilerKey(env);
       if (url.pathname === "/api/basemap/style.json") {
         if (!key) return text("basemap unavailable", 404);
@@ -45,10 +70,143 @@ function text(body: string, status: number): Response {
   return new Response(body, { status, headers: { "cache-control": "no-store" } });
 }
 
-function json(body: unknown, method: string): Response {
+function json(body: unknown, method: string, cacheControl = "no-store"): Response {
   return new Response(method === "HEAD" ? null : JSON.stringify(body), {
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": cacheControl },
   });
+}
+
+async function handleLakes(request: Request, url: URL): Promise<Response | null> {
+  if (url.pathname === "/api/lakes") {
+    return cachedLakeResponse(request, () => searchLakes(request, url));
+  }
+  if (url.pathname === "/api/lakes/nearby") {
+    return cachedLakeResponse(request, () => nearbyLakes(request, url));
+  }
+  const match = /^\/api\/lakes\/([0-9]{8})$/.exec(url.pathname);
+  if (match) {
+    const dowlknum = match[1] ?? "";
+    return cachedLakeResponse(request, () => lakeDetail(request, url, dowlknum));
+  }
+  if (url.pathname.startsWith("/api/lakes/")) {
+    return text("not found", 404);
+  }
+  return null;
+}
+
+async function cachedLakeResponse(request: Request, build: () => Promise<Response>): Promise<Response> {
+  const cache = typeof caches !== "undefined" ? caches.default : undefined;
+  if (cache) {
+    const hit = await cache.match(request);
+    if (hit) return hit;
+  }
+  const response = await build();
+  if (cache && response.ok && response.headers.get("cache-control") === LAKE_CACHE_CONTROL) {
+    await cache.put(request, response.clone());
+  }
+  return response;
+}
+
+async function searchLakes(request: Request, url: URL): Promise<Response> {
+  if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
+  const query = sanitizeSearchQuery(url.searchParams.get("q"));
+  if (!query) return text("not found", 404);
+  const upstream = await dnrFetch(searchQueryUrl(buildSearchWhere(query)));
+  if (!upstream.ok) return text("upstream failed", 502);
+  const body = (await upstream.json()) as {
+    features?: Array<{ attributes?: Record<string, unknown> }>;
+    error?: unknown;
+  };
+  if (body.error) return text("upstream failed", 502);
+  return json({ lakes: normalizeSearchHits(body.features ?? []) }, request.method, LAKE_CACHE_CONTROL);
+}
+
+async function nearbyLakes(request: Request, url: URL): Promise<Response> {
+  if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
+  const bbox = parseBbox(
+    url.searchParams.get("west"),
+    url.searchParams.get("south"),
+    url.searchParams.get("east"),
+    url.searchParams.get("north"),
+  );
+  if (!bbox) return text("not found", 404);
+  const upstream = await dnrFetch(nearbyQueryUrl(bbox));
+  if (!upstream.ok) return text("upstream failed", 502);
+  const collection = (await upstream.json()) as GeoJsonFeatureCollection;
+  if (collection.type !== "FeatureCollection" || !Array.isArray(collection.features)) {
+    return text("upstream failed", 502);
+  }
+  return json(normalizeOutlineCollection(collection), request.method, LAKE_CACHE_CONTROL);
+}
+
+async function lakeDetail(request: Request, url: URL, dowlknum: string): Promise<Response> {
+  if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
+  if (!isDowlknum(dowlknum)) return text("not found", 404);
+
+  const [extentRes, outlineRes, contoursRes, maxDepthRes, shoreRes] = await Promise.all([
+    dnrFetch(extentQueryUrl(dowlknum)),
+    dnrFetch(outlineQueryUrl(dowlknum)),
+    dnrFetch(contoursQueryUrl(dowlknum)),
+    dnrFetch(maxDepthQueryUrl(dowlknum)),
+    dnrFetch(shoreAreaQueryUrl(dowlknum)),
+  ]);
+  if (![extentRes, outlineRes, contoursRes, maxDepthRes, shoreRes].every((response) => response.ok)) {
+    return text("upstream failed", 502);
+  }
+
+  const extentBody = (await extentRes.json()) as { extent?: Record<string, unknown> | null };
+  const outline = (await outlineRes.json()) as GeoJsonFeatureCollection;
+  const contours = (await contoursRes.json()) as GeoJsonFeatureCollection;
+  const maxDepthBody = (await maxDepthRes.json()) as {
+    features?: Array<{ attributes?: Record<string, unknown> }>;
+  };
+  const shoreBody = (await shoreRes.json()) as {
+    features?: Array<{ attributes?: Record<string, unknown> }>;
+  };
+
+  const extent = parseExtent(extentBody);
+  const maxDepthFt = parseMaxDepth(maxDepthBody);
+  const shore = shoreBody.features?.[0]?.attributes;
+  if (!extent || maxDepthFt === null || !shore) return text("not found", 404);
+  if (outline.type !== "FeatureCollection" || contours.type !== "FeatureCollection") {
+    return text("upstream failed", 502);
+  }
+  if (outline.features.length === 0 || contours.features.length === 0) return text("not found", 404);
+
+  const acres = shore.acres;
+  const areaAcres = typeof acres === "number" && Number.isFinite(acres) ? acres : null;
+  if (areaAcres === null) return text("not found", 404);
+  const nameValue = shore.lake_name;
+  const name = typeof nameValue === "string" && nameValue.trim() !== "" ? nameValue : "Unnamed lake";
+
+  return json(
+    buildLakeDetail({
+      dowlknum,
+      name,
+      areaAcres,
+      maxDepthFt,
+      extent,
+      outline,
+      contours,
+    }),
+    request.method,
+    LAKE_CACHE_CONTROL,
+  );
+}
+
+async function dnrFetch(target: string): Promise<Response> {
+  const upstream = await fetch(target, {
+    method: "GET",
+    redirect: "manual",
+    headers: dnrFetchHeaders(),
+  });
+  if (isRedirectStatus(upstream.status)) return text("upstream failed", 502);
+  try {
+    if (new URL(upstream.url || target).host !== DNR_HOST) return text("upstream failed", 502);
+  } catch {
+    return text("upstream failed", 502);
+  }
+  return upstream;
 }
 
 async function proxyStyle(request: Request, key: string): Promise<Response> {
