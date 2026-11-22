@@ -9,7 +9,7 @@ export function locationHint(state: LocationHintState): string | null {
   if (state.status === "idle") return null;
   if (state.status === "error") {
     if (state.code === 1) {
-      return "Location is blocked. Allow location for this site, then reload.";
+      return "Location is blocked. Allow location for this site in browser settings.";
     }
     if (state.code === 3) return "GPS timed out. Try again.";
     return "No GPS fix. Move outdoors and try again.";

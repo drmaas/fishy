@@ -1,5 +1,5 @@
 import { formatDepth, type DepthUnit, type LakeInfo } from "@fishy/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { DepthLegend } from "./DepthLegend.tsx";
 import { FishMap } from "./FishMap.tsx";
 import {
@@ -13,7 +13,15 @@ import {
 } from "./lakeApi.ts";
 import { LakePanel } from "./LakePanel.tsx";
 import { LakeSearch } from "./LakeSearch.tsx";
-import { locationHint, type LocationHintState } from "./locationHint.ts";
+import { LocationHintActions } from "./LocationHintActions.tsx";
+import { LocationToast } from "./LocationToast.tsx";
+import {
+  locationBannerShowRetry,
+  locationBannerVisible,
+  permissionChangeShouldRetry,
+  reduceLocationBanner,
+} from "./locationBanner.ts";
+import { locationHint } from "./locationHint.ts";
 import { STATES, stateById } from "./states.ts";
 
 interface Config {
@@ -72,7 +80,12 @@ export function App() {
   const [nearby, setNearby] = useState<GeoJsonFeatureCollection | null>(null);
   const [creditsOpen, setCreditsOpen] = useState(false);
   const [loadingLake, setLoadingLake] = useState(false);
-  const [locationState, setLocationState] = useState<LocationHintState>({ status: "idle" });
+  const [locationBanner, dispatchLocationBanner] = useReducer(reduceLocationBanner, {
+    location: { status: "idle" },
+    dismissed: false,
+  });
+  const locationRetryRef = useRef<(() => void) | null>(null);
+  const locationPermissionGrantRef = useRef<(() => void) | null>(null);
   const [chromeOpen, setChromeOpen] = useState(() => readOpenFlag("fishy-chrome-open", true));
   const [panelOpen, setPanelOpen] = useState(() => readOpenFlag("fishy-panel-open", true));
   const nearbyTimer = useRef<number | null>(null);
@@ -168,7 +181,44 @@ export function App() {
     [stateId],
   );
 
-  const gpsHint = locationHint(locationState);
+  const locationMessageVisible = locationBannerVisible(locationBanner);
+  const gpsHint = locationMessageVisible ? locationHint(locationBanner.location) : null;
+  const mapLocationToastVisible = !chromeOpen && locationMessageVisible && gpsHint;
+  const chromeLocationErrorActions =
+    chromeOpen && locationBannerShowRetry(locationBanner) && locationMessageVisible;
+
+  const retryLocation = useCallback(() => {
+    dispatchLocationBanner({ type: "attempt" });
+    locationRetryRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    const permissions = navigator.permissions;
+    if (!permissions?.query) return undefined;
+
+    let disposed = false;
+    let permissionStatus: PermissionStatus | undefined;
+
+    const onPermissionChange = () => {
+      if (!permissionStatus || !permissionChangeShouldRetry(permissionStatus.state)) return;
+      dispatchLocationBanner({ type: "permission_granted" });
+      locationPermissionGrantRef.current?.();
+    };
+
+    void permissions
+      .query({ name: "geolocation" })
+      .then((status) => {
+        if (disposed) return;
+        permissionStatus = status;
+        status.addEventListener("change", onPermissionChange);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      permissionStatus?.removeEventListener("change", onPermissionChange);
+    };
+  }, []);
   const appClass = [
     "app",
     chromeOpen ? "chrome-open" : "chrome-closed",
@@ -230,9 +280,18 @@ export function App() {
             </select>
           </label>
         </div>
-        <p className="hint">
-          {gpsHint ?? (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
-        </p>
+        <div className="hint chrome-hint">
+          <p className="chrome-hint-text">
+            {gpsHint ?? (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
+          </p>
+          {chromeLocationErrorActions && (
+            <LocationHintActions
+              onRetry={retryLocation}
+              onDismiss={() => dispatchLocationBanner({ type: "dismiss" })}
+              className="chrome-hint-actions"
+            />
+          )}
+        </div>
       </header>
       {!chromeOpen && (
         <button
@@ -245,7 +304,13 @@ export function App() {
           Show controls
         </button>
       )}
-      {!chromeOpen && gpsHint && <p className="location-toast hint">{gpsHint}</p>}
+      {mapLocationToastVisible && (
+        <LocationToast
+          model={locationBanner}
+          onDismiss={() => dispatchLocationBanner({ type: "dismiss" })}
+          onRetry={retryLocation}
+        />
+      )}
       <FishMap
         contoursUrl={config.contoursUrl}
         terrainUrl={config.terrainUrl}
@@ -262,7 +327,10 @@ export function App() {
         }}
         onSelectDowlknum={(dowlknum) => void selectLake(dowlknum, true)}
         onExtent={onExtent}
-        onLocation={setLocationState}
+        onLocation={(state) => dispatchLocationBanner({ type: "location", state })}
+        onLocationAttempt={() => dispatchLocationBanner({ type: "attempt" })}
+        locationRetryRef={locationRetryRef}
+        locationPermissionGrantRef={locationPermissionGrantRef}
       />
       <DepthLegend unit={unit} />
       {lake && (

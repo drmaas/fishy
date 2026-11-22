@@ -4,9 +4,20 @@ import {
   type DepthUnit,
   type LakeInfo,
 } from "@fishy/core";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
+import { GEOLOCATION_ERROR, shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
+import { prepareGeolocateButtonForRetry, readGeolocateWatchState, shouldInterceptGeolocateButtonClick } from "./geolocateRetry.ts";
+import {
+  armGeolocateHangTimer,
+  createFishyGeolocateControl,
+  geolocateButtonFromMap,
+  shouldRecreateGeolocateAfterError,
+  startFreshGeolocate as startFreshGeolocateSession,
+  startGeolocateAfterPermissionGrant,
+  type GeolocateSession,
+} from "./mapGeolocateSession.ts";
 import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
@@ -24,6 +35,9 @@ interface FishMapProps {
   onSelectDowlknum: (dowlknum: string) => void;
   onExtent: (extent: LakeExtent, zoom: number) => void;
   onLocation: (state: LocationHintState) => void;
+  onLocationAttempt: () => void;
+  locationRetryRef: MutableRefObject<(() => void) | null>;
+  locationPermissionGrantRef: MutableRefObject<(() => void) | null>;
 }
 
 const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
@@ -49,12 +63,16 @@ export function FishMap({
   onSelectDowlknum,
   onExtent,
   onLocation,
+  onLocationAttempt,
+  locationRetryRef,
+  locationPermissionGrantRef,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
   const onSelectRef = useRef(onSelectDowlknum);
   const onExtentRef = useRef(onExtent);
   const onLocationRef = useRef(onLocation);
+  const onLocationAttemptRef = useRef(onLocationAttempt);
   const unitRef = useRef(unit);
   const selectedRef = useRef(selected);
   const nearbyRef = useRef(nearby);
@@ -62,10 +80,15 @@ export function FishMap({
   const mapReady = useRef(false);
   const fittedLake = useRef<string | null>(null);
   const locationLock = useRef(false);
+  const lastLocationRef = useRef<LocationHintState>({ status: "idle" });
   onLakeRef.current = onLake;
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
-  onLocationRef.current = onLocation;
+  onLocationRef.current = (state) => {
+    lastLocationRef.current = state;
+    onLocation(state);
+  };
+  onLocationAttemptRef.current = onLocationAttempt;
   unitRef.current = unit;
   selectedRef.current = selected;
   nearbyRef.current = nearby;
@@ -74,6 +97,9 @@ export function FishMap({
     const node = nodeRef.current;
     if (!node) return undefined;
     let map: import("maplibre-gl").Map | undefined;
+    let geolocateButton: HTMLButtonElement | null = null;
+    let onGeolocateButtonClick: ((event: Event) => void) | null = null;
+    let clearHangTimer: (() => void) | undefined;
     let cancelled = false;
     mapReady.current = false;
     fittedLake.current = null;
@@ -126,48 +152,130 @@ export function FishMap({
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
-      const geolocate = new maplibregl.GeolocateControl({
-        positionOptions: { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 },
-        trackUserLocation: true,
-        showUserLocation: true,
-        showAccuracyCircle: true,
-        zoomToUserAccuracy: true,
-        fitBoundsOptions: { maxZoom: 16, padding: 80 },
-      });
+      let geolocate = createFishyGeolocateControl(maplibregl);
       map.addControl(geolocate, "bottom-right");
+      const session: GeolocateSession = { control: geolocate, needsRecreate: false };
+      const geolocateButtonFor = (): HTMLButtonElement | null => geolocateButtonFromMap(map);
+      const detachGeolocateClick = () => {
+        if (geolocateButton && onGeolocateButtonClick) {
+          geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
+        }
+      };
+      const attachGeolocateClick = () => {
+        geolocateButton = geolocateButtonFor();
+        if (geolocateButton && onGeolocateButtonClick) {
+          geolocateButton.addEventListener("click", onGeolocateButtonClick, true);
+        }
+      };
       // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
       // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
       let gpsBackgrounded = false;
-      geolocate.on("trackuserlocationstart", () => {
-        locationLock.current = true;
-        fittedLake.current = null;
-        gpsBackgrounded = false;
-      });
-      geolocate.on("geolocate", (event) => {
-        const accuracy = event.coords.accuracy;
-        onLocationRef.current({
-          status: "active",
-          accuracyMeters: typeof accuracy === "number" ? accuracy : null,
+      let geolocationFailed = false;
+      function wireGeolocate(control: typeof geolocate) {
+        control.on("trackuserlocationstart", () => {
+          geolocationFailed = false;
+          clearHangTimer?.();
+          onLocationAttemptRef.current();
+          locationLock.current = true;
+          fittedLake.current = null;
+          gpsBackgrounded = false;
+          clearHangTimer = armGeolocateHangTimer(geolocateButtonFor(), () => {
+            geolocationFailed = true;
+            onLocationRef.current({ status: "error", code: GEOLOCATION_ERROR.TIMEOUT });
+          });
         });
-      });
-      geolocate.on("error", (event) => {
-        onLocationRef.current({ status: "error", code: event.code });
-      });
-      geolocate.on("userlocationlostfocus", () => {
-        gpsBackgrounded = true;
-      });
-      geolocate.on("trackuserlocationend", () => {
-        locationLock.current = false;
-        onLocationRef.current({ status: "idle" });
-        queueMicrotask(() => {
-          if (gpsBackgrounded) {
-            gpsBackgrounded = false;
-            return;
+        control.on("geolocate", (event) => {
+          geolocationFailed = false;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          const button = geolocateButtonFor();
+          prepareGeolocateButtonForRetry(button);
+          const accuracy = event.coords.accuracy;
+          onLocationRef.current({
+            status: "active",
+            accuracyMeters: typeof accuracy === "number" ? accuracy : null,
+          });
+        });
+        control.on("error", (event) => {
+          geolocationFailed = true;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          if (shouldRecreateGeolocateAfterError(event.code)) {
+            session.needsRecreate = true;
           }
-          const lake = selectedRef.current;
-          if (lake) fitSelectedLake(lake, 800, true);
+          onLocationRef.current({ status: "error", code: event.code });
         });
-      });
+        control.on("userlocationlostfocus", () => {
+          gpsBackgrounded = true;
+        });
+        control.on("trackuserlocationend", () => {
+          locationLock.current = false;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          if (shouldClearLocationOnTrackingEnd(lastLocationRef.current, geolocationFailed)) {
+            onLocationRef.current({ status: "idle" });
+          }
+          queueMicrotask(() => {
+            if (gpsBackgrounded) {
+              gpsBackgrounded = false;
+              return;
+            }
+            const lake = selectedRef.current;
+            if (lake) fitSelectedLake(lake, 800, true);
+          });
+        });
+      }
+      const onGeolocateControlReplaced = (control: typeof geolocate) => {
+        geolocate = control;
+        session.control = control;
+        wireGeolocate(control);
+        attachGeolocateClick();
+      };
+      const onGeolocateStartError = (code: number) => {
+        geolocationFailed = true;
+        onLocationRef.current({ status: "error", code });
+      };
+      const beforeGeolocateReplace = () => {
+        detachGeolocateClick();
+        clearHangTimer?.();
+        clearHangTimer = undefined;
+      };
+      const beginFreshGeolocate = async () => {
+        if (!map) return;
+        await startFreshGeolocateSession(
+          map,
+          maplibregl,
+          session,
+          onGeolocateControlReplaced,
+          onGeolocateStartError,
+          beforeGeolocateReplace,
+        );
+      };
+      locationRetryRef.current = () => {
+        void beginFreshGeolocate();
+      };
+      locationPermissionGrantRef.current = () => {
+        if (!map) return;
+        void startGeolocateAfterPermissionGrant(
+          map,
+          maplibregl,
+          session,
+          onGeolocateControlReplaced,
+          onGeolocateStartError,
+          beforeGeolocateReplace,
+        );
+      };
+      onGeolocateButtonClick = (event: Event) => {
+        const button = event.currentTarget as HTMLButtonElement;
+        onLocationAttemptRef.current();
+        const watchState = readGeolocateWatchState(button);
+        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled) || session.needsRecreate) {
+          event.stopImmediatePropagation();
+          void beginFreshGeolocate();
+        }
+      };
+      wireGeolocate(geolocate);
+      attachGeolocateClick();
 
       const reportExtent = () => {
         if (!map) return;
@@ -322,13 +430,20 @@ export function FishMap({
 
     return () => {
       cancelled = true;
+      clearHangTimer?.();
+      clearHangTimer = undefined;
+      if (geolocateButton && onGeolocateButtonClick) {
+        geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
+      }
+      locationRetryRef.current = null;
+      locationPermissionGrantRef.current = null;
       mapRef.current = null;
       mapReady.current = false;
       fittedLake.current = null;
       onLocationRef.current({ status: "idle" });
       map?.remove();
     };
-  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, stateBounds, terrainUrl]);
+  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
 
   useEffect(() => {
     const map = mapRef.current;

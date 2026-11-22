@@ -19,7 +19,7 @@ describe("locationHint", () => {
 
   it("maps geolocation error codes", () => {
     expect(locationHint({ status: "error", code: 1 })).toBe(
-      "Location is blocked. Allow location for this site, then reload.",
+      "Location is blocked. Allow location for this site in browser settings.",
     );
     expect(locationHint({ status: "error", code: 2 })).toBe("No GPS fix. Move outdoors and try again.");
     expect(locationHint({ status: "error", code: 3 })).toBe("GPS timed out. Try again.");
