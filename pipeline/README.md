@@ -42,7 +42,7 @@ Legacy module names still work: `python3 -m fishy_pipeline.build` and `python3 -
 
 ## Optional dependencies
 
-Heavy Wisconsin tooling (GDAL/rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light:
+Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus GDAL/rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries.
 
 ```bash
 cd pipeline && pip install -e '.[wi]'

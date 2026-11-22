@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from fishy_pipeline.states.wi.wbic import normalize_wbic
+
+HYDRO_CRS_3071_RE = re.compile(r"EPSG::3071|\b3071\b")
 
 
 @dataclass(frozen=True)
@@ -18,9 +21,19 @@ class HydroMatch:
     hydrotype: int | None
 
 
+def _assert_hydro_crs_3071(data: dict) -> None:
+    crs = data.get("crs")
+    if crs is None:
+        raise ValueError("hydro GeoJSON must declare CRS EPSG:3071")
+    blob = json.dumps(crs)
+    if not HYDRO_CRS_3071_RE.search(blob):
+        raise ValueError("hydro GeoJSON CRS must be EPSG:3071")
+
+
 def load_hydro_index(path: Path) -> dict[str, HydroMatch]:
     """Load a GeoJSON FeatureCollection and index lake polygons by WBIC."""
     data = json.loads(path.read_text(encoding="utf-8"))
+    _assert_hydro_crs_3071(data)
     features = data.get("features")
     if not isinstance(features, list):
         raise ValueError("hydro GeoJSON must contain a features array")
@@ -57,7 +70,7 @@ def join_catalog_to_hydro(
     catalog_rows: list,
     hydro_index: dict[str, HydroMatch],
 ) -> tuple[list[dict], list[str]]:
-    """Return manifest entries plus WBICs present in hydro but not in catalog (unused here)."""
+    """Return manifest entries and padded WBICs from catalog rows with no hydro match."""
     joined: list[dict] = []
     unmatched_wbic: list[str] = []
     for row in catalog_rows:

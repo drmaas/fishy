@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CACHE = REPO_ROOT / "pipeline" / ".cache" / "wi"
 DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
 FIXTURE_DIR = REPO_ROOT / "fixtures" / "wi-ingest"
+CATALOG_CACHE_DIRNAME = "catalog"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,41 +97,50 @@ def _filter_rows(rows: list[catalog.CatalogRow], map_key: str | None) -> list[ca
     return out
 
 
+def _resolve_hydro_path(args: argparse.Namespace) -> tuple[Path, str]:
+    if args.fixtures:
+        hydro_path = FIXTURE_DIR / "hydro-snippet.geojson"
+        if not hydro_path.is_file():
+            raise SystemExit("fixtures/wi-ingest is incomplete")
+        return hydro_path, str(hydro_path)
+    if args.hydro is None:
+        raise SystemExit("--hydro is required unless --fixtures")
+    if not args.hydro.is_file():
+        raise SystemExit(f"hydro file not found: {args.hydro}")
+    return args.hydro, str(args.hydro)
+
+
 def run_ingest(args: argparse.Namespace) -> dict:
     cache_dir: Path = args.cache_dir
     work_dir: Path = args.work_dir
+    catalog_cache = cache_dir / CATALOG_CACHE_DIRNAME
     pdf_dir = cache_dir / "pdfs"
+
+    hydro_path, hydro_source = _resolve_hydro_path(args)
 
     if args.fixtures:
         catalog_path = FIXTURE_DIR / "catalog-snippet.html"
-        hydro_path = FIXTURE_DIR / "hydro-snippet.geojson"
-        if not catalog_path.is_file() or not hydro_path.is_file():
+        if not catalog_path.is_file():
             raise SystemExit("fixtures/wi-ingest is incomplete")
         rows = catalog.parse_catalog_html(catalog_path.read_text(encoding="utf-8"))
         catalog_source = str(catalog_path)
-        hydro_source = str(hydro_path)
         pdf_dir = FIXTURE_DIR
     else:
         if args.catalog_html:
             rows = catalog.parse_catalog_html(args.catalog_html.read_text(encoding="utf-8"))
             catalog_source = str(args.catalog_html)
-        elif args.harvest_catalog or (cache_dir / "catalog-page-001.html").is_file():
-            if args.harvest_catalog or not list(cache_dir.glob("catalog-page-*.html")):
+        elif args.harvest_catalog or (catalog_cache / "catalog-page-001.html").is_file():
+            if args.harvest_catalog or not list(catalog_cache.glob("catalog-page-*.html")):
                 rows = catalog.harvest_catalog(
-                    cache_dir / "catalog",
+                    catalog_cache,
                     max_pages=args.max_catalog_pages,
                 )
             else:
-                rows = catalog.load_cached_catalog_html(cache_dir / "catalog")
-            catalog_source = str(cache_dir / "catalog")
+                rows = catalog.load_cached_catalog_html(catalog_cache)
+            catalog_source = str(catalog_cache)
         else:
             raise SystemExit("pass --harvest-catalog, --catalog-html, or --fixtures")
-        hydro_path = args.hydro
-        if hydro_path is None:
-            raise SystemExit("--hydro is required unless --fixtures")
-        if not hydro_path.is_file():
-            raise SystemExit(f"hydro file not found: {hydro_path}")
-        hydro_source = str(hydro_path)
+
     rows = _filter_rows(rows, args.map_key)
 
     hydro_index = hydro.load_hydro_index(hydro_path)
@@ -184,7 +194,10 @@ def run_ingest(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    run_ingest(args)
+    try:
+        run_ingest(args)
+    except catalog.CatalogHarvestError as error:
+        raise SystemExit(str(error)) from error
 
 
 if __name__ == "__main__":

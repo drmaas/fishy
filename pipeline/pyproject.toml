@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # Wisconsin PDF pipeline: install only when developing WI ingest/georef/contours.
+# PyMuPDF (import name ``pymupdf``) is AGPL-3.0 or a commercial license from Artifex.
 wi = [
     "pymupdf>=1.24",
     "rasterio>=1.4",
