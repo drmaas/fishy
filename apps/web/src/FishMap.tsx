@@ -1,7 +1,6 @@
 import {
   isLakeIdForState,
   lakeFromProperties,
-  OPENFREEMAP_STYLE,
   type DepthUnit,
   type LakeInfo,
 } from "@fishy/core";
@@ -20,6 +19,12 @@ import {
   type GeolocateSession,
 } from "./mapGeolocateSession.ts";
 import type { LocationHintState } from "./locationHint.ts";
+import {
+  contoursOnlyBackground,
+  mapStyleKey,
+  openFreeMapStyleUrl,
+  type ColorScheme,
+} from "./theme.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 interface FishMapProps {
@@ -28,6 +33,7 @@ interface FishMapProps {
   hillshadeUrl: string;
   basemap: "openfreemap" | "none" | "maptiler";
   maptilerStyleUrl?: string;
+  colorScheme: ColorScheme;
   unit: DepthUnit;
   stateBounds: [number, number, number, number];
   nearby: GeoJsonFeatureCollection | null;
@@ -50,12 +56,194 @@ function lakeBounds(selected: LakeDetail): [[number, number], [number, number]] 
   ];
 }
 
+function resolveBasemapStyle(
+  basemap: "openfreemap" | "none" | "maptiler",
+  colorScheme: ColorScheme,
+  maptilerStyleUrl?: string,
+) {
+  if (basemap === "maptiler" && maptilerStyleUrl) return maptilerStyleUrl;
+  if (basemap === "none") {
+    return {
+      version: 8 as const,
+      sources: {},
+      layers: [
+        {
+          id: "background",
+          type: "background" as const,
+          paint: { "background-color": contoursOnlyBackground(colorScheme) },
+        },
+      ],
+    };
+  }
+  return openFreeMapStyleUrl(colorScheme);
+}
+
+function contourInk(scheme: ColorScheme) {
+  if (scheme === "dark") {
+    return {
+      line: "#d7e6ef",
+      text: "#eef5f9",
+      halo: "#0b1620",
+      outline: "#c5d8e4",
+      nearby: "#7eb8d4",
+    };
+  }
+  return {
+    line: "#083044",
+    text: "#082433",
+    halo: "#f4f7f8",
+    outline: "#062433",
+    nearby: "#0b4a63",
+  };
+}
+
+function installFishLayers(
+  map: import("maplibre-gl").Map,
+  options: {
+    contoursUrl: string;
+    terrainUrl: string;
+    hillshadeUrl: string;
+    unit: DepthUnit;
+    colorScheme: ColorScheme;
+    nearby: GeoJsonFeatureCollection | null;
+    selected: LakeDetail | null;
+  },
+) {
+  const sources = fishSources(options.contoursUrl, options.terrainUrl, options.hillshadeUrl);
+  const ink = contourInk(options.colorScheme);
+
+  if (sources.hillshade && !map.getSource("hillshade")) {
+    map.addSource("hillshade", sources.hillshade);
+    map.addLayer({
+      id: "hillshade",
+      type: "raster",
+      source: "hillshade",
+      paint: { "raster-opacity": 0.45 },
+    });
+  }
+
+  if (!map.getSource("contours")) {
+    map.addSource("contours", sources.contours);
+    map.addLayer({
+      id: "depth-shade",
+      type: "fill",
+      source: "contours",
+      "source-layer": "zones",
+      paint: { "fill-color": DEPTH_COLOR, "fill-opacity": 0.72 },
+    });
+    map.addLayer({
+      id: "lake-fill",
+      type: "fill",
+      source: "contours",
+      "source-layer": "lakes",
+      paint: { "fill-color": "#000000", "fill-opacity": 0.01 },
+    });
+    map.addLayer({
+      id: "depth-contours",
+      type: "line",
+      source: "contours",
+      "source-layer": "contours",
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: { "line-color": ink.line, "line-width": 1.4 },
+    });
+    map.addLayer({
+      id: "depth-labels",
+      type: "symbol",
+      source: "contours",
+      "source-layer": "contours",
+      layout: {
+        "text-field": contourLabelField(options.unit),
+        "symbol-placement": "line",
+        "text-size": 12,
+      },
+      paint: {
+        "text-color": ink.text,
+        "text-halo-color": ink.halo,
+        "text-halo-width": 1.2,
+      },
+    });
+  }
+
+  if (!map.getSource("survey-nearby")) {
+    map.addSource("survey-nearby", { type: "geojson", data: options.nearby ?? EMPTY });
+  }
+  if (!map.getSource("survey-outline")) {
+    map.addSource("survey-outline", { type: "geojson", data: EMPTY });
+  }
+  if (!map.getSource("survey-contours")) {
+    map.addSource("survey-contours", { type: "geojson", data: EMPTY });
+  }
+
+  if (!map.getLayer("survey-nearby-fill")) {
+    map.addLayer({
+      id: "survey-nearby-fill",
+      type: "fill",
+      source: "survey-nearby",
+      paint: { "fill-color": "#1c6b8a", "fill-opacity": 0.18 },
+    });
+    map.addLayer({
+      id: "survey-nearby-line",
+      type: "line",
+      source: "survey-nearby",
+      paint: { "line-color": ink.nearby, "line-width": 1.2 },
+    });
+    map.addLayer({
+      id: "survey-outline-fill",
+      type: "fill",
+      source: "survey-outline",
+      paint: { "fill-color": "#0b4a63", "fill-opacity": 0.08 },
+    });
+    map.addLayer({
+      id: "survey-outline-line",
+      type: "line",
+      source: "survey-outline",
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: { "line-color": ink.outline, "line-width": 1.8 },
+    });
+    map.addLayer({
+      id: "survey-depth-lines",
+      type: "line",
+      source: "survey-contours",
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: { "line-color": ink.line, "line-width": 1.35 },
+    });
+    map.addLayer({
+      id: "survey-depth-labels",
+      type: "symbol",
+      source: "survey-contours",
+      layout: {
+        "text-field": contourLabelField(options.unit),
+        "symbol-placement": "line",
+        "text-size": 12,
+      },
+      paint: {
+        "text-color": ink.text,
+        "text-halo-color": ink.halo,
+        "text-halo-width": 1.2,
+      },
+    });
+  }
+
+  if (sources.terrain && !map.getSource("terrain")) {
+    map.addSource("terrain", sources.terrain);
+    map.setTerrain({ source: "terrain", exaggeration: 1.4 });
+  }
+
+  const nearbySource = map.getSource("survey-nearby") as import("maplibre-gl").GeoJSONSource;
+  const outline = map.getSource("survey-outline") as import("maplibre-gl").GeoJSONSource;
+  const contours = map.getSource("survey-contours") as import("maplibre-gl").GeoJSONSource;
+  nearbySource.setData(options.nearby ?? EMPTY);
+  outline.setData(options.selected?.outline ?? EMPTY);
+  contours.setData(options.selected?.contours ?? EMPTY);
+}
+
 export function FishMap({
   contoursUrl,
   terrainUrl,
   hillshadeUrl,
   basemap,
   maptilerStyleUrl,
+  colorScheme,
   unit,
   stateBounds,
   nearby,
@@ -77,11 +265,18 @@ export function FishMap({
   const unitRef = useRef(unit);
   const selectedRef = useRef(selected);
   const nearbyRef = useRef(nearby);
+  const basemapRef = useRef(basemap);
+  const colorSchemeRef = useRef(colorScheme);
+  const maptilerStyleUrlRef = useRef(maptilerStyleUrl);
+  const contoursUrlRef = useRef(contoursUrl);
+  const terrainUrlRef = useRef(terrainUrl);
+  const hillshadeUrlRef = useRef(hillshadeUrl);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const mapReady = useRef(false);
   const fittedLake = useRef<string | null>(null);
   const locationLock = useRef(false);
   const lastLocationRef = useRef<LocationHintState>({ status: "idle" });
+  const appliedStyleKeyRef = useRef<string | null>(null);
   onLakeRef.current = onLake;
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
@@ -93,6 +288,12 @@ export function FishMap({
   unitRef.current = unit;
   selectedRef.current = selected;
   nearbyRef.current = nearby;
+  basemapRef.current = basemap;
+  colorSchemeRef.current = colorScheme;
+  maptilerStyleUrlRef.current = maptilerStyleUrl;
+  contoursUrlRef.current = contoursUrl;
+  terrainUrlRef.current = terrainUrl;
+  hillshadeUrlRef.current = hillshadeUrl;
 
   useEffect(() => {
     const node = nodeRef.current;
@@ -105,6 +306,7 @@ export function FishMap({
     mapReady.current = false;
     fittedLake.current = null;
     locationLock.current = false;
+    appliedStyleKeyRef.current = null;
 
     void (async () => {
       const maplibregl = await import("maplibre-gl");
@@ -114,22 +316,11 @@ export function FishMap({
       maplibregl.addProtocol("pmtiles", protocol.tile);
       if (cancelled) return;
 
-      const style =
-        basemap === "maptiler" && maptilerStyleUrl
-          ? maptilerStyleUrl
-          : basemap === "none"
-            ? {
-                version: 8 as const,
-                sources: {},
-                layers: [
-                  {
-                    id: "background",
-                    type: "background" as const,
-                    paint: { "background-color": "#d5e3ec" },
-                  },
-                ],
-              }
-            : OPENFREEMAP_STYLE;
+      const initialStyle = resolveBasemapStyle(
+        basemapRef.current,
+        colorSchemeRef.current,
+        maptilerStyleUrlRef.current,
+      );
 
       const fitSelectedLake = (lake: LakeDetail, duration: number, force = false) => {
         if (!map || !mapReady.current) return;
@@ -145,7 +336,7 @@ export function FishMap({
       const openedOnLakeId = initialLake?.dowlknum ?? null;
       map = new maplibregl.Map({
         container: node,
-        style,
+        style: initialStyle,
         bounds: initialLake ? lakeBounds(initialLake) : stateBounds,
         fitBoundsOptions: { padding: initialLake ? 56 : 28, pitch: 0, bearing: 0 },
         attributionControl: false,
@@ -292,126 +483,37 @@ export function FishMap({
         );
       };
 
-      map.on("load", () => {
+      const onStyleReady = () => {
         if (!map) return;
-        const sources = fishSources(contoursUrl, terrainUrl, hillshadeUrl);
-        if (sources.hillshade && !map.getSource("hillshade")) {
-          map.addSource("hillshade", sources.hillshade);
-          map.addLayer({
-            id: "hillshade",
-            type: "raster",
-            source: "hillshade",
-            paint: { "raster-opacity": 0.45 },
-          });
-        }
-        if (!map.getSource("contours")) {
-          map.addSource("contours", sources.contours);
-          map.addLayer({
-            id: "depth-shade",
-            type: "fill",
-            source: "contours",
-            "source-layer": "zones",
-            paint: { "fill-color": DEPTH_COLOR, "fill-opacity": 0.72 },
-          });
-          map.addLayer({
-            id: "lake-fill",
-            type: "fill",
-            source: "contours",
-            "source-layer": "lakes",
-            paint: { "fill-color": "#000000", "fill-opacity": 0.01 },
-          });
-          map.addLayer({
-            id: "depth-contours",
-            type: "line",
-            source: "contours",
-            "source-layer": "contours",
-            layout: { "line-join": "round", "line-cap": "round" },
-            paint: { "line-color": "#083044", "line-width": 1.4 },
-          });
-          map.addLayer({
-            id: "depth-labels",
-            type: "symbol",
-            source: "contours",
-            "source-layer": "contours",
-            layout: {
-              "text-field": contourLabelField(unitRef.current),
-              "symbol-placement": "line",
-              "text-size": 12,
-            },
-            paint: { "text-color": "#082433", "text-halo-color": "#f4f7f8", "text-halo-width": 1.2 },
-          });
-        }
-
-        map.addSource("survey-nearby", { type: "geojson", data: nearbyRef.current ?? EMPTY });
-        map.addSource("survey-outline", { type: "geojson", data: EMPTY });
-        map.addSource("survey-contours", { type: "geojson", data: EMPTY });
-
-        map.addLayer({
-          id: "survey-nearby-fill",
-          type: "fill",
-          source: "survey-nearby",
-          paint: { "fill-color": "#1c6b8a", "fill-opacity": 0.18 },
+        installFishLayers(map, {
+          contoursUrl: contoursUrlRef.current,
+          terrainUrl: terrainUrlRef.current,
+          hillshadeUrl: hillshadeUrlRef.current,
+          unit: unitRef.current,
+          colorScheme: colorSchemeRef.current,
+          nearby: nearbyRef.current,
+          selected: selectedRef.current,
         });
-        map.addLayer({
-          id: "survey-nearby-line",
-          type: "line",
-          source: "survey-nearby",
-          paint: { "line-color": "#0b4a63", "line-width": 1.2 },
-        });
-        map.addLayer({
-          id: "survey-outline-fill",
-          type: "fill",
-          source: "survey-outline",
-          paint: { "fill-color": "#0b4a63", "fill-opacity": 0.08 },
-        });
-        map.addLayer({
-          id: "survey-outline-line",
-          type: "line",
-          source: "survey-outline",
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#062433", "line-width": 1.8 },
-        });
-        map.addLayer({
-          id: "survey-depth-lines",
-          type: "line",
-          source: "survey-contours",
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#083044", "line-width": 1.35 },
-        });
-        map.addLayer({
-          id: "survey-depth-labels",
-          type: "symbol",
-          source: "survey-contours",
-          layout: {
-            "text-field": contourLabelField(unitRef.current),
-            "symbol-placement": "line",
-            "text-size": 12,
-          },
-          paint: { "text-color": "#082433", "text-halo-color": "#f4f7f8", "text-halo-width": 1.2 },
-        });
-
-        if (sources.terrain && !map.getSource("terrain")) {
-          map.addSource("terrain", sources.terrain);
-          map.setTerrain({ source: "terrain", exaggeration: 1.4 });
-        }
-
+        appliedStyleKeyRef.current = mapStyleKey(
+          basemapRef.current,
+          colorSchemeRef.current,
+          maptilerStyleUrlRef.current,
+        );
         mapReady.current = true;
         const lake = selectedRef.current;
         if (lake) {
-          const outline = map.getSource("survey-outline") as import("maplibre-gl").GeoJSONSource;
-          const contours = map.getSource("survey-contours") as import("maplibre-gl").GeoJSONSource;
-          outline.setData(lake.outline);
-          contours.setData(lake.contours);
           if (openedOnLakeId === lake.dowlknum && !locationLock.current) {
             fittedLake.current = lake.dowlknum;
-          } else {
+          } else if (!locationLock.current && fittedLake.current !== lake.dowlknum) {
             fitSelectedLake(lake, 0);
           }
         } else {
           fittedLake.current = null;
         }
         reportExtent();
-      });
+      };
+
+      map.on("load", onStyleReady);
 
       map.on("moveend", reportExtent);
 
@@ -441,10 +543,42 @@ export function FishMap({
       mapRef.current = null;
       mapReady.current = false;
       fittedLake.current = null;
+      appliedStyleKeyRef.current = null;
       onLocationRef.current({ status: "idle" });
       map?.remove();
     };
-  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
+  }, [contoursUrl, hillshadeUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const nextKey = mapStyleKey(basemap, colorScheme, maptilerStyleUrl);
+    if (appliedStyleKeyRef.current === nextKey) return;
+
+    let cancelled = false;
+    mapReady.current = false;
+    const onStyleLoad = () => {
+      if (cancelled) return;
+      installFishLayers(map, {
+        contoursUrl: contoursUrlRef.current,
+        terrainUrl: terrainUrlRef.current,
+        hillshadeUrl: hillshadeUrlRef.current,
+        unit: unitRef.current,
+        colorScheme,
+        nearby: nearbyRef.current,
+        selected: selectedRef.current,
+      });
+      appliedStyleKeyRef.current = nextKey;
+      mapReady.current = true;
+    };
+    map.once("style.load", onStyleLoad);
+    // Full reload: style diff can keep the old contours-only background paint.
+    map.setStyle(resolveBasemapStyle(basemap, colorScheme, maptilerStyleUrl), { diff: false });
+    return () => {
+      cancelled = true;
+      map.off("style.load", onStyleLoad);
+    };
+  }, [basemap, colorScheme, maptilerStyleUrl]);
 
   useEffect(() => {
     const map = mapRef.current;

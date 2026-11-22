@@ -27,6 +27,7 @@ export {
   type LakeIndexBbox,
 } from "./lake.ts";
 export {
+  OPENFREEMAP_DARK_STYLE,
   OPENFREEMAP_STYLE,
   SAMPLE_VIEW,
   emptyToUndefined,
