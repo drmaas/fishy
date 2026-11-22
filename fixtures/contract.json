@@ -15,6 +15,11 @@
     { "depth": 0, "absDepth": 0, "feet": 0 },
     { "depth": null, "absDepth": 8, "feet": 8 }
   ],
+  "positiveDepthFt": [
+    { "depth": -20, "absDepth": 20, "depth_ft": 20 },
+    { "depth": -3.5, "absDepth": null, "depth_ft": 3.5 },
+    { "depth": null, "absDepth": null, "explicit": 12, "depth_ft": 12 }
+  ],
   "acres": [{ "squareMeters": 4046.8564224, "acres": 1 }],
   "dowlknum": [
     {
@@ -29,6 +34,38 @@
       "lakeFinder": "https://www.dnr.state.mn.us/lakefind/showreport.html?downum=99999900"
     }
   ],
+  "wbic": [
+    { "id": "0417300", "valid": true },
+    { "id": "417300", "valid": false },
+    { "id": "0000001", "valid": true }
+  ],
+  "lakeRef": [
+    { "state": "mn", "id": "27013300", "valid": true },
+    { "state": "mn", "id": "0417300", "valid": false },
+    { "state": "wi", "id": "0417300", "valid": true },
+    { "state": "wi", "id": "27013300", "valid": false },
+    { "state": "xx", "id": "0417300", "valid": false }
+  ],
+  "wiLakeIndex": [
+    {
+      "id": "0417300",
+      "name": "Lake Wissota",
+      "county": "Chippewa",
+      "acres": 6044,
+      "bbox": { "west": -91.35, "south": 44.9, "east": -91.2, "north": 45.05 },
+      "qa_status": "verified"
+    }
+  ],
+  "wiLakeDetail": {
+    "id": "0417300",
+    "name": "Lake Wissota",
+    "maxDepthFt": 72,
+    "areaAcres": 6044,
+    "extent": { "west": -91.35, "south": 44.9, "east": -91.2, "north": 45.05 },
+    "source_pdf_url": "https://example.dnr.wi.gov/bathymetry/0417300.pdf",
+    "qa_status": "verified",
+    "survey_date": "1989-06-01"
+  },
   "pmtiles": [
     {
       "input": "/samples/sample-pond.pmtiles",

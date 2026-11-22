@@ -16,6 +16,8 @@ describe("lake worker routes", () => {
     expect((await call("/api/lakes?state=mn&q=x")).status).toBe(404);
     expect((await call("/api/lakes/nearby?state=mn&west=-95&south=44&east=-93&north=45")).status).toBe(404);
     expect((await call("/api/lakes/270133?state=mn")).status).toBe(404);
+    expect((await call("/api/lakes/0417300?state=mn")).status).toBe(404);
+    expect((await call("/api/lakes/0417300?state=wi")).status).toBe(404);
     expect((await call("/api/lakes/not-a-lake?state=mn")).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });

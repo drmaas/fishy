@@ -30,17 +30,19 @@ describe("lake proxy helpers", () => {
 
   it("escapes single quotes in where values", () => {
     expect(escapeWhereValue("O'Brien")).toBe("O''Brien");
-    expect(buildSearchWhere("O'Brien")).toContain("O''BRIEN");
+    expect(buildSearchWhere("O'Brien", "mn")).toContain("O''BRIEN");
   });
 
   it("sanitizes search queries", () => {
-    expect(sanitizeSearchQuery("a")).toBeNull();
-    expect(sanitizeSearchQuery("Wa")).toBe("Wa");
-    expect(sanitizeSearchQuery("27013300")).toBe("27013300");
-    expect(sanitizeSearchQuery("Lake <script>")).toBeNull();
-    expect(sanitizeSearchQuery("St. Croix")).toBe("St. Croix");
-    expect(buildSearchWhere("27013300")).toBe("dowlknum='27013300' AND island='N'");
-    expect(buildSearchWhere("waconia")).toBe("island='N' AND UPPER(lake_name) LIKE '%WACONIA%'");
+    expect(sanitizeSearchQuery("a", "mn")).toBeNull();
+    expect(sanitizeSearchQuery("Wa", "mn")).toBe("Wa");
+    expect(sanitizeSearchQuery("27013300", "mn")).toBe("27013300");
+    expect(sanitizeSearchQuery("0417300", "wi")).toBe("0417300");
+    expect(sanitizeSearchQuery("0417300", "mn")).toBeNull();
+    expect(sanitizeSearchQuery("Lake <script>", "mn")).toBeNull();
+    expect(sanitizeSearchQuery("St. Croix", "mn")).toBe("St. Croix");
+    expect(buildSearchWhere("27013300", "mn")).toBe("dowlknum='27013300' AND island='N'");
+    expect(buildSearchWhere("waconia", "mn")).toBe("island='N' AND UPPER(lake_name) LIKE '%WACONIA%'");
   });
 
   it("rejects a bbox that is too large or inverted", () => {
@@ -57,7 +59,15 @@ describe("lake proxy helpers", () => {
   });
 
   it("normalizes depth and outline properties", () => {
-    expect(normalizeContourProperties({ depth: -15, abs_depth: 15, dowlknum: "27013300", lake_name: "Minnetonka" })).toEqual(
+    const contour = normalizeContourProperties({
+      depth: -15,
+      abs_depth: 15,
+      dowlknum: "27013300",
+      lake_name: "Minnetonka",
+    });
+    expect(contour.depth_ft).toBe(15);
+    expect(contour.depth_ft).toBeGreaterThanOrEqual(0);
+    expect(contour).toEqual(
       {
         lake_name: "Minnetonka",
         dowlknum: "27013300",

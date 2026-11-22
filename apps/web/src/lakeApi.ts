@@ -1,4 +1,4 @@
-import type { LakeInfo } from "@fishy/core";
+import type { LakeInfo, WisconsinLakeFields } from "@fishy/core";
 import { LAKE_DETAIL_CACHE_REV } from "../lib/server/lakes.ts";
 
 export interface LakeSearchHit {
@@ -24,7 +24,7 @@ export interface GeoJsonFeatureCollection {
   }>;
 }
 
-export interface LakeDetail {
+export interface LakeDetail extends WisconsinLakeFields {
   dowlknum: string;
   name: string;
   maxDepthFt: number;

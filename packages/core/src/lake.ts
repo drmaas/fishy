@@ -1,3 +1,8 @@
+import { isDowlknum } from "./lakeId.ts";
+
+export { isDowlknum, isWbic, isLakeIdForState, lakeIdFromDetailPath, LAKE_DETAIL_PATH_RE, type LakeRef, type LakeQaStatus, type WisconsinLakeFields } from "./lakeId.ts";
+export type { LakeDetailFields, LakeIndexRow, LakeIndexBbox } from "./lakeContract.ts";
+
 export interface LakeInfo {
   name: string;
   dowlknum: string;
@@ -7,11 +12,6 @@ export interface LakeInfo {
 }
 
 const LAKEFINDER = "https://www.dnr.state.mn.us/lakefind/showreport.html?downum=";
-
-/** Eight-digit DNR Division of Waters lake id. Basin suffixes other than 00 are allowed. */
-export function isDowlknum(id: string): boolean {
-  return /^[0-9]{8}$/.test(id);
-}
 
 export function lakeFinderUrl(dowlknum: string): string | null {
   if (!isDowlknum(dowlknum)) return null;
