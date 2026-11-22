@@ -7,6 +7,7 @@ import {
 } from "@fishy/core";
 import { useEffect, useRef } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 interface FishMapProps {
   contoursUrl: string;
@@ -42,6 +43,7 @@ export function FishMap({
 
     void (async () => {
       const maplibregl = await import("maplibre-gl");
+      maplibregl.setWorkerUrl(workerUrl);
       const { Protocol } = await import("pmtiles");
       const protocol = new Protocol();
       maplibregl.addProtocol("pmtiles", protocol.tile);
