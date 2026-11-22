@@ -7,6 +7,7 @@ import {
 import { useEffect, useRef } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
+import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 interface FishMapProps {
@@ -22,6 +23,7 @@ interface FishMapProps {
   onLake: (lake: LakeInfo) => void;
   onSelectDowlknum: (dowlknum: string) => void;
   onExtent: (extent: LakeExtent, zoom: number) => void;
+  onLocation: (state: LocationHintState) => void;
 }
 
 const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
@@ -39,17 +41,20 @@ export function FishMap({
   onLake,
   onSelectDowlknum,
   onExtent,
+  onLocation,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
   const onSelectRef = useRef(onSelectDowlknum);
   const onExtentRef = useRef(onExtent);
+  const onLocationRef = useRef(onLocation);
   const unitRef = useRef(unit);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const fittedLake = useRef<string | null>(null);
   onLakeRef.current = onLake;
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
+  onLocationRef.current = onLocation;
   unitRef.current = unit;
 
   useEffect(() => {
@@ -93,6 +98,28 @@ export function FishMap({
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+      const geolocate = new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 },
+        trackUserLocation: true,
+        showUserLocation: true,
+        showAccuracyCircle: true,
+        zoomToUserAccuracy: true,
+        fitBoundsOptions: { maxZoom: 16, padding: 80 },
+      });
+      map.addControl(geolocate, "bottom-right");
+      geolocate.on("geolocate", (event) => {
+        const accuracy = event.coords.accuracy;
+        onLocationRef.current({
+          status: "active",
+          accuracyMeters: typeof accuracy === "number" ? accuracy : null,
+        });
+      });
+      geolocate.on("error", (event) => {
+        onLocationRef.current({ status: "error", code: event.code });
+      });
+      geolocate.on("trackuserlocationend", () => {
+        onLocationRef.current({ status: "idle" });
+      });
 
       const reportExtent = () => {
         if (!map) return;
@@ -230,6 +257,7 @@ export function FishMap({
       cancelled = true;
       mapRef.current = null;
       fittedLake.current = null;
+      onLocationRef.current({ status: "idle" });
       map?.remove();
     };
   }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, stateBounds, terrainUrl]);
