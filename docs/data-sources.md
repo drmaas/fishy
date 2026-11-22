@@ -57,6 +57,8 @@ Wisconsin is **pre-built** from DNR PDF bathymetry maps, tiled to PMTiles, and s
 
 `ingest` (WI 3/8) harvests the catalog into a manifest (WBIC, sheet suffix `a`/`b`, county, acres, max depth, PDF URL), joins rows to **24K Hydro** waterbodies on padded 7-digit WBIC in EPSG:3071, and renders PDF pages to **300–400 DPI** PNG rasters under `pipeline/work/` (git-ignored). Downloads cache under `pipeline/.cache/wi/` (git-ignored). Committed fixtures for CI live in `fixtures/wi-ingest/`.
 
+`georef` (WI 4/8) registers each raster to that WBIC's 24K Hydro shoreline in EPSG:3071. `wbic` is the lake id. `map_key` names the document: one sheet can be shared by many lakes, and each `(wbic, map_key)` pair is fitted to that waterbody's own ring. The stage ignores the neatline, PLSS grid, and legend, initializes from the bounding box and orientation, refines with point registration, and warps with `gdalwarp -tps` when GDAL is on `PATH`. GDAL is MIT/X licensed; CI installs `gdal-bin`. IoU below 0.90, a multi-sheet lake, or a flowage (HYDROTYPE 707, or "flowage" in the waterbody name) is written to `georef/review_queue.json`. Shapefile and unknown rows stay skipped with their ingest reason. The synthetic check is `fixtures/wi-georef/known-transform.json`. No DNR raster is committed.
+
 Most lakes link straight to `doclink/lakes_maps/{wbic}{a|b}.pdf`. Some rows (for example Altoona Lake) use a SWIMS `DownloadDocument?id=` URL that may return a JPEG, shapefile, or other format; ingest keeps those rows under the padded WBIC, assigns `{wbic}a` / `{wbic}b` when needed, and records detected media types in the manifest. Doclink PDFs are preferred when both are present.
 
 One-lake hydro query (verified against Ada Lake `WATERBODY_WBIC=417300`):

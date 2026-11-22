@@ -99,6 +99,100 @@ def join_catalog_to_hydro(
     return joined, sorted(set(unmatched_wbic))
 
 
+# 24K Hydro HYDROTYPE domain: 706 Lake/Pond, 707 Reservoir/Flowage.
+FLOWAGE_HYDROTYPE = 707
+
+
+@dataclass(frozen=True)
+class HydroWaterbody:
+    wbic: str
+    ring: tuple[tuple[float, float], ...]
+    waterbody_name: str | None
+    hydroid: int | None
+    hydrotype: int | None
+
+
+def _ring_area(ring: list[tuple[float, float]]) -> float:
+    area = 0.0
+    for index, (x1, y1) in enumerate(ring):
+        x2, y2 = ring[(index + 1) % len(ring)]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2.0
+
+
+def _clean_ring(coordinates: list) -> list[tuple[float, float]] | None:
+    ring = [(float(point[0]), float(point[1])) for point in coordinates]
+    if len(ring) >= 2:
+        dx = ring[0][0] - ring[-1][0]
+        dy = ring[0][1] - ring[-1][1]
+        if dx * dx + dy * dy < 1e-8:
+            ring = ring[:-1]
+    if len(ring) < 3:
+        return None
+    return ring
+
+
+def _largest_exterior(geometry: dict) -> list[tuple[float, float]] | None:
+    kind = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    if kind == "Polygon" and isinstance(coordinates, list) and coordinates:
+        return _clean_ring(coordinates[0])
+    if kind == "MultiPolygon" and isinstance(coordinates, list):
+        best: list[tuple[float, float]] | None = None
+        best_area = -1.0
+        for polygon in coordinates:
+            if not polygon:
+                continue
+            ring = _clean_ring(polygon[0])
+            if ring is None:
+                continue
+            area = _ring_area(ring)
+            if area > best_area:
+                best = ring
+                best_area = area
+        return best
+    return None
+
+
+def load_hydro_polygons(path: Path) -> dict[str, HydroWaterbody]:
+    """Index 24K Hydro exteriors by WBIC. Same CRS rule as ``load_hydro_index``.
+
+    When several features share a WBIC, the largest exterior ring is kept.
+    Island holes are ignored; georef matches the outer shoreline.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    _assert_hydro_crs_3071(data)
+    features = data.get("features")
+    if not isinstance(features, list):
+        raise ValueError("hydro GeoJSON must contain a features array")
+    index: dict[str, HydroWaterbody] = {}
+    areas: dict[str, float] = {}
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry") or {}
+        ring = _largest_exterior(geometry)
+        if ring is None:
+            continue
+        props = feature.get("properties") or {}
+        wbic = normalize_wbic(props.get("WATERBODY_WBIC") or props.get("waterbody_wbic"))
+        if wbic is None:
+            continue
+        area = _ring_area(ring)
+        if wbic in areas and area <= areas[wbic]:
+            continue
+        name = props.get("WATERBODY_NAME") or props.get("WATERBODY_ROW_NAME") or props.get("waterbody_name")
+        index[wbic] = HydroWaterbody(
+            wbic=wbic,
+            ring=tuple(ring),
+            waterbody_name=str(name) if name else None,
+            hydroid=_int_or_none(props.get("HYDROID") or props.get("hydroid")),
+            hydrotype=_int_or_none(props.get("HYDROTYPE") or props.get("hydrotype")),
+        )
+        areas[wbic] = area
+    return index
+
+
 def tag_multi_sheet_lakes(entries: list[dict]) -> tuple[list[dict], list[str]]:
     """Mark entries that share a WBIC with more than one map document."""
     suffixes_by_wbic: dict[str, set[str]] = {}

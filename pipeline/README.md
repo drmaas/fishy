@@ -5,7 +5,7 @@ Fishy’s Python tooling turns lake bathymetry into PMTiles for the map. Layout 
 | State | Runtime path |
 | --- | --- |
 | Minnesota (`mn`) | **No pipeline.** The Worker queries the [MN DNR MapServer](https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer) live. |
-| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest` is implemented; `georef` and `contours` remain stubs. |
+| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest` and `georef` are implemented; `contours` remains a stub. |
 | Sample / dev | Shared **`fishy_pipeline/common/`** build on `fixtures/sample-pond` (synthetic DNR-shaped data). |
 
 ## Shared build (`common/`)
@@ -31,18 +31,33 @@ PYTHONPATH=pipeline python3 -m fishy_pipeline build fixtures/sample-pond apps/we
 # R2 upload
 pnpm pipeline:r2-upload -- path/to/file.pmtiles some/key.pmtiles
 
-# Wisconsin stages (stubs; need optional deps later)
+# Wisconsin ingest
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest --fixtures
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest --harvest-catalog --hydro /path/to/24k-hydro-snippet.geojson
-PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef
+
+# Wisconsin georef (synthetic fixture, or a work dir produced by ingest)
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef --fixtures --work-dir pipeline/work/wi
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef --hydro /path/to/24k-hydro.geojson
+
+# Contours are still a stub
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours
 ```
+
+## Wisconsin georef
+
+`georef` reads the ingest manifest and a 24K Hydro GeoJSON in EPSG:3071. Each row is one `(wbic, map_key)` pair. `map_key` is the document name and can be shared (the Chain O' Lakes sheet is one file and many WBICs). The fit uses that WBIC's own shoreline.
+
+The stage drops the neatline, full-span PLSS grid, and legend, then keeps the dark component that encloses the most water. It initializes from the bounding box and four orientations, refines with affine point registration, and places a thin-plate spline through a small set of control points. The published IoU is the lower of the affine overlap and the spline overlap, so a rubber-sheet cannot hide a mismatched waterbody. The threshold starts at 0.90.
+
+`gdal_translate -gcp` and `gdalwarp -tps -t_srs EPSG:3071` write `georef/lakes/<wbic>/<map_key>/warped.tif` when GDAL is on `PATH`. GDAL is MIT/X licensed and is already installed in CI as `gdal-bin`. The IoU itself does not need GDAL. Lakes under the threshold, multi-sheet lakes, and flowages (HYDROTYPE 707, or "flowage" in the name) are listed in `georef/review_queue.json`, with a path to that pair's control points. Shapefile and unknown rows stay skipped with the ingest reason.
+
+`fixtures/wi-georef/known-transform.json` is a synthetic sheet. The test draws the raster in memory. No DNR raster is committed.
 
 Legacy module names still work: `python3 -m fishy_pipeline.build` and `python3 -m fishy_pipeline.upload`.
 
 ## Optional dependencies
 
-Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus GDAL/rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries.
+Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries. Georeferencing does not import that extra. The spline warp uses the GDAL command-line tools (**MIT/X**), which CI installs as `gdal-bin`.
 
 ```bash
 cd pipeline && pip install -e '.[wi]'
