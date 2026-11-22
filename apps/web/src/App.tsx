@@ -264,7 +264,6 @@ export function App() {
         onExtent={onExtent}
         onLocation={setLocationState}
       />
-      <DepthLegend unit={unit} />
       {lake && (
         <div hidden={!panelOpen}>
           <LakePanel lake={lake} unit={unit} onHide={() => setPanel(false)} />
@@ -281,16 +280,8 @@ export function App() {
           {lake.name}
         </button>
       )}
-      <div className="credits">
-        <button
-          type="button"
-          className="credits-toggle tap-target"
-          aria-expanded={creditsOpen}
-          aria-controls="credits-panel"
-          onClick={() => setCreditsOpen((open) => !open)}
-        >
-          Credits
-        </button>
+      <div className="map-corner">
+        <DepthLegend unit={unit} />
         {creditsOpen && (
           <aside className="credits-panel" id="credits-panel" aria-label="Data credits">
             <div className="credits-panel-head">
@@ -317,6 +308,17 @@ export function App() {
             </ul>
           </aside>
         )}
+        <div className="credits">
+          <button
+            type="button"
+            className="credits-toggle tap-target"
+            aria-expanded={creditsOpen}
+            aria-controls="credits-panel"
+            onClick={() => setCreditsOpen((open) => !open)}
+          >
+            Credits
+          </button>
+        </div>
       </div>
     </div>
   );

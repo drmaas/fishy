@@ -217,11 +217,18 @@ button[aria-pressed="true"] {
   min-height: 100%;
 }
 
-.legend {
+.map-corner {
   position: absolute;
   z-index: 2;
   left: 12px;
-  bottom: 52px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.legend {
   width: 108px;
   padding: 10px 12px;
   background: color-mix(in srgb, var(--paper) 92%, transparent);
@@ -285,13 +292,6 @@ button[aria-pressed="true"] {
 .panel dt { color: var(--ink-soft); }
 .panel dd { margin: 0; font-variant-numeric: tabular-nums; }
 
-.credits {
-  position: absolute;
-  z-index: 2;
-  left: 12px;
-  bottom: 10px;
-}
-
 .credits-toggle {
   padding: 6px 12px;
   font-size: 12px;
@@ -305,9 +305,6 @@ button[aria-pressed="true"] {
 }
 
 .credits-panel {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 8px);
   width: min(280px, calc(100vw - 24px));
   padding: 10px 12px 12px;
   background: color-mix(in srgb, var(--paper) 96%, transparent);
