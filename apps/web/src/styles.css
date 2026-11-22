@@ -84,6 +84,8 @@ html, body, #root, .app {
   z-index: 2;
   top: 64px;
   left: 12px;
+  display: grid;
+  gap: 8px;
   max-width: min(280px, calc(100% - 24px));
   margin: 0;
   padding: 8px 12px;
@@ -92,6 +94,20 @@ html, body, #root, .app {
   border-radius: 10px;
   box-shadow: 0 8px 20px rgb(20 32 40 / 12%);
   backdrop-filter: blur(8px);
+}
+
+.location-toast-text {
+  margin: 0;
+}
+
+.location-toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.location-toast-close {
+  margin-inline-start: auto;
 }
 
 .panel-show {

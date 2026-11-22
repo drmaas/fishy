@@ -4,7 +4,7 @@ import {
   type DepthUnit,
   type LakeInfo,
 } from "@fishy/core";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
 import type { LocationHintState } from "./locationHint.ts";
@@ -24,6 +24,8 @@ interface FishMapProps {
   onSelectDowlknum: (dowlknum: string) => void;
   onExtent: (extent: LakeExtent, zoom: number) => void;
   onLocation: (state: LocationHintState) => void;
+  onLocationAttempt: () => void;
+  locationRetryRef: MutableRefObject<(() => void) | null>;
 }
 
 const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
@@ -49,12 +51,15 @@ export function FishMap({
   onSelectDowlknum,
   onExtent,
   onLocation,
+  onLocationAttempt,
+  locationRetryRef,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
   const onSelectRef = useRef(onSelectDowlknum);
   const onExtentRef = useRef(onExtent);
   const onLocationRef = useRef(onLocation);
+  const onLocationAttemptRef = useRef(onLocationAttempt);
   const unitRef = useRef(unit);
   const selectedRef = useRef(selected);
   const nearbyRef = useRef(nearby);
@@ -66,6 +71,7 @@ export function FishMap({
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
   onLocationRef.current = onLocation;
+  onLocationAttemptRef.current = onLocationAttempt;
   unitRef.current = unit;
   selectedRef.current = selected;
   nearbyRef.current = nearby;
@@ -74,6 +80,8 @@ export function FishMap({
     const node = nodeRef.current;
     if (!node) return undefined;
     let map: import("maplibre-gl").Map | undefined;
+    let geolocateButton: HTMLButtonElement | null = null;
+    let onGeolocateButtonClick: (() => void) | null = null;
     let cancelled = false;
     mapReady.current = false;
     fittedLake.current = null;
@@ -135,10 +143,21 @@ export function FishMap({
         fitBoundsOptions: { maxZoom: 16, padding: 80 },
       });
       map.addControl(geolocate, "bottom-right");
+      locationRetryRef.current = () => {
+        onLocationAttemptRef.current();
+        geolocate.trigger();
+      };
+      const controlRoot = (geolocate as unknown as { _container?: HTMLElement })._container;
+      geolocateButton = controlRoot?.querySelector("button") ?? null;
+      onGeolocateButtonClick = () => {
+        onLocationAttemptRef.current();
+      };
+      geolocateButton?.addEventListener("click", onGeolocateButtonClick);
       // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
       // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
       let gpsBackgrounded = false;
       geolocate.on("trackuserlocationstart", () => {
+        onLocationAttemptRef.current();
         locationLock.current = true;
         fittedLake.current = null;
         gpsBackgrounded = false;
@@ -322,13 +341,17 @@ export function FishMap({
 
     return () => {
       cancelled = true;
+      if (geolocateButton && onGeolocateButtonClick) {
+        geolocateButton.removeEventListener("click", onGeolocateButtonClick);
+      }
+      locationRetryRef.current = null;
       mapRef.current = null;
       mapReady.current = false;
       fittedLake.current = null;
       onLocationRef.current({ status: "idle" });
       map?.remove();
     };
-  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, stateBounds, terrainUrl]);
+  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, locationRetryRef, stateBounds, terrainUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
