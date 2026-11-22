@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  planGeolocateFreshStart,
+  shouldStartGeolocationOnPermissionGrant,
+  watchStateAfterFreshStartPlan,
+} from "./geolocateRetry.ts";
+import {
   GEOLOCATION_ERROR,
   locationBannerShowDismiss,
   locationBannerShowRetry,
@@ -100,6 +105,25 @@ describe("permissionChangeShouldRetry", () => {
     expect(permissionChangeShouldRetry("granted")).toBe(true);
     expect(permissionChangeShouldRetry("denied")).toBe(false);
     expect(permissionChangeShouldRetry("prompt")).toBe(false);
+  });
+});
+
+describe("MapLibre geolocate retry planner", () => {
+  it.each([
+    ["OFF", 1],
+    ["WAITING_ACTIVE", 2],
+    ["ACTIVE_ERROR", 2],
+    ["BACKGROUND_ERROR", 2],
+    ["BACKGROUND", 3],
+  ] as const)("fresh start from %s uses %i triggers", (watchState, count) => {
+    const plan = planGeolocateFreshStart(watchState, false);
+    expect(plan.triggerCount).toBe(count);
+    expect(watchStateAfterFreshStartPlan(watchState, plan)).toBe("WAITING_ACTIVE");
+  });
+
+  it("skips permission-grant trigger unless watch is OFF", () => {
+    expect(shouldStartGeolocationOnPermissionGrant("OFF")).toBe(true);
+    expect(shouldStartGeolocationOnPermissionGrant("WAITING_ACTIVE")).toBe(false);
   });
 });
 

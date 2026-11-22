@@ -8,6 +8,12 @@ import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
 import { shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
+import {
+  readGeolocateWatchState,
+  runGeolocateFreshStart,
+  runGeolocatePermissionGrantStart,
+  shouldInterceptGeolocateButtonClick,
+} from "./geolocateRetry.ts";
 import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
@@ -27,6 +33,7 @@ interface FishMapProps {
   onLocation: (state: LocationHintState) => void;
   onLocationAttempt: () => void;
   locationRetryRef: MutableRefObject<(() => void) | null>;
+  locationPermissionGrantRef: MutableRefObject<(() => void) | null>;
 }
 
 const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
@@ -54,6 +61,7 @@ export function FishMap({
   onLocation,
   onLocationAttempt,
   locationRetryRef,
+  locationPermissionGrantRef,
 }: FishMapProps) {
   const nodeRef = useRef<HTMLDivElement>(null);
   const onLakeRef = useRef(onLake);
@@ -86,7 +94,7 @@ export function FishMap({
     if (!node) return undefined;
     let map: import("maplibre-gl").Map | undefined;
     let geolocateButton: HTMLButtonElement | null = null;
-    let onGeolocateButtonClick: (() => void) | null = null;
+    let onGeolocateButtonClick: ((event: Event) => void) | null = null;
     let cancelled = false;
     mapReady.current = false;
     fittedLake.current = null;
@@ -148,14 +156,27 @@ export function FishMap({
         fitBoundsOptions: { maxZoom: 16, padding: 80 },
       });
       map.addControl(geolocate, "bottom-right");
+      const geolocateButtonFor = (): HTMLButtonElement | null =>
+        map?.getContainer().querySelector<HTMLButtonElement>(".maplibregl-ctrl-geolocate") ?? null;
       locationRetryRef.current = () => {
-        geolocate.trigger();
+        runGeolocateFreshStart(() => geolocate.trigger(), geolocateButtonFor());
       };
-      geolocateButton = map.getContainer().querySelector<HTMLButtonElement>(".maplibregl-ctrl-geolocate");
-      onGeolocateButtonClick = () => {
+      locationPermissionGrantRef.current = () => {
+        runGeolocatePermissionGrantStart(() => geolocate.trigger(), geolocateButtonFor());
+      };
+      geolocateButton = geolocateButtonFor();
+      onGeolocateButtonClick = (event: Event) => {
+        const button = event.currentTarget as HTMLButtonElement;
         onLocationAttemptRef.current();
+        const watchState = readGeolocateWatchState(button);
+        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled)) {
+          event.stopImmediatePropagation();
+          runGeolocateFreshStart(() => geolocate.trigger(), button);
+        }
       };
-      geolocateButton?.addEventListener("click", onGeolocateButtonClick);
+      if (geolocateButton && onGeolocateButtonClick) {
+        geolocateButton.addEventListener("click", onGeolocateButtonClick, true);
+      }
       // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
       // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
       let gpsBackgrounded = false;
@@ -169,6 +190,10 @@ export function FishMap({
       });
       geolocate.on("geolocate", (event) => {
         geolocationFailed = false;
+        const button = geolocateButtonFor();
+        if (button?.disabled) {
+          button.disabled = false;
+        }
         const accuracy = event.coords.accuracy;
         onLocationRef.current({
           status: "active",
@@ -351,16 +376,17 @@ export function FishMap({
     return () => {
       cancelled = true;
       if (geolocateButton && onGeolocateButtonClick) {
-        geolocateButton.removeEventListener("click", onGeolocateButtonClick);
+        geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
       }
       locationRetryRef.current = null;
+      locationPermissionGrantRef.current = null;
       mapRef.current = null;
       mapReady.current = false;
       fittedLake.current = null;
       onLocationRef.current({ status: "idle" });
       map?.remove();
     };
-  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, locationRetryRef, stateBounds, terrainUrl]);
+  }, [basemap, contoursUrl, hillshadeUrl, maptilerStyleUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
 
   useEffect(() => {
     const map = mapRef.current;

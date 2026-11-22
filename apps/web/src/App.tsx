@@ -13,8 +13,10 @@ import {
 } from "./lakeApi.ts";
 import { LakePanel } from "./LakePanel.tsx";
 import { LakeSearch } from "./LakeSearch.tsx";
+import { LocationHintActions } from "./LocationHintActions.tsx";
 import { LocationToast } from "./LocationToast.tsx";
 import {
+  locationBannerShowRetry,
   locationBannerVisible,
   permissionChangeShouldRetry,
   reduceLocationBanner,
@@ -83,6 +85,7 @@ export function App() {
     dismissed: false,
   });
   const locationRetryRef = useRef<(() => void) | null>(null);
+  const locationPermissionGrantRef = useRef<(() => void) | null>(null);
   const [chromeOpen, setChromeOpen] = useState(() => readOpenFlag("fishy-chrome-open", true));
   const [panelOpen, setPanelOpen] = useState(() => readOpenFlag("fishy-panel-open", true));
   const nearbyTimer = useRef<number | null>(null);
@@ -178,8 +181,11 @@ export function App() {
     [stateId],
   );
 
-  const gpsHint = locationHint(locationBanner.location);
-  const mapLocationToastVisible = !chromeOpen && locationBannerVisible(locationBanner);
+  const locationMessageVisible = locationBannerVisible(locationBanner);
+  const gpsHint = locationMessageVisible ? locationHint(locationBanner.location) : null;
+  const mapLocationToastVisible = !chromeOpen && locationMessageVisible && gpsHint;
+  const chromeLocationErrorActions =
+    chromeOpen && locationBannerShowRetry(locationBanner) && locationMessageVisible;
 
   const retryLocation = useCallback(() => {
     dispatchLocationBanner({ type: "attempt" });
@@ -196,14 +202,17 @@ export function App() {
     const onPermissionChange = () => {
       if (!permissionStatus || !permissionChangeShouldRetry(permissionStatus.state)) return;
       dispatchLocationBanner({ type: "permission_granted" });
-      locationRetryRef.current?.();
+      locationPermissionGrantRef.current?.();
     };
 
-    void permissions.query({ name: "geolocation" }).then((status) => {
-      if (disposed) return;
-      permissionStatus = status;
-      status.addEventListener("change", onPermissionChange);
-    });
+    void permissions
+      .query({ name: "geolocation" })
+      .then((status) => {
+        if (disposed) return;
+        permissionStatus = status;
+        status.addEventListener("change", onPermissionChange);
+      })
+      .catch(() => undefined);
 
     return () => {
       disposed = true;
@@ -271,9 +280,18 @@ export function App() {
             </select>
           </label>
         </div>
-        <p className="hint">
-          {gpsHint ?? (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
-        </p>
+        <div className="hint chrome-hint">
+          <p className="chrome-hint-text">
+            {gpsHint ?? (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
+          </p>
+          {chromeLocationErrorActions && (
+            <LocationHintActions
+              onRetry={retryLocation}
+              onDismiss={() => dispatchLocationBanner({ type: "dismiss" })}
+              className="chrome-hint-actions"
+            />
+          )}
+        </div>
       </header>
       {!chromeOpen && (
         <button
@@ -312,6 +330,7 @@ export function App() {
         onLocation={(state) => dispatchLocationBanner({ type: "location", state })}
         onLocationAttempt={() => dispatchLocationBanner({ type: "attempt" })}
         locationRetryRef={locationRetryRef}
+        locationPermissionGrantRef={locationPermissionGrantRef}
       />
       <DepthLegend unit={unit} />
       {lake && (

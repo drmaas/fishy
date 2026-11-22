@@ -1,3 +1,4 @@
+import { LocationHintActions } from "./LocationHintActions.tsx";
 import {
   locationBannerShowDismiss,
   locationBannerShowRetry,
@@ -26,24 +27,8 @@ export function LocationToast({ model, onDismiss, onRetry }: LocationToastProps)
       aria-live={isError ? "assertive" : "polite"}
     >
       <p className="location-toast-text">{text}</p>
-      {(showRetry || showDismiss) && (
-        <div className="location-toast-actions">
-          {showRetry && (
-            <button type="button" className="tap-target" onClick={onRetry}>
-              Try again
-            </button>
-          )}
-          {showDismiss && (
-            <button
-              type="button"
-              className="tap-target location-toast-close"
-              onClick={onDismiss}
-              aria-label="Dismiss location message"
-            >
-              Close
-            </button>
-          )}
-        </div>
+      {showRetry && showDismiss && (
+        <LocationHintActions onRetry={onRetry} onDismiss={onDismiss} className="location-toast-actions" />
       )}
     </div>
   );
