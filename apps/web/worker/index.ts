@@ -30,7 +30,7 @@ import {
   shoreAreaQueryUrl,
   type GeoJsonFeatureCollection,
 } from "../lib/server/lakes";
-import { isDowlknum } from "@fishy/core";
+import { isLakeIdForState, lakeIdFromDetailPath } from "@fishy/core";
 
 const STYLE_PATH = "/maps/outdoor-v2/style.json";
 const DNR_HOST = "enterprise.gisdata.mn.gov";
@@ -84,10 +84,9 @@ async function handleLakes(request: Request, url: URL): Promise<Response | null>
   if (url.pathname === "/api/lakes/nearby") {
     return cachedLakeResponse(request, () => nearbyLakes(request, url));
   }
-  const match = /^\/api\/lakes\/([0-9]{8})$/.exec(url.pathname);
-  if (match) {
-    const dowlknum = match[1] ?? "";
-    return cachedLakeResponse(request, () => lakeDetail(request, url, dowlknum));
+  const lakeId = lakeIdFromDetailPath(url.pathname);
+  if (lakeId !== null) {
+    return cachedLakeResponse(request, () => lakeDetail(request, url, lakeId));
   }
   if (url.pathname.startsWith("/api/lakes/")) {
     return text("not found", 404);
@@ -97,7 +96,7 @@ async function handleLakes(request: Request, url: URL): Promise<Response | null>
 
 function lakeCacheKey(request: Request): Request {
   const url = new URL(request.url);
-  if (/^\/api\/lakes\/[0-9]{8}$/.test(url.pathname)) {
+  if (lakeIdFromDetailPath(url.pathname) !== null) {
     url.searchParams.set("_rev", LAKE_DETAIL_CACHE_REV);
   }
   return new Request(url.toString(), { method: request.method, headers: request.headers });
@@ -119,9 +118,10 @@ async function cachedLakeResponse(request: Request, build: () => Promise<Respons
 
 async function searchLakes(request: Request, url: URL): Promise<Response> {
   if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
-  const query = sanitizeSearchQuery(url.searchParams.get("q"));
+  const state = url.searchParams.get("state");
+  const query = sanitizeSearchQuery(url.searchParams.get("q"), state);
   if (!query) return text("not found", 404);
-  const upstream = await dnrFetch(searchQueryUrl(buildSearchWhere(query)));
+  const upstream = await dnrFetch(searchQueryUrl(buildSearchWhere(query, state!)));
   if (!upstream.ok) return text("upstream failed", 502);
   const body = (await upstream.json()) as {
     features?: Array<{ attributes?: Record<string, unknown> }>;
@@ -149,16 +149,17 @@ async function nearbyLakes(request: Request, url: URL): Promise<Response> {
   return json(normalizeOutlineCollection(collection), request.method, LAKE_CACHE_CONTROL);
 }
 
-async function lakeDetail(request: Request, url: URL, dowlknum: string): Promise<Response> {
-  if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
-  if (!isDowlknum(dowlknum)) return text("not found", 404);
+async function lakeDetail(request: Request, url: URL, lakeId: string): Promise<Response> {
+  const state = url.searchParams.get("state");
+  if (!isSupportedState(state)) return text("not found", 404);
+  if (!isLakeIdForState(state!, lakeId)) return text("not found", 404);
 
   const [extentRes, outlineRes, contoursRes, maxDepthRes, shoreRes] = await Promise.all([
-    dnrFetch(extentQueryUrl(dowlknum)),
-    dnrFetch(outlineQueryUrl(dowlknum)),
-    dnrFetch(contoursQueryUrl(dowlknum)),
-    dnrFetch(maxDepthQueryUrl(dowlknum)),
-    dnrFetch(shoreAreaQueryUrl(dowlknum)),
+    dnrFetch(extentQueryUrl(lakeId)),
+    dnrFetch(outlineQueryUrl(lakeId)),
+    dnrFetch(contoursQueryUrl(lakeId)),
+    dnrFetch(maxDepthQueryUrl(lakeId)),
+    dnrFetch(shoreAreaQueryUrl(lakeId)),
   ]);
   if (![extentRes, outlineRes, contoursRes, maxDepthRes, shoreRes].every((response) => response.ok)) {
     return text("upstream failed", 502);
@@ -191,7 +192,7 @@ async function lakeDetail(request: Request, url: URL, dowlknum: string): Promise
 
   return json(
     buildLakeDetail({
-      dowlknum,
+      dowlknum: lakeId,
       name,
       areaAcres,
       maxDepthFt,

@@ -6,20 +6,42 @@ import {
   depthFeetFromDnr,
   feetToMeters,
   isDowlknum,
+  isLakeIdForState,
+  isWbic,
   lakeFinderUrl,
   lakeFromProperties,
   pmtilesProtocolUrl,
   roundHalfAwayFromZero,
   SAMPLE_VIEW,
   squareMetersToAcres,
+  type LakeIndexRow,
 } from "./index.ts";
 
 interface Contract {
   round: { value: number | null; digits: number; out: number }[];
   feetToMeters: { feet: number; meters: number }[];
   dnrDepthFeet: { depth: number | null; absDepth: number | null; feet: number }[];
+  positiveDepthFt: {
+    depth: number | null;
+    absDepth: number | null;
+    explicit?: number;
+    depth_ft: number;
+  }[];
   acres: { squareMeters: number; acres: number }[];
   dowlknum: { id: string; valid: boolean; lakeFinder?: string }[];
+  wbic: { id: string; valid: boolean }[];
+  lakeRef: { state: string; id: string; valid: boolean }[];
+  wiLakeIndex: LakeIndexRow[];
+  wiLakeDetail: {
+    id: string;
+    name: string;
+    maxDepthFt: number;
+    areaAcres: number;
+    extent: { west: number; south: number; east: number; north: number };
+    source_pdf_url?: string;
+    qa_status?: string;
+    survey_date?: string;
+  };
   pmtiles: { input: string; url: string }[];
   sampleView: { longitude: number; latitude: number; zoom: number };
 }
@@ -28,6 +50,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const contract = JSON.parse(
   readFileSync(resolve(here, "../../../fixtures/contract.json"), "utf8"),
 ) as Contract;
+
+function positiveDepthFt(
+  depth: number | null,
+  absDepth: number | null,
+  explicit: number | null = null,
+): number {
+  if (explicit !== null && Number.isFinite(explicit)) return explicit;
+  return depthFeetFromDnr(depth, absDepth);
+}
 
 describe("contract", () => {
   it("rounds half away from zero", () => {
@@ -49,15 +80,42 @@ describe("contract", () => {
     }
   });
 
-  it("checks DOW lake ids and PMTiles URLs", () => {
+  it("keeps published depth_ft positive", () => {
+    for (const row of contract.positiveDepthFt) {
+      const feet = positiveDepthFt(row.depth, row.absDepth, row.explicit ?? null);
+      expect(feet).toBe(row.depth_ft);
+      expect(feet).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("checks lake ids, lake refs, and PMTiles URLs", () => {
     for (const row of contract.dowlknum) {
       expect(isDowlknum(row.id)).toBe(row.valid);
       expect(lakeFinderUrl(row.id)).toBe(row.valid ? row.lakeFinder : null);
+    }
+    for (const row of contract.wbic) {
+      expect(isWbic(row.id)).toBe(row.valid);
+    }
+    for (const row of contract.lakeRef) {
+      expect(isLakeIdForState(row.state, row.id)).toBe(row.valid);
     }
     for (const row of contract.pmtiles) {
       expect(pmtilesProtocolUrl(row.input)).toBe(row.url);
     }
     expect(SAMPLE_VIEW).toEqual(contract.sampleView);
+  });
+
+  it("describes Wisconsin index and detail fixtures", () => {
+    expect(contract.wiLakeIndex).toHaveLength(1);
+    const indexRow = contract.wiLakeIndex[0]!;
+    expect(isWbic(indexRow.id)).toBe(true);
+    expect(indexRow.qa_status).toBe("verified");
+
+    const detail = contract.wiLakeDetail;
+    expect(isWbic(detail.id)).toBe(true);
+    expect(detail.maxDepthFt).toBeGreaterThan(0);
+    expect(detail.qa_status).toBe("verified");
+    expect(detail.source_pdf_url).toMatch(/^https:\/\//);
   });
 
   it("reads a lake click payload", () => {

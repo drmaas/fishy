@@ -1,4 +1,4 @@
-import { depthFeetFromDnr, isDowlknum } from "@fishy/core";
+import { depthFeetFromDnr, isLakeIdForState, type WisconsinLakeFields } from "@fishy/core";
 
 const DNR_HOST = "https://enterprise.gisdata.mn.gov";
 const CONTOURS_LAYER = `${DNR_HOST}/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/0`;
@@ -42,7 +42,7 @@ export interface GeoJsonFeatureCollection {
   features: GeoJsonFeature[];
 }
 
-export interface LakeDetail {
+export interface LakeDetail extends WisconsinLakeFields {
   dowlknum: string;
   name: string;
   maxDepthFt: number;
@@ -62,21 +62,22 @@ export function escapeWhereValue(value: string): string {
 }
 
 /**
- * Accept a lake name fragment or an 8-digit DOW id.
+ * Accept a lake name fragment or a state-valid lake id.
  * Returns null when the query is too short or contains disallowed characters.
  */
-export function sanitizeSearchQuery(raw: string | null): string | null {
-  if (raw === null) return null;
+export function sanitizeSearchQuery(raw: string | null, state: string | null): string | null {
+  if (raw === null || state === null) return null;
   const trimmed = raw.trim();
   if (trimmed.length < 2) return null;
-  if (isDowlknum(trimmed)) return trimmed;
+  if (isLakeIdForState(state, trimmed)) return trimmed;
+  if (/^[0-9]+$/.test(trimmed)) return null;
   if (trimmed.length > 80) return null;
   if (!SEARCH_CHARS.test(trimmed)) return null;
   return trimmed;
 }
 
-export function buildSearchWhere(query: string): string {
-  if (isDowlknum(query)) {
+export function buildSearchWhere(query: string, state: string): string {
+  if (isLakeIdForState(state, query)) {
     return `dowlknum='${escapeWhereValue(query)}' AND island='N'`;
   }
   const needle = escapeWhereValue(query.toUpperCase());
@@ -285,7 +286,7 @@ export function normalizeSearchHits(
   for (const feature of features) {
     const attrs = feature.attributes ?? {};
     const dowlknum = String(attrs.dowlknum ?? "");
-    if (!isDowlknum(dowlknum)) continue;
+    if (!isLakeIdForState("mn", dowlknum)) continue;
     const acres = asNumber(attrs.acres);
     if (acres === null) continue;
     const nameValue = attrs.lake_name;

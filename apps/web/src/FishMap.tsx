@@ -1,4 +1,5 @@
 import {
+  isLakeIdForState,
   lakeFromProperties,
   OPENFREEMAP_STYLE,
   type DepthUnit,
@@ -418,7 +419,7 @@ export function FishMap({
         const surveyLayers = ["survey-nearby-fill", "survey-outline-fill"];
         const surveyHits = map?.queryRenderedFeatures(event.point, { layers: surveyLayers }) ?? [];
         const dowlknum = String(surveyHits[0]?.properties?.dowlknum ?? "");
-        if (/^[0-9]{8}$/.test(dowlknum)) {
+        if (isLakeIdForState("mn", dowlknum)) {
           onSelectRef.current(dowlknum);
           return;
         }

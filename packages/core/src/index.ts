@@ -10,7 +10,22 @@ export {
   squareMetersToAcres,
   type DepthUnit,
 } from "./depth.ts";
-export { isDowlknum, lakeFinderUrl, lakeFromProperties, type LakeInfo } from "./lake.ts";
+export {
+  isDowlknum,
+  isWbic,
+  isLakeIdForState,
+  lakeIdFromDetailPath,
+  LAKE_DETAIL_PATH_RE,
+  lakeFinderUrl,
+  lakeFromProperties,
+  type LakeInfo,
+  type LakeRef,
+  type LakeQaStatus,
+  type WisconsinLakeFields,
+  type LakeDetailFields,
+  type LakeIndexRow,
+  type LakeIndexBbox,
+} from "./lake.ts";
 export {
   OPENFREEMAP_STYLE,
   SAMPLE_VIEW,
