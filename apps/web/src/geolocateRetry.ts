@@ -106,33 +106,26 @@ export function watchStateAfterFreshStartPlan(
   return state;
 }
 
+export type GeolocateFreshStartResult = {
+  plan: GeolocateFreshStartPlan;
+  triggersSucceeded: boolean;
+};
+
 export function runGeolocateFreshStart(
   trigger: () => boolean,
   button: HTMLButtonElement | null,
-): GeolocateFreshStartPlan {
+): GeolocateFreshStartResult {
   const initialState = readGeolocateWatchState(button);
   const plan = planGeolocateFreshStart(initialState, button?.disabled ?? false);
   if (plan.enableButton) {
     prepareGeolocateButtonForRetry(button);
   }
+  let triggersSucceeded = true;
   for (let i = 0; i < plan.triggerCount; i += 1) {
-    trigger();
+    if (!trigger()) {
+      triggersSucceeded = false;
+      break;
+    }
   }
-  return plan;
-}
-
-export function runGeolocatePermissionGrantStart(
-  trigger: () => boolean,
-  button: HTMLButtonElement | null,
-): boolean {
-  const watchState = readGeolocateWatchState(button);
-  if (!shouldStartGeolocationOnPermissionGrant(watchState)) {
-    return false;
-  }
-  const plan = planGeolocateFreshStart("OFF", button?.disabled ?? false);
-  if (plan.enableButton) {
-    prepareGeolocateButtonForRetry(button);
-  }
-  trigger();
-  return true;
+  return { plan, triggersSucceeded };
 }

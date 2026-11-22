@@ -8,18 +8,15 @@ import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
 import { GEOLOCATION_ERROR, shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
-import {
-  prepareGeolocateButtonForRetry,
-  readGeolocateWatchState,
-  runGeolocateFreshStart,
-  runGeolocatePermissionGrantStart,
-  shouldInterceptGeolocateButtonClick,
-} from "./geolocateRetry.ts";
+import { prepareGeolocateButtonForRetry, readGeolocateWatchState, shouldInterceptGeolocateButtonClick } from "./geolocateRetry.ts";
 import {
   armGeolocateHangTimer,
   createFishyGeolocateControl,
-  replaceGeolocateControl,
+  geolocateButtonFromMap,
   shouldRecreateGeolocateAfterError,
+  startFreshGeolocate as startFreshGeolocateSession,
+  startGeolocateAfterPermissionGrant,
+  type GeolocateSession,
 } from "./mapGeolocateSession.ts";
 import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
@@ -102,6 +99,7 @@ export function FishMap({
     let map: import("maplibre-gl").Map | undefined;
     let geolocateButton: HTMLButtonElement | null = null;
     let onGeolocateButtonClick: ((event: Event) => void) | null = null;
+    let clearHangTimer: (() => void) | undefined;
     let cancelled = false;
     mapReady.current = false;
     fittedLake.current = null;
@@ -156,10 +154,8 @@ export function FishMap({
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
       let geolocate = createFishyGeolocateControl(maplibregl);
       map.addControl(geolocate, "bottom-right");
-      let geolocateNeedsRecreate = false;
-      let clearHangTimer: (() => void) | undefined;
-      const geolocateButtonFor = (): HTMLButtonElement | null =>
-        map?.getContainer().querySelector<HTMLButtonElement>(".maplibregl-ctrl-geolocate") ?? null;
+      const session: GeolocateSession = { control: geolocate, needsRecreate: false };
+      const geolocateButtonFor = (): HTMLButtonElement | null => geolocateButtonFromMap(map);
       const detachGeolocateClick = () => {
         if (geolocateButton && onGeolocateButtonClick) {
           geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
@@ -205,7 +201,7 @@ export function FishMap({
           clearHangTimer?.();
           clearHangTimer = undefined;
           if (shouldRecreateGeolocateAfterError(event.code)) {
-            geolocateNeedsRecreate = true;
+            session.needsRecreate = true;
           }
           onLocationRef.current({ status: "error", code: event.code });
         });
@@ -229,35 +225,53 @@ export function FishMap({
           });
         });
       }
-      const ensureGeolocateControl = (): typeof geolocate => {
-        if (!geolocateNeedsRecreate || !map) return geolocate;
+      const onGeolocateControlReplaced = (control: typeof geolocate) => {
+        geolocate = control;
+        session.control = control;
+        wireGeolocate(control);
+        attachGeolocateClick();
+      };
+      const onGeolocateStartError = (code: number) => {
+        geolocationFailed = true;
+        onLocationRef.current({ status: "error", code });
+      };
+      const beforeGeolocateReplace = () => {
         detachGeolocateClick();
         clearHangTimer?.();
         clearHangTimer = undefined;
-        geolocate = replaceGeolocateControl(map, maplibregl, geolocate);
-        wireGeolocate(geolocate);
-        geolocateNeedsRecreate = false;
-        attachGeolocateClick();
-        return geolocate;
       };
-      const startFreshGeolocate = (button: HTMLButtonElement | null) => {
-        const control = ensureGeolocateControl();
-        runGeolocateFreshStart(() => control.trigger(), button);
+      const beginFreshGeolocate = async () => {
+        if (!map) return;
+        await startFreshGeolocateSession(
+          map,
+          maplibregl,
+          session,
+          onGeolocateControlReplaced,
+          onGeolocateStartError,
+          beforeGeolocateReplace,
+        );
       };
       locationRetryRef.current = () => {
-        startFreshGeolocate(geolocateButtonFor());
+        void beginFreshGeolocate();
       };
       locationPermissionGrantRef.current = () => {
-        ensureGeolocateControl();
-        runGeolocatePermissionGrantStart(() => geolocate.trigger(), geolocateButtonFor());
+        if (!map) return;
+        void startGeolocateAfterPermissionGrant(
+          map,
+          maplibregl,
+          session,
+          onGeolocateControlReplaced,
+          onGeolocateStartError,
+          beforeGeolocateReplace,
+        );
       };
       onGeolocateButtonClick = (event: Event) => {
         const button = event.currentTarget as HTMLButtonElement;
         onLocationAttemptRef.current();
         const watchState = readGeolocateWatchState(button);
-        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled) || geolocateNeedsRecreate) {
+        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled) || session.needsRecreate) {
           event.stopImmediatePropagation();
-          startFreshGeolocate(button);
+          void beginFreshGeolocate();
         }
       };
       wireGeolocate(geolocate);
@@ -416,6 +430,8 @@ export function FishMap({
 
     return () => {
       cancelled = true;
+      clearHangTimer?.();
+      clearHangTimer = undefined;
       if (geolocateButton && onGeolocateButtonClick) {
         geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
       }

@@ -4,7 +4,6 @@ import {
   planGeolocateFreshStart,
   readGeolocateWatchState,
   runGeolocateFreshStart,
-  runGeolocatePermissionGrantStart,
   shouldInterceptGeolocateButtonClick,
   shouldStartGeolocationOnPermissionGrant,
   watchStateAfterFreshStartPlan,
@@ -90,10 +89,11 @@ describe("runGeolocateFreshStart", () => {
   it("fires two triggers from ACTIVE_ERROR for a new watch", () => {
     const calls: number[] = [];
     const button = mockGeolocateButton(["maplibregl-ctrl-geolocate-active-error"]);
-    const plan = runGeolocateFreshStart(() => {
+    const { plan, triggersSucceeded } = runGeolocateFreshStart(() => {
       calls.push(calls.length + 1);
       return true;
     }, button);
+    expect(triggersSucceeded).toBe(true);
     expect(plan.triggerCount).toBe(2);
     expect(calls).toEqual([1, 2]);
   });
@@ -107,26 +107,16 @@ describe("runGeolocateFreshStart", () => {
   });
 });
 
-describe("runGeolocatePermissionGrantStart", () => {
-  it("skips trigger while WAITING_ACTIVE", () => {
+describe("runGeolocateFreshStart trigger failures", () => {
+  it("stops when trigger returns false", () => {
     const calls: number[] = [];
-    const button = mockGeolocateButton(["maplibregl-ctrl-geolocate-waiting"]);
-    const started = runGeolocatePermissionGrantStart(() => {
-      calls.push(1);
-      return true;
+    const button = mockGeolocateButton(["maplibregl-ctrl-geolocate-active-error"]);
+    const { plan, triggersSucceeded } = runGeolocateFreshStart(() => {
+      calls.push(calls.length + 1);
+      return calls.length === 1;
     }, button);
-    expect(started).toBe(false);
-    expect(calls).toEqual([]);
-  });
-
-  it("starts once from OFF when permission is granted", () => {
-    const calls: number[] = [];
-    const button = mockGeolocateButton([]);
-    const started = runGeolocatePermissionGrantStart(() => {
-      calls.push(1);
-      return true;
-    }, button);
-    expect(started).toBe(true);
-    expect(calls).toEqual([1]);
+    expect(plan.triggerCount).toBe(2);
+    expect(calls).toEqual([1, 2]);
+    expect(triggersSucceeded).toBe(false);
   });
 });

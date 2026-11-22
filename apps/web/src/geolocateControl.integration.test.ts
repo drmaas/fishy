@@ -2,7 +2,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as maplibregl from "maplibre-gl";
-import { FISHY_GEOLOCATE_OPTIONS } from "./mapGeolocateSession.ts";
+import { GEOLOCATE_FIND_LABEL } from "./geolocateRetry.ts";
+import {
+  FISHY_GEOLOCATE_OPTIONS,
+  geolocateButtonFromMap,
+  startFreshGeolocate,
+  type GeolocateControlFactory,
+  type GeolocateSession,
+} from "./mapGeolocateSession.ts";
 
 const INTEGRATION_GEOLOCATE_OPTIONS = {
   ...FISHY_GEOLOCATE_OPTIONS,
@@ -19,17 +26,13 @@ type WatchCall = {
 const watchCalls: WatchCall[] = [];
 let watchSerial = 0;
 
-function sleep(ms: number) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 function createStubMap(): maplibregl.Map {
   const controls: maplibregl.IControl[] = [];
+  const mapRoot = document.createElement("div");
   const canvasHost = document.createElement("div");
   const stub = {
-    _getUIString: (key: string) => (key.includes("Find") ? "Find my location" : "Unavailable"),
+    _getUIString: (key: string) => (key.includes("Find") ? GEOLOCATE_FIND_LABEL : "Unavailable"),
+    getContainer: () => mapRoot,
     getCanvasContainer: () => canvasHost,
     on: () => stub,
     off: () => stub,
@@ -42,7 +45,8 @@ function createStubMap(): maplibregl.Map {
     fitBounds: () => undefined,
     isZooming: () => false,
     addControl(control: maplibregl.IControl) {
-      control.onAdd(stub as unknown as maplibregl.Map);
+      const root = control.onAdd(stub as unknown as maplibregl.Map);
+      if (root) mapRoot.appendChild(root);
       controls.push(control);
     },
     removeControl(control: maplibregl.IControl) {
@@ -118,36 +122,53 @@ describe("GeolocateControl deny then recreate", () => {
     vi.unstubAllGlobals();
   });
 
-  it(
-    "uses fresh high-accuracy watch options after permission denial and control recreate",
-    async () => {
-    const first = new maplibregl.GeolocateControl(INTEGRATION_GEOLOCATE_OPTIONS);
+  it("starts a high-accuracy watch on the first production retry after denial", async () => {
+    const createIntegrationControl: GeolocateControlFactory = (lib) =>
+      new lib.GeolocateControl(INTEGRATION_GEOLOCATE_OPTIONS);
+    const first = createIntegrationControl(maplibregl);
     map.addControl(first);
-    await sleep(50);
-    expect((first as unknown as { _setup?: boolean })._setup).toBe(true);
+    await vi.waitFor(() => expect((first as unknown as { _setup?: boolean })._setup).toBe(true));
 
     const denied = new Promise<void>((resolve) => {
       first.once("error", () => resolve());
     });
     expect(first.trigger()).toBe(true);
     await denied;
+    expect(watchCalls).toHaveLength(1);
 
-    expect(watchCalls[0]?.options).toMatchObject({
-      enableHighAccuracy: true,
-      maximumAge: 0,
-      timeout: 10000,
-    });
+    const oldButton = geolocateButtonFromMap(map);
+    expect(oldButton).not.toBeNull();
+    oldButton!.disabled = true;
 
-    map.removeControl(first);
-    const recreated = new maplibregl.GeolocateControl(INTEGRATION_GEOLOCATE_OPTIONS);
-    map.addControl(recreated);
-    await sleep(50);
-
+    const session: GeolocateSession = { control: first, needsRecreate: true };
+    let resolveSuccess: () => void = () => undefined;
     const success = new Promise<void>((resolve) => {
-      recreated.once("geolocate", () => resolve());
+      resolveSuccess = resolve;
     });
-    expect(recreated.trigger()).toBe(true);
+
+    const errors: number[] = [];
+    const started = await startFreshGeolocate(
+      map,
+      maplibregl,
+      session,
+      (control) => {
+        session.control = control;
+        control.once("geolocate", () => resolveSuccess());
+      },
+      (code) => errors.push(code),
+      undefined,
+      createIntegrationControl,
+    );
+
+    expect(started).toBe(true);
+    expect(errors).toEqual([]);
     await success;
+
+    const newButton = geolocateButtonFromMap(map);
+    expect(newButton).not.toBeNull();
+    expect(newButton).not.toBe(oldButton);
+    expect(newButton!.title).toBe(GEOLOCATE_FIND_LABEL);
+    expect(newButton!.getAttribute("aria-label")).toBe(GEOLOCATE_FIND_LABEL);
 
     expect(watchCalls).toHaveLength(2);
     expect(watchCalls[1]?.options).toMatchObject({
@@ -156,7 +177,5 @@ describe("GeolocateControl deny then recreate", () => {
       timeout: 10000,
     });
     expect(watchCalls[1]?.options.maximumAge).not.toBe(600000);
-  },
-    10_000,
-  );
+  }, 10_000);
 });
