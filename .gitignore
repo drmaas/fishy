@@ -14,6 +14,8 @@ __pycache__/
 # Downloaded survey data. Commit only fixtures and the tiny sample archives.
 /data/
 /pipeline/output/
+/pipeline/.cache/
+/pipeline/work/
 *.pmtiles
 !apps/web/public/samples/*.pmtiles
 **/*.mbtiles

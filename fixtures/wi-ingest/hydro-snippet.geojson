@@ -1,0 +1,30 @@
+{
+  "type": "FeatureCollection",
+  "crs": {
+    "type": "name",
+    "properties": { "name": "urn:ogc:def:crs:EPSG::3071" }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "WATERBODY_WBIC": 417300,
+        "WATERBODY_NAME": "Ada Lake",
+        "HYDROID": 900001,
+        "HYDROTYPE": 706
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [545000.0, 510000.0],
+            [546000.0, 510000.0],
+            [546000.0, 511000.0],
+            [545000.0, 511000.0],
+            [545000.0, 510000.0]
+          ]
+        ]
+      }
+    }
+  ]
+}

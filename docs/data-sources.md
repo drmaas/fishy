@@ -42,11 +42,26 @@ https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lak
 
 Terms: the MapServer item reports access `public` and `licenseInfo` of `None`. The retired metadata page stated access constraints none and use constraints none. Credit the Minnesota Department of Natural Resources on the map. LakeFinder links use `https://www.dnr.state.mn.us/lakefind/showreport.html?downum=<DOWLKNUM>` (verified for `27013300`).
 
-## Wisconsin DNR lake bathymetry (batch, planned)
+## Wisconsin DNR lake bathymetry (batch)
 
-Wisconsin will be **pre-built** from DNR PDF bathymetry maps, tiled to PMTiles, and served from **R2**. Implementation lives under `pipeline/fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`). Stages are stubs in this milestone; heavy dependencies (GDAL/rasterio, OpenCV, scikit-image, OCR) install only with the `wi` optional extra in `pipeline/pyproject.toml`.
+Wisconsin is **pre-built** from DNR PDF bathymetry maps, tiled to PMTiles, and served from **R2**. Implementation lives under `pipeline/fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`).
 
-Do not commit PDF extracts or statewide Wisconsin archives. Credit the Wisconsin Department of Natural Resources on the map when Wisconsin layers ship.
+| What | URL |
+| --- | --- |
+| Lake map catalog (HTML) | https://apps.dnr.wi.gov/lakes/maps/ |
+| Example PDF (Ada Lake) | https://apps.dnr.wi.gov/doclink/lakes_maps/0417300a.pdf |
+| 24K Hydro open data | https://data-wi-dnr.opendata.arcgis.com/datasets/wi-dnr::24k-hydro-full-file-geodatabase/about |
+| 24K Waterbody MapServer layer | https://dnrmaps.wi.gov/arcgis/rest/services/DW_Map_Dynamic/EN_SurfaceWater_WTM_Ext_Dynamic_L16/MapServer/5 |
+
+`ingest` (WI 3/8) harvests the catalog into a manifest (WBIC, sheet suffix `a`/`b`, county, acres, max depth, PDF URL), joins rows to **24K Hydro** waterbodies on padded 7-digit WBIC in EPSG:3071, and renders PDF pages to **300–400 DPI** PNG rasters under `pipeline/work/` (git-ignored). Downloads cache under `pipeline/.cache/wi/` (git-ignored). Committed fixtures for CI live in `fixtures/wi-ingest/`.
+
+One-lake hydro query (verified against Ada Lake `WATERBODY_WBIC=417300`):
+
+```text
+https://dnrmaps.wi.gov/arcgis/rest/services/DW_Map_Dynamic/EN_SurfaceWater_WTM_Ext_Dynamic_L16/MapServer/5/query?where=WATERBODY_WBIC%3D417300&outFields=*&f=geojson&outSR=3071
+```
+
+Terms: lake map catalog pages checked 2026-11-22 did not show a per-file license on the PDF links. Wisconsin DNR hydrography is published on the state open data portal for public use with credit to the Wisconsin Department of Natural Resources. Do not commit statewide hydro GeoPackages, PDFs, or rendered rasters. Credit Wisconsin DNR on the map when Wisconsin layers ship (see [ATTRIBUTIONS.md](../ATTRIBUTIONS.md)).
 
 ## NOAA NCEI Great Lakes bathymetry
 
