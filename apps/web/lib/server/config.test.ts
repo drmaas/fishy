@@ -41,6 +41,8 @@ describe("worker config", () => {
   it("allows only the outdoor style, sprite, TileJSON, tiles, and glyphs", () => {
     expect(isAllowedMaptilerPath("/maps/outdoor-v2/style.json")).toBe(true);
     expect(isAllowedMaptilerPath("/maps/outdoor-v2/sprite@2x.png")).toBe(true);
+    expect(isAllowedMaptilerPath("/maps/outdoor-v2-dark/style.json")).toBe(true);
+    expect(isAllowedMaptilerPath("/maps/outdoor-v2-dark/sprite@2x.png")).toBe(true);
     expect(isAllowedMaptilerPath("/sprites/general/sprite@2x.json")).toBe(true);
     expect(isAllowedMaptilerPath("/sprites/general/sprite@2x.png")).toBe(true);
     expect(isAllowedMaptilerPath("/tiles/v3/tiles.json")).toBe(true);

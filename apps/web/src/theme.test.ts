@@ -2,7 +2,9 @@ import { OPENFREEMAP_DARK_STYLE, OPENFREEMAP_STYLE } from "@fishy/core";
 import { describe, expect, it } from "vitest";
 import {
   contoursOnlyBackground,
+  cycleThemePreference,
   mapStyleKey,
+  maptilerStyleUrl,
   openFreeMapStyleUrl,
   readThemePreference,
   resolveColorScheme,
@@ -35,6 +37,15 @@ describe("theme", () => {
     expect(contoursOnlyBackground("dark")).toBe("#1b2832");
     expect(mapStyleKey("openfreemap", "dark")).toBe(OPENFREEMAP_DARK_STYLE);
     expect(mapStyleKey("none", "light")).toBe("contours:light");
-    expect(mapStyleKey("maptiler", "dark", "/api/basemap/style.json")).toBe("/api/basemap/style.json");
+    expect(maptilerStyleUrl("light")).toBe("/api/basemap/style.json");
+    expect(maptilerStyleUrl("dark")).toBe("/api/basemap/style-dark.json");
+    expect(mapStyleKey("maptiler", "dark", maptilerStyleUrl("dark"))).toBe("/api/basemap/style-dark.json");
+    expect(mapStyleKey("maptiler", "light", maptilerStyleUrl("light"))).toBe("/api/basemap/style.json");
+  });
+
+  it("cycles theme preferences in order", () => {
+    expect(cycleThemePreference("light")).toBe("dark");
+    expect(cycleThemePreference("dark")).toBe("auto");
+    expect(cycleThemePreference("auto")).toBe("light");
   });
 });
