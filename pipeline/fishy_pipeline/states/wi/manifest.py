@@ -15,6 +15,8 @@ def build_manifest(
     multi_sheet_wbics: list[str],
     catalog_source: str,
     hydro_source: str,
+    skip_count: int = 0,
+    raster_skip_count: int = 0,
 ) -> dict:
     return {
         "version": 1,
@@ -23,6 +25,8 @@ def build_manifest(
         "catalog_source": catalog_source,
         "hydro_source": hydro_source,
         "entry_count": len(entries),
+        "skip_count": skip_count,
+        "raster_skip_count": raster_skip_count,
         "entries": entries,
         "unmatched_wbic": unmatched_wbic,
         "multi_sheet_wbics": multi_sheet_wbics,

@@ -39,8 +39,8 @@ def parse_map_key(map_key: str) -> tuple[str, str] | None:
     return wbic, suffix
 
 
-def map_key_from_wbic(wbic: str, sheet_suffix: str = "a") -> str:
-    """Build a stable cache key ``{wbic}{suffix}`` for swims-hosted PDFs."""
+def map_key_from_wbic(wbic: str, sheet_suffix: str) -> str:
+    """Build ``{wbic}{suffix}`` for swims-hosted documents without a doclink stem."""
     normalized = normalize_wbic(wbic)
     if normalized is None:
         raise ValueError(f"invalid wbic {wbic!r}")
@@ -67,26 +67,3 @@ def map_key_from_pdf_url(url: str) -> str | None:
     if parse_map_key(stem) is None:
         return None
     return stem.lower()
-
-
-def resolve_catalog_map_key(href: str, wbic_from_row: str | None) -> tuple[str, str, str] | None:
-    """
-    Resolve ``(map_key, wbic, sheet_suffix)`` from a catalog link and table WBIC cell.
-
-    Supports doclink ``/lakes_maps/{wbic}{a|b}.pdf`` and swims ``DownloadDocument?id=`` links
-    (sheet suffix defaults to ``a`` when only the WBIC column identifies the lake).
-    """
-    from_doclink = map_key_from_pdf_url(href)
-    if from_doclink is not None:
-        parsed = parse_map_key(from_doclink)
-        if parsed is None:
-            return None
-        wbic, suffix = parsed
-        return from_doclink, wbic, suffix
-    if is_swims_document_url(href) and wbic_from_row is not None:
-        wbic = normalize_wbic(wbic_from_row)
-        if wbic is None:
-            return None
-        suffix = "a"
-        return map_key_from_wbic(wbic, suffix), wbic, suffix
-    return None

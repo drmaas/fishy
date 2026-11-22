@@ -100,11 +100,17 @@ def join_catalog_to_hydro(
 
 
 def tag_multi_sheet_lakes(entries: list[dict]) -> tuple[list[dict], list[str]]:
-    """Mark entries that share a WBIC with more than one sheet suffix."""
+    """Mark entries that share a WBIC with more than one map document."""
     suffixes_by_wbic: dict[str, set[str]] = {}
+    map_keys_by_wbic: dict[str, set[str]] = {}
     for entry in entries:
         suffixes_by_wbic.setdefault(entry["wbic"], set()).add(entry["sheet_suffix"])
-    multi = sorted(wbic for wbic, suffixes in suffixes_by_wbic.items() if len(suffixes) > 1)
+        map_keys_by_wbic.setdefault(entry["wbic"], set()).add(entry["map_key"])
+    multi = sorted(
+        wbic
+        for wbic in suffixes_by_wbic
+        if len(suffixes_by_wbic[wbic]) > 1 or len(map_keys_by_wbic.get(wbic, set())) > 1
+    )
     tagged: list[dict] = []
     for entry in entries:
         copy = dict(entry)

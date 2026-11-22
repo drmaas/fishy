@@ -8,14 +8,20 @@ import json
 import re
 import time
 import urllib.parse
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from http.cookiejar import CookieJar
 from pathlib import Path
 
-from fishy_pipeline.states.wi.dnr_fetch import build_dnr_opener, fetch_dnr_pdf
-from fishy_pipeline.states.wi.wbic import normalize_wbic, resolve_catalog_map_key
+from fishy_pipeline.states.wi.dnr_fetch import build_dnr_opener, fetch_dnr_document
+from fishy_pipeline.states.wi.wbic import (
+    is_swims_document_url,
+    map_key_from_pdf_url,
+    map_key_from_wbic,
+    normalize_wbic,
+    parse_map_key,
+)
 
-CATALOG_PAGE_URL = "https://apps.dnr.wi.gov/lakes/maps/"
 CATALOG_FORM_URL = "https://apps.dnr.wi.gov/lakes/Documents/LakeMaps.aspx"
 DEFAULT_USER_AGENT = "FishyBathymetry/0.1 (pipeline wi ingest; +https://github.com/drmaas/fishy)"
 DEFAULT_RATE_LIMIT_SECONDS = 1.0
@@ -56,6 +62,19 @@ class CatalogRow:
     pdf_url: str
 
 
+@dataclass
+class CatalogRowDraft:
+    pdf_url: str
+    wbic: str
+    name: str
+    county: str
+    acres: float | None
+    max_depth_ft: float | None
+    location: str
+    map_key: str | None = None
+    sheet_suffix: str | None = None
+
+
 class CatalogHarvestError(RuntimeError):
     pass
 
@@ -91,8 +110,8 @@ def _catalog_link_pairs(block: str) -> list[tuple[str, str]]:
 
 
 def parse_catalog_html(page_html: str) -> list[CatalogRow]:
-    """Parse one catalog results page into rows (stdlib HTML only)."""
-    rows: list[CatalogRow] = []
+    """Parse one catalog results page and assign stable map keys."""
+    drafts: list[CatalogRowDraft] = []
     parts = ROW_SPLIT_RE.split(page_html)
     for chunk in parts[1:]:
         block = "<tr" + chunk
@@ -100,47 +119,146 @@ def parse_catalog_html(page_html: str) -> list[CatalogRow]:
         if len(cells) < 6:
             continue
         wbic_cell = normalize_wbic(cells[5]) if len(cells) > 5 else None
+        if wbic_cell is None:
+            continue
         link = None
         for href, name in _catalog_link_pairs(block):
-            resolved = resolve_catalog_map_key(href, wbic_cell)
-            if resolved is None:
-                continue
-            map_key, wbic, suffix = resolved
-            link = (href, name, map_key, wbic, suffix)
-            break
+            pdf_url = href if href.startswith("http") else html.unescape(href)
+            doclink_key = map_key_from_pdf_url(pdf_url)
+            if doclink_key is not None:
+                parsed = parse_map_key(doclink_key)
+                link = (pdf_url, name, doclink_key, parsed[1] if parsed else "a")
+                break
+            if is_swims_document_url(pdf_url):
+                link = (pdf_url, name, None, None)
+                break
         if link is None:
             continue
-        href, name, map_key, wbic, suffix = link
+        pdf_url, name, map_key, suffix = link
         county = cells[1] if len(cells) > 1 else ""
         acres = _float_cell(cells[2]) if len(cells) > 2 else None
         max_depth = _float_cell(cells[3]) if len(cells) > 3 else None
         location = cells[4] if len(cells) > 4 else ""
-        if wbic_cell and wbic_cell != wbic:
-            wbic = wbic_cell
-            map_key = f"{wbic}{suffix}"
-        pdf_url = href if href.startswith("http") else html.unescape(href)
-        rows.append(
-            CatalogRow(
-                map_key=map_key,
-                wbic=wbic,
-                sheet_suffix=suffix,
+        drafts.append(
+            CatalogRowDraft(
+                pdf_url=pdf_url,
+                wbic=wbic_cell,
                 name=name,
                 county=county,
                 acres=acres,
                 max_depth_ft=max_depth,
                 location=location,
-                pdf_url=pdf_url,
+                map_key=map_key,
+                sheet_suffix=suffix,
             )
         )
+    return finalize_catalog_rows(drafts)
+
+
+def finalize_catalog_rows(drafts: list[CatalogRowDraft]) -> list[CatalogRow]:
+    """Assign swims map keys and validate multiple document URLs per WBIC."""
+    by_wbic: dict[str, list[CatalogRowDraft]] = defaultdict(list)
+    for draft in drafts:
+        by_wbic[draft.wbic].append(draft)
+
+    used_map_keys: set[str] = {
+        draft.map_key for draft in drafts if draft.map_key is not None
+    }
+    rows: list[CatalogRow] = []
+
+    for wbic in sorted(by_wbic):
+        group = by_wbic[wbic]
+        urls = sorted({draft.pdf_url for draft in group})
+        if len(urls) > 2:
+            raise CatalogHarvestError(
+                f"WBIC {wbic} has {len(urls)} distinct document URLs; expected at most 2"
+            )
+
+        url_suffix: dict[str, str] = {}
+        for draft in group:
+            if draft.map_key is not None and draft.sheet_suffix is not None:
+                existing = url_suffix.get(draft.pdf_url)
+                if existing is not None and existing != draft.sheet_suffix:
+                    raise CatalogHarvestError(
+                        f"conflicting suffix for {draft.pdf_url} under WBIC {wbic}"
+                    )
+                url_suffix.setdefault(draft.pdf_url, draft.sheet_suffix)
+
+        used_suffixes = set(url_suffix.values())
+        free_suffixes = [suffix for suffix in ("a", "b") if suffix not in used_suffixes]
+        for url in urls:
+            if url in url_suffix:
+                continue
+            if not free_suffixes:
+                raise CatalogHarvestError(
+                    f"WBIC {wbic}: no free a/b suffix for document URL {url}"
+                )
+            url_suffix[url] = free_suffixes.pop(0)
+
+        for url in urls:
+            suffix = url_suffix[url]
+            doclink_keys = {
+                draft.map_key for draft in group if draft.pdf_url == url and draft.map_key is not None
+            }
+            if len(doclink_keys) > 1:
+                raise CatalogHarvestError(f"conflicting doclink map keys for {url} under WBIC {wbic}")
+            if doclink_keys:
+                map_key = next(iter(doclink_keys))
+            else:
+                map_key = map_key_from_wbic(wbic, suffix)
+                if map_key in used_map_keys:
+                    raise CatalogHarvestError(
+                        f"map key {map_key!r} already assigned for WBIC {wbic}"
+                    )
+                used_map_keys.add(map_key)
+            for draft in group:
+                if draft.pdf_url != url:
+                    continue
+                draft.map_key = map_key
+                draft.sheet_suffix = suffix
+
+        for draft in group:
+            if draft.map_key is None or draft.sheet_suffix is None:
+                raise CatalogHarvestError(f"WBIC {wbic}: failed to assign map key")
+            rows.append(
+                CatalogRow(
+                    map_key=draft.map_key,
+                    wbic=wbic,
+                    sheet_suffix=draft.sheet_suffix,
+                    name=draft.name,
+                    county=draft.county,
+                    acres=draft.acres,
+                    max_depth_ft=draft.max_depth_ft,
+                    location=draft.location,
+                    pdf_url=draft.pdf_url,
+                )
+            )
     return rows
 
 
+def _row_dedupe_key(row: CatalogRow) -> tuple:
+    return (
+        row.wbic,
+        row.pdf_url,
+        row.name,
+        row.county,
+        row.location,
+        row.acres,
+        row.max_depth_ft,
+    )
+
+
 def merge_catalog_pages(pages: list[list[CatalogRow]]) -> list[CatalogRow]:
-    by_key: dict[str, CatalogRow] = {}
+    seen: set[tuple] = set()
+    merged: list[CatalogRow] = []
     for page in pages:
         for row in page:
-            by_key[row.map_key] = row
-    return [by_key[key] for key in sorted(by_key)]
+            key = _row_dedupe_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+    return merged
 
 
 def catalog_page_status(page_html: str) -> tuple[int, int] | None:
@@ -291,17 +409,17 @@ def load_cached_catalog_html(cache_dir: Path) -> list[CatalogRow]:
     return merge_catalog_pages(parsed)
 
 
-def fetch_pdf(
+def fetch_document(
     url: str,
     dest: Path,
     *,
     rate_limit_seconds: float = DEFAULT_RATE_LIMIT_SECONDS,
     user_agent: str = DEFAULT_USER_AGENT,
     opener=None,
-) -> None:
+):
     if opener is None:
         opener = build_dnr_opener()
-    fetch_dnr_pdf(
+    return fetch_dnr_document(
         url,
         dest,
         opener=opener,

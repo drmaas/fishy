@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Render ingested PDF maps to DPI-tagged PNG rasters."""
+"""Render ingested PDF or JPEG map assets to DPI-tagged PNG rasters."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
 
-RenderPageFn = Callable[[Path, Path, int], None]
+RenderPageFn = Callable[[Path, Path, int, str], None]
 
 MIN_DPI = 300
 MAX_DPI = 400
 DEFAULT_DPI = 350
-# DNR letter-size bathymetry maps are roughly 35x39 inches; cap rendered pixels above that at 400 DPI.
 MAX_PAGE_INCHES = (39.0, 35.0)
 
 
@@ -28,7 +27,6 @@ def max_render_pixels(dpi: int) -> tuple[int, int]:
     return (int(MAX_PAGE_INCHES[0] * dpi), int(MAX_PAGE_INCHES[1] * dpi))
 
 
-# 1×1 PNG (stdlib tests can assert output without optional deps).
 TINY_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000"
     "907753de0000000a49444154789c6360000000020001e221bc3300000000"
@@ -40,7 +38,12 @@ def raster_path_for_map(work_dir: Path, map_key: str) -> Path:
     return work_dir / "rasters" / f"{map_key}.png"
 
 
-def render_pdf_with_pymupdf(pdf_path: Path, output_path: Path, dpi: int) -> None:
+def render_map_with_pymupdf(
+    source_path: Path,
+    output_path: Path,
+    dpi: int,
+    media_kind: str,
+) -> None:
     try:
         import pymupdf  # type: ignore[import-not-found]
     except ImportError as error:
@@ -48,19 +51,29 @@ def render_pdf_with_pymupdf(pdf_path: Path, output_path: Path, dpi: int) -> None
 
     dpi = clamp_dpi(dpi)
     max_w, max_h = max_render_pixels(dpi)
-    doc = pymupdf.open(pdf_path)
+    doc = pymupdf.open(source_path)
     try:
         if doc.page_count < 1:
-            raise RuntimeError(f"PDF has no pages: {pdf_path}")
+            raise RuntimeError(f"source has no pages: {source_path}")
         page = doc.load_page(0)
-        zoom = dpi / 72.0
-        width_px = page.rect.width * zoom
-        height_px = page.rect.height * zoom
-        if width_px > max_w or height_px > max_h:
-            raise RuntimeError(
-                f"PDF page exceeds render cap ({max_w}x{max_h}px at {dpi} DPI): {pdf_path}"
-            )
-        matrix = pymupdf.Matrix(zoom, zoom)
+        if media_kind == "jpeg":
+            rect = page.rect
+            width_px = rect.width
+            height_px = rect.height
+            if width_px > max_w or height_px > max_h:
+                scale = min(max_w / width_px, max_h / height_px)
+                width_px *= scale
+                height_px *= scale
+            matrix = pymupdf.Matrix(width_px / rect.width, height_px / rect.height)
+        else:
+            zoom = dpi / 72.0
+            width_px = page.rect.width * zoom
+            height_px = page.rect.height * zoom
+            if width_px > max_w or height_px > max_h:
+                raise RuntimeError(
+                    f"page exceeds render cap ({max_w}x{max_h}px at {dpi} DPI): {source_path}"
+                )
+            matrix = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix, alpha=False)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         pix.save(output_path)
@@ -68,35 +81,64 @@ def render_pdf_with_pymupdf(pdf_path: Path, output_path: Path, dpi: int) -> None
         doc.close()
 
 
-def render_pdf_pages(
-    pdf_path: Path,
+def render_map_asset(
+    source_path: Path,
     output_path: Path,
     dpi: int,
     *,
+    media_kind: str,
     render_page: RenderPageFn | None = None,
 ) -> None:
-    """Render the first PDF page to ``output_path``."""
-    render_page = render_page or render_pdf_with_pymupdf
-    render_page(pdf_path, output_path, clamp_dpi(dpi))
+    render_page = render_page or render_map_with_pymupdf
+    render_page(source_path, output_path, clamp_dpi(dpi), media_kind)
 
 
 def render_manifest_rasters(
     entries: list[dict],
     *,
-    pdf_dir: Path,
+    sources_dir: Path,
     work_dir: Path,
     dpi: int,
     render_page: RenderPageFn | None = None,
-) -> list[dict]:
-    """Render each manifest entry whose PDF exists; attach ``raster_path``."""
+    skip_reason_for=None,
+) -> tuple[list[dict], int]:
+    """Rasterize entries when possible; record per-row raster skip reasons."""
+    from fishy_pipeline.states.wi.documents import find_cached_source, skip_reason_for_raster
+
+    skip_reason_for = skip_reason_for or skip_reason_for_raster
     updated: list[dict] = []
+    raster_skip_count = 0
     for entry in entries:
         copy = dict(entry)
-        pdf_path = pdf_dir / f"{entry['map_key']}.pdf"
+        reason = skip_reason_for(entry)
+        if reason:
+            copy["raster_skip_reason"] = reason
+            raster_skip_count += 1
+            updated.append(copy)
+            continue
+        source_path = entry.get("source_path")
+        if source_path is None:
+            found = find_cached_source(sources_dir, entry["map_key"])
+            source_path = str(found) if found else None
+        if source_path is None or not Path(source_path).is_file():
+            copy["raster_skip_reason"] = "source_missing"
+            raster_skip_count += 1
+            updated.append(copy)
+            continue
+        media_kind = str(entry.get("source_media_type") or "pdf")
         raster_path = raster_path_for_map(work_dir, entry["map_key"])
-        if pdf_path.is_file():
-            render_pdf_pages(pdf_path, raster_path, dpi, render_page=render_page)
+        try:
+            render_map_asset(
+                Path(source_path),
+                raster_path,
+                dpi,
+                media_kind=media_kind,
+                render_page=render_page,
+            )
             copy["raster_path"] = str(raster_path)
             copy["raster_dpi"] = clamp_dpi(dpi)
+        except Exception as error:  # noqa: BLE001
+            copy["raster_skip_reason"] = f"raster_failed: {error}"
+            raster_skip_count += 1
         updated.append(copy)
-    return updated
+    return updated, raster_skip_count

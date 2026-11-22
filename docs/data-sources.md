@@ -51,13 +51,13 @@ Wisconsin is **pre-built** from DNR PDF bathymetry maps, tiled to PMTiles, and s
 | Lake map catalog (HTML) | https://apps.dnr.wi.gov/lakes/maps/ |
 | Catalog form POST target | https://apps.dnr.wi.gov/lakes/Documents/LakeMaps.aspx |
 | Example PDF (Ada Lake, doclink) | https://apps.dnr.wi.gov/doclink/lakes_maps/0417300a.pdf |
-| Example PDF (Altoona Lake, SWIMS) | https://apps.dnr.wi.gov/swims/Documents/DownloadDocument?id=84291351 |
+| Example map download (Altoona Lake, SWIMS — often JPEG) | https://apps.dnr.wi.gov/swims/Documents/DownloadDocument?id=84291351 |
 | 24K Hydro open data | https://data-wi-dnr.opendata.arcgis.com/datasets/wi-dnr::24k-hydro-full-file-geodatabase/about |
 | 24K Waterbody MapServer layer | https://dnrmaps.wi.gov/arcgis/rest/services/DW_Map_Dynamic/EN_SurfaceWater_WTM_Ext_Dynamic_L16/MapServer/5 |
 
 `ingest` (WI 3/8) harvests the catalog into a manifest (WBIC, sheet suffix `a`/`b`, county, acres, max depth, PDF URL), joins rows to **24K Hydro** waterbodies on padded 7-digit WBIC in EPSG:3071, and renders PDF pages to **300–400 DPI** PNG rasters under `pipeline/work/` (git-ignored). Downloads cache under `pipeline/.cache/wi/` (git-ignored). Committed fixtures for CI live in `fixtures/wi-ingest/`.
 
-Most lakes link straight to `doclink/lakes_maps/{wbic}{a|b}.pdf`. Some rows (for example Altoona Lake) use a SWIMS `DownloadDocument?id=` URL; ingest keeps those rows under the padded WBIC and caches the PDF as `{wbic}a.pdf` when the catalog does not name a sheet suffix.
+Most lakes link straight to `doclink/lakes_maps/{wbic}{a|b}.pdf`. Some rows (for example Altoona Lake) use a SWIMS `DownloadDocument?id=` URL that may return a JPEG, shapefile, or other format; ingest keeps those rows under the padded WBIC, assigns `{wbic}a` / `{wbic}b` when needed, and records detected media types in the manifest. Doclink PDFs are preferred when both are present.
 
 One-lake hydro query (verified against Ada Lake `WATERBODY_WBIC=417300`):
 

@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 from fishy_pipeline.states.wi import catalog, hydro, manifest, raster
+from fishy_pipeline.states.wi import documents
+from fishy_pipeline.states.wi.dnr_fetch import build_dnr_opener
 from fishy_pipeline.states.wi.wbic import parse_map_key
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -110,11 +112,20 @@ def _resolve_hydro_path(args: argparse.Namespace) -> tuple[Path, str]:
     return args.hydro, str(args.hydro)
 
 
+def _load_fixture_assets(rows: list[catalog.CatalogRow]) -> dict[str, documents.SourceAsset]:
+    assets: dict[str, documents.SourceAsset] = {}
+    for row in rows:
+        if row.map_key in assets:
+            continue
+        assets[row.map_key] = documents.load_fixture_asset(FIXTURE_DIR, row.map_key)
+    return assets
+
+
 def run_ingest(args: argparse.Namespace) -> dict:
     cache_dir: Path = args.cache_dir
     work_dir: Path = args.work_dir
     catalog_cache = cache_dir / CATALOG_CACHE_DIRNAME
-    pdf_dir = cache_dir / "pdfs"
+    sources_dir = cache_dir / "sources"
 
     hydro_path, hydro_source = _resolve_hydro_path(args)
 
@@ -124,7 +135,6 @@ def run_ingest(args: argparse.Namespace) -> dict:
             raise SystemExit("fixtures/wi-ingest is incomplete")
         rows = catalog.parse_catalog_html(catalog_path.read_text(encoding="utf-8"))
         catalog_source = str(catalog_path)
-        pdf_dir = FIXTURE_DIR
     else:
         if args.catalog_html:
             rows = catalog.parse_catalog_html(args.catalog_html.read_text(encoding="utf-8"))
@@ -147,35 +157,46 @@ def run_ingest(args: argparse.Namespace) -> dict:
     entries, unmatched_wbic = hydro.join_catalog_to_hydro(rows, hydro_index)
     entries, multi_sheet_wbics = hydro.tag_multi_sheet_lakes(entries)
 
+    skip_count = 0
+    raster_skip_count = 0
     if not args.skip_pdf:
-        for row in rows:
-            pdf_path = pdf_dir / f"{row.map_key}.pdf"
-            if args.fixtures:
-                if not pdf_path.is_file():
-                    raise SystemExit(f"fixture PDF missing: {pdf_path}")
-                continue
-            catalog.fetch_pdf(row.pdf_url, pdf_path)
+        if args.fixtures:
+            assets = _load_fixture_assets(rows)
+        else:
+            opener = build_dnr_opener()
+            assets = documents.download_sources(
+                rows,
+                sources_dir,
+                user_agent=catalog.DEFAULT_USER_AGENT,
+                rate_limit_seconds=catalog.DEFAULT_RATE_LIMIT_SECONDS,
+                opener=opener,
+            )
+        entries, skip_count = documents.annotate_entries_with_sources(entries, assets)
 
     dpi = raster.clamp_dpi(args.dpi)
     if not args.skip_raster:
-        render_source = pdf_dir
         if args.fixtures:
 
-            def _fixture_render(pdf_path: Path, output_path: Path, _dpi: int) -> None:
+            def _fixture_render(
+                source_path: Path,
+                output_path: Path,
+                _dpi: int,
+                _media_kind: str,
+            ) -> None:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_bytes(raster.TINY_PNG)
 
-            entries = raster.render_manifest_rasters(
+            entries, raster_skip_count = raster.render_manifest_rasters(
                 entries,
-                pdf_dir=render_source,
+                sources_dir=FIXTURE_DIR,
                 work_dir=work_dir,
                 dpi=dpi,
                 render_page=_fixture_render,
             )
         else:
-            entries = raster.render_manifest_rasters(
+            entries, raster_skip_count = raster.render_manifest_rasters(
                 entries,
-                pdf_dir=render_source,
+                sources_dir=sources_dir,
                 work_dir=work_dir,
                 dpi=dpi,
             )
@@ -186,6 +207,8 @@ def run_ingest(args: argparse.Namespace) -> dict:
         multi_sheet_wbics=multi_sheet_wbics,
         catalog_source=catalog_source,
         hydro_source=hydro_source,
+        skip_count=skip_count,
+        raster_skip_count=raster_skip_count,
     )
     manifest_path = work_dir / "manifest.json"
     manifest.write_manifest(manifest_path, body)
