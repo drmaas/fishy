@@ -4,7 +4,9 @@ Checked on 2026-11-21. A URL below was requested and returned HTTP 200 unless th
 
 Weather is not implemented. The clients, when they land, will call Open-Meteo and api.weather.gov with no API key.
 
-## Minnesota DNR lake bathymetry
+## Minnesota DNR lake bathymetry (live)
+
+Minnesota is served **live** in production: the Fishy Worker queries the DNR MapServer per lake. There is **no Minnesota batch pipeline** in this repository. The shared `pipeline/fishy_pipeline/common/` build exists only for the synthetic `fixtures/sample-pond` demo and local PMTiles checks.
 
 The product is **Lake Bathymetric Outlines, Contours, and DEM**, published by the DNR Division of Fish and Wildlife, Section of Fisheries, on the Minnesota Geospatial Commons.
 
@@ -28,7 +30,7 @@ Contour fields used by the pipeline:
 - `dowlknum` is the 8-digit Division of Waters lake id.
 - `lake_name` is the DNR name.
 
-The outline and DEM are NAD83 UTM zone 15 (EPSG:26915). The pipeline reprojects every vector layer to EPSG:4326 with `ogr2ogr -s_srs EPSG:26915 -t_srs EPSG:4326` and warps the depth grid with `gdalwarp` before tiling.
+The outline and DEM are NAD83 UTM zone 15 (EPSG:26915). The Worker and clients use WGS84; the sample build in `common/` reprojects vectors with `ogr2ogr` and warps rasters with `gdalwarp` when generating offline PMTiles.
 
 A one-lake GeoJSON extract (verified with `dowlknum=27013300`, Lake Minnetonka; the service returned features):
 
@@ -36,9 +38,15 @@ A one-lake GeoJSON extract (verified with `dowlknum=27013300`, Lake Minnetonka; 
 https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/0/query?where=dowlknum%3D%2727013300%27&outFields=*&f=geojson
 ```
 
-`contours_geojson_url` in `pipeline/fishy_pipeline/commands.py` builds that URL. Do not commit the response. Statewide contours are large.
+`contours_geojson_url` in `pipeline/fishy_pipeline/common/commands.py` (re-exported from `fishy_pipeline.commands`) builds that URL. Do not commit the response. Statewide contours are large.
 
 Terms: the MapServer item reports access `public` and `licenseInfo` of `None`. The retired metadata page stated access constraints none and use constraints none. Credit the Minnesota Department of Natural Resources on the map. LakeFinder links use `https://www.dnr.state.mn.us/lakefind/showreport.html?downum=<DOWLKNUM>` (verified for `27013300`).
+
+## Wisconsin DNR lake bathymetry (batch, planned)
+
+Wisconsin will be **pre-built** from DNR PDF bathymetry maps, tiled to PMTiles, and served from **R2**. Implementation lives under `pipeline/fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`). Stages are stubs in this milestone; heavy dependencies (GDAL/rasterio, OpenCV, scikit-image, OCR) install only with the `wi` optional extra in `pipeline/pyproject.toml`.
+
+Do not commit PDF extracts or statewide Wisconsin archives. Credit the Wisconsin Department of Natural Resources on the map when Wisconsin layers ship.
 
 ## NOAA NCEI Great Lakes bathymetry
 
