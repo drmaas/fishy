@@ -15,7 +15,7 @@ describe("lake panel", () => {
           synthetic: true,
         }}
         unit="ft"
-        onClose={() => {}}
+        onHide={() => {}}
       />,
     );
     expect(html).toContain("Sample Pond");
@@ -24,17 +24,24 @@ describe("lake panel", () => {
     expect(html).toContain("99999900");
     expect(html).toContain("https://www.dnr.state.mn.us/lakefind/showreport.html?downum=99999900");
     expect(html).toContain("Synthetic sample");
+    expect(html).toContain("Hide");
+    expect(html).not.toContain("Close");
+    expect(html).toContain('aria-controls="lake-panel"');
   });
 });
 
 describe("app shell", () => {
-  it("renders the map frame, state control, and required credits", () => {
+  it("renders the map frame, state control, hide control, and a credits button", () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain("Fishy");
     expect(html).toContain("Minnesota");
     expect(html).toContain("Find a lake");
-    expect(html).toContain("OpenStreetMap contributors");
-    expect(html).toContain("Minnesota DNR");
     expect(html).toContain('class="map"');
+    expect(html).toContain('class="credits"');
+    expect(html).toContain('aria-controls="credits-panel"');
+    expect(html).toContain(">Credits<");
+    expect(html).not.toContain('id="credits-panel"');
+    expect(html).toContain('aria-controls="fishy-chrome"');
+    expect(html).toContain("Hide");
   });
 });

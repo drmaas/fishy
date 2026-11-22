@@ -14,9 +14,15 @@ export function LakeSearch({ stateId, onSelect }: LakeSearchProps) {
   const [active, setActive] = useState(0);
   const [status, setStatus] = useState<"idle" | "loading" | "empty" | "ready">("idle");
   const requestId = useRef(0);
+  /** After a pick, keep that label in the input without reopening the list. */
+  const settledQuery = useRef<string | null>(null);
 
   useEffect(() => {
     const trimmed = query.trim();
+    if (settledQuery.current !== null && query === settledQuery.current) {
+      return undefined;
+    }
+    settledQuery.current = null;
     if (trimmed.length < 2) {
       setHits([]);
       setStatus("idle");
@@ -38,6 +44,8 @@ export function LakeSearch({ stateId, onSelect }: LakeSearchProps) {
   }, [query, stateId]);
 
   function choose(hit: LakeSearchHit) {
+    requestId.current += 1;
+    settledQuery.current = hit.lake_name;
     onSelect(hit);
     setQuery(hit.lake_name);
     setOpen(false);
@@ -47,6 +55,7 @@ export function LakeSearch({ stateId, onSelect }: LakeSearchProps) {
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Escape") {
+      settledQuery.current = null;
       setQuery("");
       setOpen(false);
       setHits([]);
@@ -83,7 +92,10 @@ export function LakeSearch({ stateId, onSelect }: LakeSearchProps) {
         placeholder="Name or DOW id"
         value={query}
         autoComplete="off"
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          settledQuery.current = null;
+          setQuery(event.target.value);
+        }}
         onKeyDown={onKeyDown}
         onFocus={() => {
           if (hits.length > 0 || status === "empty") setOpen(true);
@@ -99,6 +111,7 @@ export function LakeSearch({ stateId, onSelect }: LakeSearchProps) {
                 type="button"
                 className={index === active ? "active" : undefined}
                 onMouseEnter={() => setActive(index)}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(hit)}
               >
                 <span className="search-name">{hit.lake_name}</span>

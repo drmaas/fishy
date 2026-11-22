@@ -48,6 +48,94 @@ describe("lake worker routes", () => {
       lakes: [{ dowlknum: "10005900", lake_name: "Waconia", cty_name: "Carver", acres: 3075.189 }],
     });
   });
+
+  it("returns a smoothed lake detail from mocked DNR responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("returnExtentOnly")) {
+          return new Response(
+            JSON.stringify({ extent: { xmin: -95.12, ymin: 46.68, xmax: -95.05, ymax: 46.72 } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.includes("outStatistics")) {
+          return new Response(JSON.stringify({ features: [{ attributes: { max_depth: 13 } }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("returnGeometry=false")) {
+          return new Response(
+            JSON.stringify({
+              features: [{ attributes: { dowlknum: "11030700", lake_name: "Norway", acres: 514.9 } }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.includes("/MapServer/0/")) {
+          return new Response(
+            JSON.stringify({
+              type: "FeatureCollection",
+              features: [
+                {
+                  type: "Feature",
+                  properties: { depth: -5, abs_depth: 5, dowlknum: "11030700", lake_name: "Norway" },
+                  geometry: {
+                    type: "LineString",
+                    coordinates: [
+                      [0, 0],
+                      [0, 1],
+                      [1, 1],
+                    ],
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            type: "FeatureCollection",
+            features: [
+              {
+                type: "Feature",
+                properties: { dowlknum: "11030700", lake_name: "Norway", acres: 514.9, island: "N" },
+                geometry: {
+                  type: "Polygon",
+                  coordinates: [
+                    [
+                      [0, 0],
+                      [0, 1],
+                      [1, 1],
+                      [1, 0],
+                      [0, 0],
+                    ],
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const response = await call("/api/lakes/11030700?state=mn");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      name: string;
+      contours: { features: Array<{ properties: Record<string, unknown>; geometry: { coordinates: number[][] } }> };
+    };
+    expect(body.name).toBe("Norway");
+    expect(body.contours.features[0]?.properties).toEqual({
+      lake_name: "Norway",
+      dowlknum: "11030700",
+      depth_ft: 5,
+    });
+    expect(body.contours.features[0]?.geometry.coordinates.length).toBeGreaterThan(3);
+  });
 });
 
 function headers(response: Response): string {

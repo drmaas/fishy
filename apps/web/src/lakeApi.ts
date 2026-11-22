@@ -1,4 +1,5 @@
 import type { LakeInfo } from "@fishy/core";
+import { LAKE_DETAIL_CACHE_REV } from "../lib/server/lakes.ts";
 
 export interface LakeSearchHit {
   dowlknum: string;
@@ -68,7 +69,8 @@ export async function fetchNearbyLakes(
 }
 
 export async function fetchLakeDetail(state: string, dowlknum: string): Promise<LakeDetail | null> {
-  const response = await fetch(`/api/lakes/${encodeURIComponent(dowlknum)}?state=${encodeURIComponent(state)}`);
+  const params = new URLSearchParams({ state, _rev: LAKE_DETAIL_CACHE_REV });
+  const response = await fetch(`/api/lakes/${encodeURIComponent(dowlknum)}?${params}`);
   if (!response.ok) return null;
   return (await response.json()) as LakeDetail;
 }

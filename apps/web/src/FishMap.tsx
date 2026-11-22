@@ -28,6 +28,13 @@ interface FishMapProps {
 
 const EMPTY: GeoJsonFeatureCollection = { type: "FeatureCollection", features: [] };
 
+function lakeBounds(selected: LakeDetail): [[number, number], [number, number]] {
+  return [
+    [selected.extent.west, selected.extent.south],
+    [selected.extent.east, selected.extent.north],
+  ];
+}
+
 export function FishMap({
   contoursUrl,
   terrainUrl,
@@ -49,19 +56,28 @@ export function FishMap({
   const onExtentRef = useRef(onExtent);
   const onLocationRef = useRef(onLocation);
   const unitRef = useRef(unit);
+  const selectedRef = useRef(selected);
+  const nearbyRef = useRef(nearby);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
+  const mapReady = useRef(false);
   const fittedLake = useRef<string | null>(null);
+  const locationLock = useRef(false);
   onLakeRef.current = onLake;
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
   onLocationRef.current = onLocation;
   unitRef.current = unit;
+  selectedRef.current = selected;
+  nearbyRef.current = nearby;
 
   useEffect(() => {
     const node = nodeRef.current;
     if (!node) return undefined;
     let map: import("maplibre-gl").Map | undefined;
     let cancelled = false;
+    mapReady.current = false;
+    fittedLake.current = null;
+    locationLock.current = false;
 
     void (async () => {
       const maplibregl = await import("maplibre-gl");
@@ -88,11 +104,23 @@ export function FishMap({
               }
             : OPENFREEMAP_STYLE;
 
+      const fitSelectedLake = (lake: LakeDetail, duration: number, force = false) => {
+        if (!map || !mapReady.current) return;
+        if (!force && fittedLake.current === lake.dowlknum) return;
+        // MapLibre fitBounds while ACTIVE_LOCK does not release the lock; the next
+        // GPS fix recenters on the user and fittedLake would prevent a retry.
+        if (locationLock.current) return;
+        fittedLake.current = lake.dowlknum;
+        map.fitBounds(lakeBounds(lake), { padding: 56, duration, pitch: 0 });
+      };
+
+      const initialLake = selectedRef.current;
+      const openedOnLakeId = initialLake?.dowlknum ?? null;
       map = new maplibregl.Map({
         container: node,
         style,
-        bounds: stateBounds,
-        fitBoundsOptions: { padding: 28, pitch: 0, bearing: 0 },
+        bounds: initialLake ? lakeBounds(initialLake) : stateBounds,
+        fitBoundsOptions: { padding: initialLake ? 56 : 28, pitch: 0, bearing: 0 },
         attributionControl: false,
         maxPitch: 70,
       });
@@ -107,6 +135,14 @@ export function FishMap({
         fitBoundsOptions: { maxZoom: 16, padding: 80 },
       });
       map.addControl(geolocate, "bottom-right");
+      // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
+      // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
+      let gpsBackgrounded = false;
+      geolocate.on("trackuserlocationstart", () => {
+        locationLock.current = true;
+        fittedLake.current = null;
+        gpsBackgrounded = false;
+      });
       geolocate.on("geolocate", (event) => {
         const accuracy = event.coords.accuracy;
         onLocationRef.current({
@@ -117,8 +153,20 @@ export function FishMap({
       geolocate.on("error", (event) => {
         onLocationRef.current({ status: "error", code: event.code });
       });
+      geolocate.on("userlocationlostfocus", () => {
+        gpsBackgrounded = true;
+      });
       geolocate.on("trackuserlocationend", () => {
+        locationLock.current = false;
         onLocationRef.current({ status: "idle" });
+        queueMicrotask(() => {
+          if (gpsBackgrounded) {
+            gpsBackgrounded = false;
+            return;
+          }
+          const lake = selectedRef.current;
+          if (lake) fitSelectedLake(lake, 800, true);
+        });
       });
 
       const reportExtent = () => {
@@ -168,6 +216,7 @@ export function FishMap({
             type: "line",
             source: "contours",
             "source-layer": "contours",
+            layout: { "line-join": "round", "line-cap": "round" },
             paint: { "line-color": "#083044", "line-width": 1.4 },
           });
           map.addLayer({
@@ -184,7 +233,7 @@ export function FishMap({
           });
         }
 
-        map.addSource("survey-nearby", { type: "geojson", data: EMPTY });
+        map.addSource("survey-nearby", { type: "geojson", data: nearbyRef.current ?? EMPTY });
         map.addSource("survey-outline", { type: "geojson", data: EMPTY });
         map.addSource("survey-contours", { type: "geojson", data: EMPTY });
 
@@ -210,12 +259,14 @@ export function FishMap({
           id: "survey-outline-line",
           type: "line",
           source: "survey-outline",
+          layout: { "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "#062433", "line-width": 1.8 },
         });
         map.addLayer({
           id: "survey-depth-lines",
           type: "line",
           source: "survey-contours",
+          layout: { "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "#083044", "line-width": 1.35 },
         });
         map.addLayer({
@@ -233,6 +284,22 @@ export function FishMap({
         if (sources.terrain && !map.getSource("terrain")) {
           map.addSource("terrain", sources.terrain);
           map.setTerrain({ source: "terrain", exaggeration: 1.4 });
+        }
+
+        mapReady.current = true;
+        const lake = selectedRef.current;
+        if (lake) {
+          const outline = map.getSource("survey-outline") as import("maplibre-gl").GeoJSONSource;
+          const contours = map.getSource("survey-contours") as import("maplibre-gl").GeoJSONSource;
+          outline.setData(lake.outline);
+          contours.setData(lake.contours);
+          if (openedOnLakeId === lake.dowlknum && !locationLock.current) {
+            fittedLake.current = lake.dowlknum;
+          } else {
+            fitSelectedLake(lake, 0);
+          }
+        } else {
+          fittedLake.current = null;
         }
         reportExtent();
       });
@@ -256,6 +323,7 @@ export function FishMap({
     return () => {
       cancelled = true;
       mapRef.current = null;
+      mapReady.current = false;
       fittedLake.current = null;
       onLocationRef.current({ status: "idle" });
       map?.remove();
@@ -273,28 +341,26 @@ export function FishMap({
 
   useEffect(() => {
     const map = mapRef.current;
-    const source = map?.getSource("survey-nearby") as import("maplibre-gl").GeoJSONSource | undefined;
+    if (!map || !mapReady.current) return;
+    const source = map.getSource("survey-nearby") as import("maplibre-gl").GeoJSONSource | undefined;
     source?.setData(nearby ?? EMPTY);
   }, [nearby]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapReady.current) return;
     const outline = map.getSource("survey-outline") as import("maplibre-gl").GeoJSONSource | undefined;
     const contours = map.getSource("survey-contours") as import("maplibre-gl").GeoJSONSource | undefined;
     outline?.setData(selected?.outline ?? EMPTY);
     contours?.setData(selected?.contours ?? EMPTY);
-    if (selected && fittedLake.current !== selected.dowlknum) {
-      fittedLake.current = selected.dowlknum;
-      map.fitBounds(
-        [
-          [selected.extent.west, selected.extent.south],
-          [selected.extent.east, selected.extent.north],
-        ],
-        { padding: 56, duration: 800, pitch: 0 },
-      );
+    if (!selected) {
+      fittedLake.current = null;
+      return;
     }
-    if (!selected) fittedLake.current = null;
+    if (fittedLake.current === selected.dowlknum) return;
+    if (locationLock.current) return;
+    fittedLake.current = selected.dowlknum;
+    map.fitBounds(lakeBounds(selected), { padding: 56, duration: 800, pitch: 0 });
   }, [selected]);
 
   return <div ref={nodeRef} className="map" role="application" aria-label="Lake map" />;

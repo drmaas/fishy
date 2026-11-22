@@ -8,8 +8,12 @@ export const SUPPORTED_STATES = new Set(["mn"]);
 export const SEARCH_LIMIT = 12;
 export const MAX_BBOX_SPAN = 0.8;
 export const CONTOUR_OFFSET = 0.0005;
+/** Finer ArcGIS generalization for a selected lake outline and contours (~6 m). */
+export const DETAIL_OFFSET = 0.00008;
 export const GEOMETRY_PRECISION = 5;
 export const LAKE_CACHE_CONTROL = "public, max-age=86400";
+/** Bump when lake-detail geometry shaping changes so Cache API drops stale coarse rings. */
+export const LAKE_DETAIL_CACHE_REV = "v2";
 
 const SEARCH_CHARS = /^[A-Za-z0-9 '.\-&]+$/;
 
@@ -138,6 +142,120 @@ export function normalizeOutlineProperties(props: Record<string, unknown>): Reco
   return out;
 }
 
+type Position = [number, number];
+
+function isClosedRing(ring: Position[]): boolean {
+  if (ring.length < 2) return false;
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (!first || !last) return false;
+  return first[0] === last[0] && first[1] === last[1];
+}
+
+/** One Chaikin cut. Open lines keep endpoints. Closed rings stay closed. */
+export function chaikinOnce(ring: Position[], closed: boolean): Position[] {
+  if (ring.length < 2) return ring.map((point) => [point[0], point[1]] as Position);
+  if (closed) {
+    const body = isClosedRing(ring) ? ring.slice(0, -1) : ring;
+    if (body.length < 3) return ring.map((point) => [point[0], point[1]] as Position);
+    const out: Position[] = [];
+    for (let i = 0; i < body.length; i += 1) {
+      const a = body[i];
+      const b = body[(i + 1) % body.length];
+      if (!a || !b) continue;
+      out.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+      out.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+    }
+    const first = out[0];
+    if (first) out.push([first[0], first[1]]);
+    return out;
+  }
+  const out: Position[] = [[ring[0]![0], ring[0]![1]]];
+  for (let i = 0; i < ring.length - 1; i += 1) {
+    const a = ring[i];
+    const b = ring[i + 1];
+    if (!a || !b) continue;
+    out.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+    out.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+  }
+  const last = ring[ring.length - 1];
+  if (last) out.push([last[0], last[1]]);
+  return out;
+}
+
+function asPositionRing(value: unknown): Position[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const ring: Position[] = [];
+  for (const point of value) {
+    if (!Array.isArray(point) || point.length < 2) return null;
+    const x = point[0];
+    const y = point[1];
+    if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    ring.push([x, y]);
+  }
+  return ring;
+}
+
+export function smoothGeometry(geometry: unknown): unknown {
+  if (!geometry || typeof geometry !== "object") return geometry;
+  const geom = geometry as { type?: string; coordinates?: unknown };
+  if (geom.type === "LineString") {
+    const ring = asPositionRing(geom.coordinates);
+    if (!ring) return geometry;
+    return { type: "LineString", coordinates: chaikinOnce(ring, isClosedRing(ring)) };
+  }
+  if (geom.type === "MultiLineString") {
+    if (!Array.isArray(geom.coordinates)) return geometry;
+    return {
+      type: "MultiLineString",
+      coordinates: geom.coordinates.map((line) => {
+        const ring = asPositionRing(line);
+        if (!ring) return line;
+        return chaikinOnce(ring, isClosedRing(ring));
+      }),
+    };
+  }
+  if (geom.type === "Polygon") {
+    if (!Array.isArray(geom.coordinates)) return geometry;
+    return {
+      type: "Polygon",
+      coordinates: geom.coordinates.map((line) => {
+        const ring = asPositionRing(line);
+        if (!ring) return line;
+        return chaikinOnce(ring, true);
+      }),
+    };
+  }
+  if (geom.type === "MultiPolygon") {
+    if (!Array.isArray(geom.coordinates)) return geometry;
+    return {
+      type: "MultiPolygon",
+      coordinates: geom.coordinates.map((polygon) => {
+        if (!Array.isArray(polygon)) return polygon;
+        return polygon.map((line) => {
+          const ring = asPositionRing(line);
+          if (!ring) return line;
+          return chaikinOnce(ring, true);
+        });
+      }),
+    };
+  }
+  return geometry;
+}
+
+export function smoothCollection(collection: GeoJsonFeatureCollection): GeoJsonFeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: collection.features.map((feature) => ({
+      type: "Feature",
+      geometry: smoothGeometry(feature.geometry),
+      properties: feature.properties,
+    })),
+  };
+}
+
 export function normalizeContourCollection(collection: GeoJsonFeatureCollection): GeoJsonFeatureCollection {
   return {
     type: "FeatureCollection",
@@ -217,7 +335,7 @@ export function outlineQueryUrl(dowlknum: string): string {
     where: `dowlknum='${escapeWhereValue(dowlknum)}'`,
     outFields: "dowlknum,lake_name,cty_name,acres,island",
     outSR: "4326",
-    maxAllowableOffset: String(CONTOUR_OFFSET),
+    maxAllowableOffset: String(DETAIL_OFFSET),
     geometryPrecision: String(GEOMETRY_PRECISION),
     f: "geojson",
   });
@@ -228,7 +346,7 @@ export function contoursQueryUrl(dowlknum: string): string {
     where: `dowlknum='${escapeWhereValue(dowlknum)}'`,
     outFields: "depth,abs_depth,dowlknum,lake_name",
     outSR: "4326",
-    maxAllowableOffset: String(CONTOUR_OFFSET),
+    maxAllowableOffset: String(DETAIL_OFFSET),
     geometryPrecision: String(GEOMETRY_PRECISION),
     f: "geojson",
   });
@@ -297,8 +415,8 @@ export function buildLakeDetail(args: {
     areaAcres: args.areaAcres,
     maxDepthFt: args.maxDepthFt,
     extent: args.extent,
-    outline: normalizeOutlineCollection(args.outline),
-    contours: normalizeContourCollection(args.contours),
+    outline: smoothCollection(normalizeOutlineCollection(args.outline)),
+    contours: smoothCollection(normalizeContourCollection(args.contours)),
   };
 }
 
