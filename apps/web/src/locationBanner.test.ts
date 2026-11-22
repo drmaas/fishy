@@ -7,6 +7,7 @@ import {
   locationBannerVisible,
   permissionChangeShouldRetry,
   reduceLocationBanner,
+  shouldClearLocationOnTrackingEnd,
   type LocationBannerModel,
 } from "./locationBanner.ts";
 
@@ -99,5 +100,18 @@ describe("permissionChangeShouldRetry", () => {
     expect(permissionChangeShouldRetry("granted")).toBe(true);
     expect(permissionChangeShouldRetry("denied")).toBe(false);
     expect(permissionChangeShouldRetry("prompt")).toBe(false);
+  });
+});
+
+describe("shouldClearLocationOnTrackingEnd", () => {
+  it("keeps errors when tracking stops after a failed fix", () => {
+    const error = { status: "error" as const, code: GEOLOCATION_ERROR.PERMISSION_DENIED };
+    expect(shouldClearLocationOnTrackingEnd(error, true)).toBe(false);
+    expect(shouldClearLocationOnTrackingEnd(error, false)).toBe(false);
+  });
+
+  it("clears active and idle states when tracking ends cleanly", () => {
+    expect(shouldClearLocationOnTrackingEnd({ status: "active", accuracyMeters: 5 }, false)).toBe(true);
+    expect(shouldClearLocationOnTrackingEnd({ status: "idle" }, false)).toBe(true);
   });
 });

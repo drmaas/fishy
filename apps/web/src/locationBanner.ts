@@ -58,3 +58,8 @@ export function locationBannerShowDismiss(model: LocationBannerModel): boolean {
 export function permissionChangeShouldRetry(state: PermissionState): boolean {
   return state === "granted";
 }
+
+export function shouldClearLocationOnTrackingEnd(location: LocationHintState, geolocationFailed: boolean): boolean {
+  if (geolocationFailed) return false;
+  return location.status !== "error";
+}

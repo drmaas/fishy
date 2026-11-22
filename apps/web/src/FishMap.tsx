@@ -7,6 +7,7 @@ import {
 import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
+import { shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
 import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
@@ -67,10 +68,14 @@ export function FishMap({
   const mapReady = useRef(false);
   const fittedLake = useRef<string | null>(null);
   const locationLock = useRef(false);
+  const lastLocationRef = useRef<LocationHintState>({ status: "idle" });
   onLakeRef.current = onLake;
   onSelectRef.current = onSelectDowlknum;
   onExtentRef.current = onExtent;
-  onLocationRef.current = onLocation;
+  onLocationRef.current = (state) => {
+    lastLocationRef.current = state;
+    onLocation(state);
+  };
   onLocationAttemptRef.current = onLocationAttempt;
   unitRef.current = unit;
   selectedRef.current = selected;
@@ -144,11 +149,9 @@ export function FishMap({
       });
       map.addControl(geolocate, "bottom-right");
       locationRetryRef.current = () => {
-        onLocationAttemptRef.current();
         geolocate.trigger();
       };
-      const controlRoot = (geolocate as unknown as { _container?: HTMLElement })._container;
-      geolocateButton = controlRoot?.querySelector("button") ?? null;
+      geolocateButton = map.getContainer().querySelector<HTMLButtonElement>(".maplibregl-ctrl-geolocate");
       onGeolocateButtonClick = () => {
         onLocationAttemptRef.current();
       };
@@ -156,13 +159,16 @@ export function FishMap({
       // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
       // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
       let gpsBackgrounded = false;
+      let geolocationFailed = false;
       geolocate.on("trackuserlocationstart", () => {
+        geolocationFailed = false;
         onLocationAttemptRef.current();
         locationLock.current = true;
         fittedLake.current = null;
         gpsBackgrounded = false;
       });
       geolocate.on("geolocate", (event) => {
+        geolocationFailed = false;
         const accuracy = event.coords.accuracy;
         onLocationRef.current({
           status: "active",
@@ -170,6 +176,7 @@ export function FishMap({
         });
       });
       geolocate.on("error", (event) => {
+        geolocationFailed = true;
         onLocationRef.current({ status: "error", code: event.code });
       });
       geolocate.on("userlocationlostfocus", () => {
@@ -177,7 +184,9 @@ export function FishMap({
       });
       geolocate.on("trackuserlocationend", () => {
         locationLock.current = false;
-        onLocationRef.current({ status: "idle" });
+        if (shouldClearLocationOnTrackingEnd(lastLocationRef.current, geolocationFailed)) {
+          onLocationRef.current({ status: "idle" });
+        }
         queueMicrotask(() => {
           if (gpsBackgrounded) {
             gpsBackgrounded = false;

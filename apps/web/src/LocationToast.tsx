@@ -17,9 +17,14 @@ export function LocationToast({ model, onDismiss, onRetry }: LocationToastProps)
 
   const showRetry = locationBannerShowRetry(model);
   const showDismiss = locationBannerShowDismiss(model);
+  const isError = model.location.status === "error";
 
   return (
-    <div className="location-toast hint" role="status" aria-live="polite">
+    <div
+      className="location-toast hint"
+      role={isError ? "alert" : "status"}
+      aria-live={isError ? "assertive" : "polite"}
+    >
       <p className="location-toast-text">{text}</p>
       {(showRetry || showDismiss) && (
         <div className="location-toast-actions">
