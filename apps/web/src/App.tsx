@@ -49,6 +49,18 @@ function writeRoute(stateId: string, lakeId: string | null) {
   window.history.replaceState(null, "", next);
 }
 
+function readOpenFlag(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") return fallback;
+  const stored = window.localStorage.getItem(key);
+  if (stored === "0") return false;
+  if (stored === "1") return true;
+  return fallback;
+}
+
+function writeOpenFlag(key: string, open: boolean) {
+  window.localStorage.setItem(key, open ? "1" : "0");
+}
+
 export function App() {
   const initial = useMemo(() => readRoute(), []);
   const [config, setConfig] = useState<Config>(FALLBACK);
@@ -61,6 +73,8 @@ export function App() {
   const [creditsOpen, setCreditsOpen] = useState(false);
   const [loadingLake, setLoadingLake] = useState(false);
   const [locationState, setLocationState] = useState<LocationHintState>({ status: "idle" });
+  const [chromeOpen, setChromeOpen] = useState(() => readOpenFlag("fishy-chrome-open", true));
+  const [panelOpen, setPanelOpen] = useState(() => readOpenFlag("fishy-panel-open", true));
   const nearbyTimer = useRef<number | null>(null);
   const pendingLake = useRef<string | null>(initial.lakeId);
 
@@ -85,7 +99,7 @@ export function App() {
   }, [stateId, selected]);
 
   const selectLake = useCallback(
-    async (dowlknum: string) => {
+    async (dowlknum: string, revealPanel = true) => {
       pendingLake.current = dowlknum;
       setLoadingLake(true);
       const detail = await fetchLakeDetail(stateId, dowlknum);
@@ -96,13 +110,17 @@ export function App() {
       }
       setSelected(detail);
       setLake(lakeInfoFromDetail(detail));
+      if (revealPanel) {
+        setPanelOpen(true);
+        writeOpenFlag("fishy-panel-open", true);
+      }
     },
     [stateId],
   );
 
   useEffect(() => {
     if (!initial.lakeId) return;
-    void selectLake(initial.lakeId);
+    void selectLake(initial.lakeId, false);
   }, [initial.lakeId, selectLake]);
 
   function chooseUnit(next: DepthUnit) {
@@ -111,13 +129,23 @@ export function App() {
   }
 
   function onSearchSelect(hit: LakeSearchHit) {
-    void selectLake(hit.dowlknum);
+    void selectLake(hit.dowlknum, true);
   }
 
   function onCloseLake() {
     pendingLake.current = null;
     setLake(null);
     setSelected(null);
+  }
+
+  function setChrome(open: boolean) {
+    setChromeOpen(open);
+    writeOpenFlag("fishy-chrome-open", open);
+  }
+
+  function setPanel(open: boolean) {
+    setPanelOpen(open);
+    writeOpenFlag("fishy-panel-open", open);
   }
 
   function onStateChange(next: string) {
@@ -146,12 +174,30 @@ export function App() {
     [stateId],
   );
 
+  const gpsHint = locationHint(locationState);
+  const appClass = [
+    "app",
+    chromeOpen ? "chrome-open" : "chrome-closed",
+    lake && panelOpen ? "panel-open" : lake ? "panel-collapsed" : "panel-none",
+  ].join(" ");
+
   return (
-    <div className="app">
-      <header className="chrome">
-        <div className="brand">
-          <p className="mark">Fishy</p>
-          <p className="tag">Lake depth maps</p>
+    <div className={appClass}>
+      <header className="chrome" id="fishy-chrome" hidden={!chromeOpen}>
+        <div className="chrome-head">
+          <div className="brand">
+            <p className="mark">Fishy</p>
+            <p className="tag">Lake depth maps</p>
+          </div>
+          <button
+            type="button"
+            className="tap-target"
+            onClick={() => setChrome(false)}
+            aria-expanded="true"
+            aria-controls="fishy-chrome"
+          >
+            Hide
+          </button>
         </div>
         <div className="chrome-row">
           <label className="field">
@@ -191,10 +237,21 @@ export function App() {
           </label>
         </div>
         <p className="hint">
-          {locationHint(locationState) ??
-            (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
+          {gpsHint ?? (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
         </p>
       </header>
+      {!chromeOpen && (
+        <button
+          type="button"
+          className="chrome-show tap-target"
+          onClick={() => setChrome(true)}
+          aria-expanded="false"
+          aria-controls="fishy-chrome"
+        >
+          Show controls
+        </button>
+      )}
+      {!chromeOpen && gpsHint && <p className="location-toast hint">{gpsHint}</p>}
       <FishMap
         contoursUrl={config.contoursUrl}
         terrainUrl={config.terrainUrl}
@@ -205,13 +262,31 @@ export function App() {
         stateBounds={state.bounds}
         nearby={nearby}
         selected={selected}
-        onLake={setLake}
-        onSelectDowlknum={(dowlknum) => void selectLake(dowlknum)}
+        onLake={(next) => {
+          setLake(next);
+          setPanel(true);
+        }}
+        onSelectDowlknum={(dowlknum) => void selectLake(dowlknum, true)}
         onExtent={onExtent}
         onLocation={setLocationState}
       />
       <DepthLegend unit={unit} />
-      {lake && <LakePanel lake={lake} unit={unit} onClose={onCloseLake} />}
+      {lake && (
+        <div hidden={!panelOpen}>
+          <LakePanel lake={lake} unit={unit} onClose={onCloseLake} onHide={() => setPanel(false)} />
+        </div>
+      )}
+      {lake && !panelOpen && (
+        <button
+          type="button"
+          className="panel-show tap-target"
+          onClick={() => setPanel(true)}
+          aria-expanded="false"
+          aria-controls="lake-panel"
+        >
+          {lake.name}
+        </button>
+      )}
       <footer className="credits">
         <p>
           {basemap !== "none" && (

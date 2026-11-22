@@ -16,6 +16,7 @@ import {
   extentQueryUrl,
   isSupportedState,
   LAKE_CACHE_CONTROL,
+  LAKE_DETAIL_CACHE_REV,
   maxDepthQueryUrl,
   nearbyQueryUrl,
   normalizeOutlineCollection,
@@ -94,15 +95,24 @@ async function handleLakes(request: Request, url: URL): Promise<Response | null>
   return null;
 }
 
+function lakeCacheKey(request: Request): Request {
+  const url = new URL(request.url);
+  if (/^\/api\/lakes\/[0-9]{8}$/.test(url.pathname)) {
+    url.searchParams.set("_rev", LAKE_DETAIL_CACHE_REV);
+  }
+  return new Request(url.toString(), { method: request.method, headers: request.headers });
+}
+
 async function cachedLakeResponse(request: Request, build: () => Promise<Response>): Promise<Response> {
   const cache = typeof caches !== "undefined" ? caches.default : undefined;
+  const key = lakeCacheKey(request);
   if (cache) {
-    const hit = await cache.match(request);
+    const hit = await cache.match(key);
     if (hit) return hit;
   }
   const response = await build();
   if (cache && response.ok && response.headers.get("cache-control") === LAKE_CACHE_CONTROL) {
-    await cache.put(request, response.clone());
+    await cache.put(key, response.clone());
   }
   return response;
 }

@@ -4,17 +4,23 @@ interface LakePanelProps {
   lake: LakeInfo;
   unit: DepthUnit;
   onClose: () => void;
+  onHide: () => void;
 }
 
-export function LakePanel({ lake, unit, onClose }: LakePanelProps) {
+export function LakePanel({ lake, unit, onClose, onHide }: LakePanelProps) {
   const finder = lakeFinderUrl(lake.dowlknum);
   return (
-    <aside className="panel" aria-label="Lake">
+    <aside className="panel" id="lake-panel" aria-label="Lake">
       <div className="panel-head">
         <h2>{lake.name}</h2>
-        <button type="button" onClick={onClose} aria-label="Close lake info">
-          Close
-        </button>
+        <div className="panel-actions">
+          <button type="button" className="tap-target" onClick={onHide} aria-expanded="true" aria-controls="lake-panel">
+            Hide
+          </button>
+          <button type="button" className="tap-target" onClick={onClose} aria-label="Close lake info">
+            Close
+          </button>
+        </div>
       </div>
       <dl>
         <div>

@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildLakeDetail,
   buildSearchWhere,
+  chaikinOnce,
+  CONTOUR_OFFSET,
+  contoursQueryUrl,
+  DETAIL_OFFSET,
   escapeWhereValue,
+  LAKE_DETAIL_CACHE_REV,
   MAX_BBOX_SPAN,
+  nearbyQueryUrl,
   normalizeContourProperties,
   normalizeOutlineProperties,
   normalizeSearchHits,
+  outlineQueryUrl,
   parseBbox,
   parseExtent,
   parseMaxDepth,
@@ -81,5 +89,102 @@ describe("lake proxy helpers", () => {
       }),
     ).toEqual({ west: -93.7, south: 44.88, east: -93.48, north: 44.97 });
     expect(parseMaxDepth({ features: [{ attributes: { max_depth: 100 } }] })).toBe(100);
+  });
+
+  it("uses a fine offset for selected lake geometry and a coarse offset for nearby shores", () => {
+    expect(outlineQueryUrl("11030700")).toContain(`maxAllowableOffset=${DETAIL_OFFSET}`);
+    expect(contoursQueryUrl("11030700")).toContain(`maxAllowableOffset=${DETAIL_OFFSET}`);
+    expect(nearbyQueryUrl({ west: -94, south: 45, east: -93.5, north: 45.4 })).toContain(
+      `maxAllowableOffset=${CONTOUR_OFFSET}`,
+    );
+  });
+
+  it("exports a lake-detail cache revision for client and worker cache keys", () => {
+    expect(LAKE_DETAIL_CACHE_REV).toMatch(/^v[0-9]+$/);
+  });
+
+  it("cuts a right angle with one Chaikin pass and keeps closed rings closed", () => {
+    const open = chaikinOnce(
+      [
+        [0, 0],
+        [0, 1],
+        [1, 1],
+      ],
+      false,
+    );
+    expect(open[0]).toEqual([0, 0]);
+    expect(open[open.length - 1]).toEqual([1, 1]);
+    expect(open).toContainEqual([0, 0.75]);
+    expect(open).toContainEqual([0.25, 1]);
+
+    const closed = chaikinOnce(
+      [
+        [0, 0],
+        [0, 1],
+        [1, 1],
+        [1, 0],
+        [0, 0],
+      ],
+      true,
+    );
+    expect(closed[0]).toEqual(closed[closed.length - 1]);
+    expect(closed.length).toBeGreaterThan(5);
+  });
+
+  it("smooths selected lake geometry while keeping contour properties", () => {
+    const detail = buildLakeDetail({
+      dowlknum: "11030700",
+      name: "Norway",
+      areaAcres: 514.9,
+      maxDepthFt: 13,
+      extent: { west: -95, south: 46, east: -94.9, north: 46.1 },
+      outline: {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: { dowlknum: "11030700", lake_name: "Norway", acres: 514.9, island: "N" },
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [
+                  [0, 0],
+                  [0, 1],
+                  [1, 1],
+                  [1, 0],
+                  [0, 0],
+                ],
+              ],
+            },
+          },
+        ],
+      },
+      contours: {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: { depth: -5, abs_depth: 5, dowlknum: "11030700", lake_name: "Norway" },
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [0, 0],
+                [0, 1],
+                [1, 1],
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(detail.contours.features[0]?.properties).toEqual({
+      lake_name: "Norway",
+      dowlknum: "11030700",
+      depth_ft: 5,
+    });
+    const line = detail.contours.features[0]?.geometry as { type: string; coordinates: number[][] };
+    expect(line.coordinates.length).toBeGreaterThan(3);
+    const ring = (detail.outline.features[0]?.geometry as { coordinates: number[][][] }).coordinates[0];
+    expect(ring?.[0]).toEqual(ring?.[ring.length - 1]);
   });
 });
