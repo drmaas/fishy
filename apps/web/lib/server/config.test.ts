@@ -41,8 +41,11 @@ describe("worker config", () => {
   it("allows only the outdoor style, sprite, TileJSON, tiles, and glyphs", () => {
     expect(isAllowedMaptilerPath("/maps/outdoor-v2/style.json")).toBe(true);
     expect(isAllowedMaptilerPath("/maps/outdoor-v2/sprite@2x.png")).toBe(true);
+    expect(isAllowedMaptilerPath("/sprites/general/sprite@2x.json")).toBe(true);
+    expect(isAllowedMaptilerPath("/sprites/general/sprite@2x.png")).toBe(true);
     expect(isAllowedMaptilerPath("/tiles/v3/tiles.json")).toBe(true);
     expect(isAllowedMaptilerPath("/tiles/v3/12/34/56.pbf")).toBe(true);
+    expect(isAllowedMaptilerPath("/tiles/terrain-rgb-v2/3/1/2")).toBe(true);
     expect(isAllowedMaptilerPath("/fonts/Open%20Sans%20Regular/0-255.pbf")).toBe(true);
     expect(isAllowedMaptilerPath("/geocoding/minneapolis.json")).toBe(false);
     expect(isAllowedMaptilerPath("/maps/streets-v2/style.json")).toBe(false);
@@ -53,6 +56,12 @@ describe("worker config", () => {
   it("adds the key only on an allowed upstream URL", () => {
     const url = upstreamMaptilerUrl("/api/basemap/upstream/tiles/v3/0/0/0.png", "", "secret-key");
     expect(url).toBe("https://api.maptiler.com/tiles/v3/0/0/0.png?key=secret-key");
+    expect(upstreamMaptilerUrl("/api/basemap/upstream/tiles/terrain-rgb-v2/3/1/2", "", "secret-key")).toBe(
+      "https://api.maptiler.com/tiles/terrain-rgb-v2/3/1/2?key=secret-key",
+    );
+    expect(upstreamMaptilerUrl("/api/basemap/upstream/sprites/general/sprite@2x.png", "", "secret-key")).toBe(
+      "https://api.maptiler.com/sprites/general/sprite%402x.png?key=secret-key",
+    );
   });
 
   it("does not cache errors and treats redirects as refused", () => {

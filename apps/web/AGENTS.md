@@ -10,7 +10,7 @@ Use this file when you edit the site, the Worker, or `lib/`.
 
 - Put page behavior in `src/`. Put route planning in `lib/server/config.ts` and `worker/index.ts`.
 - Do not fetch MapTiler from a component. The browser calls `/api/config` and, only when that payload says a key exists, `/api/basemap/style.json`.
-- `MAPTILER_API_KEY` stays a Worker secret. `/api/config` returns `maptiler: true` and no key. The proxy allowlist is the outdoor style, its sprite, TileJSON, tiles, and glyphs. Rewritten JSON keeps `{z}` style placeholders and must not contain the key. Do not cache error responses. Do not follow upstream redirects.
+- `MAPTILER_API_KEY` stays a Worker secret. `/api/config` returns `maptiler: true` and no key. The proxy allowlist is the outdoor style, outdoor and shared sprites, TileJSON, tiles (with or without an extension), and glyphs. Rewritten JSON keeps `{z}` style placeholders and must not contain the key. Do not cache error responses. Do not follow upstream redirects.
 - Do not declare that secret in `wrangler.jsonc`. An empty key must still build.
 - Do not log upstream URLs.
 - Accept only `GET` and `HEAD` on `/api/*`.

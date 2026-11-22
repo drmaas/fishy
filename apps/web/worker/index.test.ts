@@ -85,6 +85,7 @@ describe("maptiler worker proxy", () => {
   it("passes binary tile and sprite bytes through without UTF-8 corruption", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0xfd]);
     const pbf = new Uint8Array([0x1a, 0x80, 0xff]);
+    const webp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
     const cases: Array<{ path: string; body: Uint8Array; contentType: string }> = [
       {
         path: "/api/basemap/upstream/maps/outdoor-v2/sprite.png",
@@ -92,9 +93,19 @@ describe("maptiler worker proxy", () => {
         contentType: "image/png",
       },
       {
+        path: "/api/basemap/upstream/sprites/general/sprite@2x.png",
+        body: png,
+        contentType: "image/png",
+      },
+      {
         path: "/api/basemap/upstream/tiles/v3/0/0/0.pbf",
         body: pbf,
         contentType: "application/vnd.mapbox-vector-tile",
+      },
+      {
+        path: "/api/basemap/upstream/tiles/terrain-rgb-v2/3/1/2",
+        body: webp,
+        contentType: "image/webp",
       },
     ];
     for (const { path, body, contentType } of cases) {

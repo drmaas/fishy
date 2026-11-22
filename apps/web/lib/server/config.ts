@@ -21,12 +21,13 @@ const DEFAULTS = {
 
 const MAPTILER_URL = /https:\/\/api\.maptiler\.com(\/[^?\s]*)(\?[^"\s]*)?/g;
 
-/** Outdoor style, its sprite, TileJSON, tiles, and glyphs. Nothing else. */
+/** Outdoor style, outdoor/shared sprites, TileJSON, tiles, and glyphs. Nothing else. */
 const ALLOWED_UPSTREAM = [
   /^\/maps\/outdoor-v2\/style\.json$/,
   /^\/maps\/outdoor-v2\/sprite(?:@2x)?(?:\.(?:json|png))?$/,
+  /^\/sprites\/[A-Za-z0-9._-]+\/sprite(?:@2x)?(?:\.(?:json|png))?$/,
   /^\/tiles\/[A-Za-z0-9._-]+\/tiles\.json$/,
-  /^\/tiles\/[A-Za-z0-9._-]+\/\d+\/\d+\/\d+\.(?:pbf|mvt|png|jpe?g|webp)$/,
+  /^\/tiles\/[A-Za-z0-9._-]+\/\d+\/\d+\/\d+(?:\.(?:pbf|mvt|png|jpe?g|webp))?$/,
   /^\/fonts\/[^/]+\/\d+-\d+\.pbf$/,
 ];
 
