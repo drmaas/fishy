@@ -9,10 +9,15 @@ WBICs). The fit for a pair uses that WBIC's own shoreline. Rows ingest skipped
 
 Registration is bbox/orientation, then affine point registration, then a thin-plate
 spline. When ``gdal_translate`` and ``gdalwarp`` are on ``PATH``, the spline is
-applied with ``gdalwarp -tps`` in EPSG:3071. The IoU score does not require GDAL.
+applied with ``gdalwarp -tps -dstalpha`` in EPSG:3071. Bathymetry ink is black
+(value 0). An alpha band marks the valid sheet so a later clip does not treat
+that ink as nodata. The IoU score does not require GDAL.
 
-IoU under 0.90, a multi-sheet lake, or a flowage (HYDROTYPE 707, or "flowage" in
-the name) is written to ``georef/review_queue.json``.
+IoU under 0.90, a map shared by more than one WBIC, a multi-sheet lake, or a
+flowage (HYDROTYPE 707, or "flowage" in the name) is written to
+``georef/review_queue.json``. A flowage is queued even when its hydro polygon
+is missing. One registration failure is queued for that lake and the rest of
+the batch still runs.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
 from fishy_pipeline.states.wi.register import DEFAULT_GCP_COUNT, register_shoreline
 from fishy_pipeline.states.wi.shoreline import extract_shoreline
+from fishy_pipeline.states.wi.wbic import normalize_wbic
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
@@ -37,9 +43,11 @@ WI_CRS = "EPSG:3071"
 DEFAULT_IOU_THRESHOLD = 0.90
 _REASON_ORDER = (
     "flowage",
+    "shared_sheet",
     "iou_below_threshold",
     "multi_sheet",
     "shoreline_not_found",
+    "registration_error",
     "warp_failed",
 )
 
@@ -76,6 +84,12 @@ def gdal_translate_gcp_args(
 
 
 def gdalwarp_tps_args(source_vrt: str, dest_tif: str, t_srs: str = WI_CRS) -> list[str]:
+    """Warp with a thin-plate spline and an alpha mask.
+
+    ``-dstnodata 0`` would mark the black ink as nodata. ``-dstalpha`` leaves
+    the ink at 0 and records validity in the alpha band, so a hydro clip keeps
+    the bathymetry lines.
+    """
     return [
         "gdalwarp",
         "-tps",
@@ -83,8 +97,7 @@ def gdalwarp_tps_args(source_vrt: str, dest_tif: str, t_srs: str = WI_CRS) -> li
         t_srs,
         "-r",
         "near",
-        "-dstnodata",
-        "0",
+        "-dstalpha",
         "-overwrite",
         source_vrt,
         dest_tif,
@@ -144,6 +157,7 @@ def run_georef(
         raise ValueError("manifest entries must be a list")
     polygons = load_hydro_polygons(hydro_path)
     multi_wbics = _multi_sheet_wbics(entries)
+    shared_map_keys = _shared_map_keys(entries)
     tools = gdal_tools_available()
     items: list[dict] = []
     for entry in entries:
@@ -153,6 +167,7 @@ def run_georef(
                 manifest_path=manifest_path,
                 polygons=polygons,
                 multi_wbics=multi_wbics,
+                shared_map_keys=shared_map_keys,
                 work_dir=work_dir,
                 iou_threshold=iou_threshold,
                 gcp_count=gcp_count,
@@ -179,17 +194,79 @@ def run_georef(
     return results
 
 
+def _is_georef_candidate(entry: dict) -> bool:
+    """True for a raster row that is not an ingest skip."""
+    if entry.get("skip_reason") or entry.get("raster_skip_reason"):
+        return False
+    if entry.get("source_media_type") in {"shapefile", "unknown"}:
+        return False
+    return normalize_wbic(entry.get("wbic")) is not None
+
+
+def _shared_map_keys(entries: list[dict]) -> set[str]:
+    """Map keys used by more than one WBIC.
+
+    One extracted ring, scaled to each lake's own box, can score a similar
+    smaller basin as a match. Those rows go to the review queue.
+    """
+    wbics_by_key: dict[str, set[str]] = {}
+    for entry in entries:
+        if not _is_georef_candidate(entry):
+            continue
+        wbic = normalize_wbic(entry.get("wbic"))
+        if wbic is None:
+            continue
+        wbics_by_key.setdefault(str(entry["map_key"]), set()).add(wbic)
+    return {map_key for map_key, wbics in wbics_by_key.items() if len(wbics) > 1}
+
+
 def _multi_sheet_wbics(entries: list[dict]) -> set[str]:
     keys: dict[str, set[str]] = {}
     for entry in entries:
-        keys.setdefault(str(entry["wbic"]), set()).add(str(entry["map_key"]))
+        if not _is_georef_candidate(entry):
+            continue
+        wbic = normalize_wbic(entry.get("wbic"))
+        if wbic is None:
+            continue
+        keys.setdefault(wbic, set()).add(str(entry["map_key"]))
     return {wbic for wbic, map_keys in keys.items() if len(map_keys) > 1}
 
 
-def _entry_is_multi(entry: dict, multi_wbics: set[str]) -> bool:
+def _entry_is_multi(entry: dict, multi_wbics: set[str], wbic: str) -> bool:
     if entry.get("multi_sheet") is True:
         return True
-    return str(entry["wbic"]) in multi_wbics
+    return wbic in multi_wbics
+
+
+def _entry_hydrotype(entry: dict, water: HydroWaterbody | None) -> int | None:
+    if water is not None and water.hydrotype is not None:
+        return water.hydrotype
+    hydro = entry.get("hydro") or {}
+    value = hydro.get("hydrotype")
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_waterbody_name(entry: dict, water: HydroWaterbody | None) -> str | None:
+    if water is not None and water.waterbody_name:
+        return water.waterbody_name
+    hydro = entry.get("hydro") or {}
+    name = hydro.get("waterbody_name") or entry.get("name")
+    return str(name) if name else None
+
+
+def _entry_is_flowage(entry: dict, water: HydroWaterbody | None) -> bool:
+    hydro = entry.get("hydro") or {}
+    return is_flowage(
+        _entry_hydrotype(entry, water),
+        None if water is None else water.waterbody_name,
+        entry.get("name"),
+        hydro.get("waterbody_name"),
+    )
 
 
 def _resolve_raster(entry: dict, manifest_path: Path) -> Path | None:
@@ -226,25 +303,53 @@ def _georeference_entry(
     manifest_path: Path,
     polygons: dict[str, HydroWaterbody],
     multi_wbics: set[str],
+    shared_map_keys: set[str],
     work_dir: Path,
     iou_threshold: float,
     gcp_count: int,
     gdal_available: bool,
 ) -> dict:
-    wbic = str(entry["wbic"])
+    raw_wbic = entry.get("wbic")
+    wbic = normalize_wbic(raw_wbic)
     map_key = str(entry["map_key"])
     base = {
-        "wbic": wbic,
+        "wbic": wbic if wbic is not None else ("" if raw_wbic is None else str(raw_wbic)),
         "map_key": map_key,
         "name": entry.get("name"),
     }
+    if wbic is None:
+        return {**base, "qa_status": "skipped", "skip_reason": "invalid_wbic", "reasons": [], "iou": None}
+
     raster = _resolve_raster(entry, manifest_path)
     reason = _skip_reason(entry, raster)
     if reason:
         return {**base, "qa_status": "skipped", "skip_reason": reason, "reasons": [], "iou": None}
+    assert raster is not None
 
     water = polygons.get(wbic)
+    shared_sheet = map_key in shared_map_keys
+    multi_sheet = _entry_is_multi(entry, multi_wbics, wbic)
+    flowage = _entry_is_flowage(entry, water)
+    hydrotype = _entry_hydrotype(entry, water)
+    waterbody_name = _entry_waterbody_name(entry, water)
     if water is None:
+        if flowage:
+            return _unscored(
+                base,
+                reasons=_reasons(
+                    flowage=True,
+                    shared_sheet=shared_sheet,
+                    low_iou=False,
+                    multi_sheet=multi_sheet,
+                    shoreline_found=None,
+                    registration_error=False,
+                    warp_failed=False,
+                ),
+                hydrotype=hydrotype,
+                waterbody_name=waterbody_name,
+                multi_sheet=multi_sheet,
+                flowage=True,
+            )
         return {
             **base,
             "qa_status": "skipped",
@@ -253,38 +358,52 @@ def _georeference_entry(
             "iou": None,
         }
 
-    multi_sheet = _entry_is_multi(entry, multi_wbics)
-    flowage = is_flowage(
-        water.hydrotype,
-        water.waterbody_name,
-        entry.get("name"),
-        (entry.get("hydro") or {}).get("waterbody_name"),
-    )
     shoreline = extract_shoreline(read_png(raster))
     out_dir = work_dir / "georef" / "lakes" / wbic / map_key
     if shoreline is None:
-        reasons = _reasons(
-            flowage=flowage,
-            low_iou=False,
+        return _unscored(
+            base,
+            reasons=_reasons(
+                flowage=flowage,
+                shared_sheet=shared_sheet,
+                low_iou=False,
+                multi_sheet=multi_sheet,
+                shoreline_found=False,
+                registration_error=False,
+                warp_failed=False,
+            ),
+            hydrotype=hydrotype,
+            waterbody_name=waterbody_name,
             multi_sheet=multi_sheet,
-            shoreline_found=False,
-            warp_failed=False,
+            flowage=flowage,
         )
-        return {
-            **base,
-            "qa_status": "needs_review",
-            "iou": None,
-            "reasons": reasons,
-            "hydrotype": water.hydrotype,
-            "waterbody_name": water.waterbody_name,
-            "multi_sheet": multi_sheet,
-            "flowage": flowage,
-            "warp": {"tool": "gdalwarp", "status": "not_run"},
-        }
 
-    registration = register_shoreline(shoreline, list(water.ring), gcp_count=gcp_count)
-    iou = registration.iou
-    low_iou = iou < iou_threshold
+    try:
+        registration = register_shoreline(shoreline, list(water.ring), gcp_count=gcp_count)
+    except Exception as error:
+        # One bad shoreline must not abort the batch before the queue is written.
+        return _unscored(
+            base,
+            reasons=_reasons(
+                flowage=flowage,
+                shared_sheet=shared_sheet,
+                low_iou=False,
+                multi_sheet=multi_sheet,
+                shoreline_found=True,
+                registration_error=True,
+                warp_failed=False,
+            ),
+            hydrotype=hydrotype,
+            waterbody_name=waterbody_name,
+            multi_sheet=multi_sheet,
+            flowage=flowage,
+            error=str(error)[:500],
+        )
+
+    affine_iou = round(registration.affine_iou, 6)
+    tps_iou = round(registration.tps_iou, 6)
+    iou = min(affine_iou, tps_iou)
+    low_iou = registration.iou < iou_threshold
     gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
     out_dir.mkdir(parents=True, exist_ok=True)
     gcp_path = out_dir / "gcps.json"
@@ -301,7 +420,7 @@ def _georeference_entry(
             {
                 "wbic": wbic,
                 "map_key": map_key,
-                "iou": round(iou, 6),
+                "iou": iou,
             },
         ),
     )
@@ -313,22 +432,24 @@ def _georeference_entry(
     )
     reasons = _reasons(
         flowage=flowage,
+        shared_sheet=shared_sheet,
         low_iou=low_iou,
         multi_sheet=multi_sheet,
         shoreline_found=True,
+        registration_error=False,
         warp_failed=warp_status == "failed",
     )
     return {
         **base,
         "qa_status": "needs_review" if reasons else "auto",
-        "iou": round(iou, 6),
-        "affine_iou": round(registration.affine_iou, 6),
-        "tps_iou": round(registration.tps_iou, 6),
+        "iou": iou,
+        "affine_iou": affine_iou,
+        "tps_iou": tps_iou,
         "reasons": reasons,
         "affine": registration.affine.as_dict(),
         "gcp_count": len(gcp_dicts),
-        "hydrotype": water.hydrotype,
-        "waterbody_name": water.waterbody_name,
+        "hydrotype": hydrotype,
+        "waterbody_name": waterbody_name,
         "multi_sheet": multi_sheet,
         "flowage": flowage,
         "paths": {
@@ -347,20 +468,52 @@ def _georeference_entry(
     }
 
 
+def _unscored(
+    base: dict,
+    *,
+    reasons: list[str],
+    hydrotype: int | None,
+    waterbody_name: str | None,
+    multi_sheet: bool,
+    flowage: bool,
+    error: str | None = None,
+) -> dict:
+    item = {
+        **base,
+        "qa_status": "needs_review",
+        "iou": None,
+        "reasons": reasons,
+        "hydrotype": hydrotype,
+        "waterbody_name": waterbody_name,
+        "multi_sheet": multi_sheet,
+        "flowage": flowage,
+        "warp": {"tool": "gdalwarp", "status": "not_run"},
+    }
+    if error:
+        item["error"] = error
+    return item
+
+
 def _reasons(
     *,
     flowage: bool,
+    shared_sheet: bool,
     low_iou: bool,
     multi_sheet: bool,
-    shoreline_found: bool,
+    shoreline_found: bool | None,
+    registration_error: bool,
     warp_failed: bool,
 ) -> list[str]:
     found = []
     if flowage:
         found.append("flowage")
-    if not shoreline_found:
+    if shared_sheet:
+        found.append("shared_sheet")
+    if registration_error:
+        found.append("registration_error")
+    elif shoreline_found is False:
         found.append("shoreline_not_found")
-    elif low_iou:
+    elif shoreline_found and low_iou:
         found.append("iou_below_threshold")
     if multi_sheet:
         found.append("multi_sheet")
@@ -415,6 +568,8 @@ def _review_items(items: list[dict]) -> list[dict]:
         gcp_path = (item.get("paths") or {}).get("gcps")
         if gcp_path:
             review["gcp_path"] = gcp_path
+        if item.get("error"):
+            review["error"] = item["error"]
         queued.append(review)
     queued.sort(key=lambda item: (item["wbic"], item["map_key"]))
     return queued

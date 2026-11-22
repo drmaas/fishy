@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Build the synthetic WI georef fixture from ``fixtures/wi-georef/known-transform.json``.
 
-The raster is drawn in memory (border, PLSS grid, legend, one shoreline) and written
-under the work directory. Nothing here is a real DNR extract.
+The raster is drawn in memory (border, PLSS grid, legend, and the shorelines named
+by each case) and written under the work directory. Nothing here is a real DNR extract.
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ def pixel_to_map(spec: dict, col: float, row: float) -> tuple[float, float]:
     return affine_from_spec(spec).apply(col, row)
 
 
-def render_map(spec: dict) -> RasterImage:
-    """White sheet, full-span grid and neatline, a corner legend, and the lake ring."""
+def render_map(spec: dict, rings: list | None = None) -> RasterImage:
+    """White sheet, full-span grid and neatline, a corner legend, and shoreline rings."""
     width = int(spec["width"])
     height = int(spec["height"])
     rgb = bytearray([255]) * (width * height * 3)
@@ -58,10 +58,20 @@ def render_map(spec: dict) -> RasterImage:
     if legend:
         x, y, box_w, box_h = (int(value) for value in legend)
         _fill_rect(rgb, width, height, x, y, x + box_w - 1, y + box_h - 1)
-    ring = [(float(point[0]), float(point[1])) for point in spec["pixel_ring"]]
-    for index, start in enumerate(ring):
-        end = ring[(index + 1) % len(ring)]
-        _line(rgb, width, height, int(round(start[0])), int(round(start[1])), int(round(end[0])), int(round(end[1])))
+    draw_rings = [spec["pixel_ring"]] if rings is None else rings
+    for ring in draw_rings:
+        points = [(float(point[0]), float(point[1])) for point in ring]
+        for index, start in enumerate(points):
+            end = points[(index + 1) % len(points)]
+            _line(
+                rgb,
+                width,
+                height,
+                int(round(start[0])),
+                int(round(start[1])),
+                int(round(end[0])),
+                int(round(end[1])),
+            )
     return RasterImage(width=width, height=height, rgb=bytes(rgb))
 
 
@@ -73,15 +83,15 @@ def materialize_fixture(dest: Path, spec: dict | None = None) -> tuple[Path, Pat
     """Write a manifest, EPSG:3071 hydro GeoJSON, and PNGs. Returns those two paths."""
     spec = spec or load_spec()
     dest.mkdir(parents=True, exist_ok=True)
-    image = render_map(spec)
+    groups: dict[str, list[dict]] = {}
+    for case in spec["cases"]:
+        groups.setdefault(case["map_key"], []).append(case)
     rasters = dest / "rasters"
     written: dict[str, Path] = {}
-    for case in spec["cases"]:
-        if case.get("role") == "skip":
+    for map_key, cases in groups.items():
+        if all(case.get("role") == "skip" for case in cases):
             continue
-        map_key = case["map_key"]
-        if map_key in written:
-            continue
+        image = render_map(_image_spec(spec, cases), _sheet_rings(spec, cases))
         path = rasters / f"{map_key}.png"
         write_png(path, image)
         written[map_key] = path
@@ -110,7 +120,10 @@ def materialize_fixture(dest: Path, spec: dict | None = None) -> tuple[Path, Pat
             "hydroid": None,
             "hydrotype": int(case["hydrotype"]),
         }
-        pixel_ring = spec["mismatch_pixel_ring"] if role == "mismatch" else spec["pixel_ring"]
+        if role == "flowage_missing":
+            entries.append(entry)
+            continue
+        pixel_ring = _hydro_pixel_ring(spec, case)
         ring = map_ring(spec, pixel_ring)
         closed = ring + [ring[0]]
         features.append(
@@ -153,6 +166,37 @@ def materialize_fixture(dest: Path, spec: dict | None = None) -> tuple[Path, Pat
         encoding="utf-8",
     )
     return manifest_path, hydro_path
+
+
+def _image_spec(spec: dict, cases: list[dict]) -> dict:
+    """Use a case's sheet size and legend when the default 160px sheet would clip it."""
+    for case in cases:
+        overrides = {
+            key: case[key] for key in ("width", "height", "legend", "border_inset", "grid_step") if key in case
+        }
+        if overrides:
+            return {**spec, **overrides}
+    return spec
+
+
+def _sheet_rings(spec: dict, cases: list[dict]) -> list:
+    rings = []
+    seen: set[str] = set()
+    for case in cases:
+        if case.get("role") in {"skip", "flowage_missing"}:
+            continue
+        key = str(case.get("draw_ring", "pixel_ring"))
+        if key in seen:
+            continue
+        seen.add(key)
+        rings.append(spec[key])
+    return rings or [spec["pixel_ring"]]
+
+
+def _hydro_pixel_ring(spec: dict, case: dict) -> list:
+    if case.get("role") == "mismatch":
+        return spec["mismatch_pixel_ring"]
+    return spec[str(case.get("hydro_ring", "pixel_ring"))]
 
 
 def _set_black(rgb: bytearray, width: int, height: int, x: int, y: int) -> None:
