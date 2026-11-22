@@ -6,7 +6,7 @@ The site is a Vite + React app on a Cloudflare Worker. A Python pipeline turns c
 
 ## Status
 
-Milestone zero. The web app frames a synthetic Sample Pond from tiny PMTiles in `apps/web/public/samples/`. It is not a survey, and the DOW id `99999900` is not a real lake. Statewide Minnesota data is not in this repository.
+The web app opens on Minnesota. Search a surveyed lake by name or DOW id, or zoom in and click a shore outline, to load DNR contours and depths through the Worker. The state control lists Minnesota only. Statewide survey files are not in git. Tiny Sample Pond PMTiles under `apps/web/public/samples/` still ship for local demos; the DOW id `99999900` is not a real lake.
 
 `apps/android` and `apps/ios` are placeholders.
 
@@ -19,7 +19,7 @@ pnpm install
 pnpm dev
 ```
 
-Open http://localhost:5173. The map starts on Sample Pond. Click the lake for the info panel. The footer carries the OpenStreetMap and Minnesota DNR credits.
+Open http://localhost:5173. The map starts on Minnesota. Search for a lake such as Waconia, or zoom in and click a surveyed outline. The footer carries the OpenStreetMap and Minnesota DNR credits.
 
 OpenFreeMap is the default basemap and needs no key. To use MapTiler instead, copy `apps/web/.dev.vars.example` to `apps/web/.dev.vars` and set `MAPTILER_API_KEY`. Do not commit that file.
 

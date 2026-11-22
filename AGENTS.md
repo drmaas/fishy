@@ -30,7 +30,7 @@ Also read the nearest package file before editing that package:
 | Change | Edit |
 | --- | --- |
 | Depth units, lake ids, tile URLs | `packages/core`, `pipeline/fishy_pipeline/depth.py`, `fixtures/contract.json` |
-| Worker routes and the MapTiler proxy | `apps/web/lib/server/config.ts`, `apps/web/worker/index.ts` |
+| Worker routes, MapTiler proxy, and lake MapServer proxy | `apps/web/lib/server/config.ts`, `apps/web/lib/server/lakes.ts`, `apps/web/worker/index.ts` |
 | Map and lake panel | `apps/web/src` |
 | Contour and raster commands | `pipeline/fishy_pipeline` |
 | CI or deploy | `.github/workflows` |

@@ -28,9 +28,11 @@ describe("lake panel", () => {
 });
 
 describe("app shell", () => {
-  it("renders the map frame and required credits", () => {
+  it("renders the map frame, state control, and required credits", () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain("Fishy");
+    expect(html).toContain("Minnesota");
+    expect(html).toContain("Find a lake");
     expect(html).toContain("OpenStreetMap contributors");
     expect(html).toContain("Minnesota DNR");
     expect(html).toContain('class="map"');

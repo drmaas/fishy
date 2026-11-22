@@ -8,8 +8,9 @@ Use this file when you edit the site, the Worker, or `lib/`.
 
 ## Rules
 
-- Put page behavior in `src/`. Put route planning in `lib/server/config.ts` and `worker/index.ts`.
+- Put page behavior in `src/`. Put route planning in `lib/server/config.ts`, lake MapServer helpers in `lib/server/lakes.ts`, and HTTP wiring in `worker/index.ts`.
 - Do not fetch MapTiler from a component. The browser calls `/api/config` and, only when that payload says a key exists, `/api/basemap/style.json`.
+- Lake search, nearby outlines, and single-lake contours go through `/api/lakes*`. The Worker proxies `enterprise.gisdata.mn.gov` only, normalizes `depth_ft`, and caches successful responses for a day with the Cache API. Do not log upstream URLs. Do not commit survey extracts.
 - `MAPTILER_API_KEY` stays a Worker secret. `/api/config` returns `maptiler: true` and no key. The proxy allowlist is the outdoor style, outdoor and shared sprites, TileJSON, tiles (with or without an extension), and glyphs. Rewritten JSON keeps `{z}` style placeholders and must not contain the key. Do not cache error responses. Do not follow upstream redirects.
 - Do not declare that secret in `wrangler.jsonc`. An empty key must still build.
 - Do not log upstream URLs.

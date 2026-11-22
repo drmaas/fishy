@@ -8,6 +8,48 @@ function call(path: string): Promise<Response> {
   return worker.fetch(new Request(`https://fishy.example${path}`), ENV);
 }
 
+describe("lake worker routes", () => {
+  it("rejects an unsupported state or bad lake id before the upstream request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await call("/api/lakes?state=wi&q=waconia")).status).toBe(404);
+    expect((await call("/api/lakes?state=mn&q=x")).status).toBe(404);
+    expect((await call("/api/lakes/nearby?state=mn&west=-95&south=44&east=-93&north=45")).status).toBe(404);
+    expect((await call("/api/lakes/270133?state=mn")).status).toBe(404);
+    expect((await call("/api/lakes/not-a-lake?state=mn")).status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns search hits from a mocked DNR response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            features: [
+              {
+                attributes: {
+                  dowlknum: "10005900",
+                  lake_name: "Waconia",
+                  cty_name: "Carver",
+                  acres: 3075.189,
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const response = await call("/api/lakes?state=mn&q=waconia");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=86400");
+    expect(await response.json()).toEqual({
+      lakes: [{ dowlknum: "10005900", lake_name: "Waconia", cty_name: "Carver", acres: 3075.189 }],
+    });
+  });
+});
+
 function headers(response: Response): string {
   return [...response.headers.entries()].map(([name, value]) => `${name}: ${value}`).join("\n");
 }
