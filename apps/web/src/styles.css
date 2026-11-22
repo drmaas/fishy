@@ -289,25 +289,73 @@ button[aria-pressed="true"] {
   position: absolute;
   z-index: 2;
   left: 12px;
-  right: 12px;
   bottom: 10px;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  padding: 6px 10px;
-  background: color-mix(in srgb, var(--paper) 88%, transparent);
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  font-size: 12px;
 }
 
-.credits p { margin: 0; }
-.credits ul {
-  flex-basis: 100%;
+.credits-toggle {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgb(20 32 40 / 12%);
+  backdrop-filter: blur(8px);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.credits-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(280px, calc(100vw - 24px));
+  padding: 10px 12px 12px;
+  background: color-mix(in srgb, var(--paper) 96%, transparent);
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(20 32 40 / 16%);
+  backdrop-filter: blur(10px);
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.credits-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.credits-panel-title {
   margin: 0;
-  padding-left: 18px;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.credits-panel-close {
+  padding: 4px 8px;
+  min-height: 0;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid #b7c3c9;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.credits-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.credits-list a {
+  color: var(--water-deep);
 }
 
 .maplibregl-ctrl-bottom-right {

@@ -104,9 +104,9 @@ export function FishMap({
               }
             : OPENFREEMAP_STYLE;
 
-      const fitSelectedLake = (lake: LakeDetail, duration: number) => {
+      const fitSelectedLake = (lake: LakeDetail, duration: number, force = false) => {
         if (!map || !mapReady.current) return;
-        if (fittedLake.current === lake.dowlknum) return;
+        if (!force && fittedLake.current === lake.dowlknum) return;
         // MapLibre fitBounds while ACTIVE_LOCK does not release the lock; the next
         // GPS fix recenters on the user and fittedLake would prevent a retry.
         if (locationLock.current) return;
@@ -135,8 +135,13 @@ export function FishMap({
         fitBoundsOptions: { maxZoom: 16, padding: 80 },
       });
       map.addControl(geolocate, "bottom-right");
+      // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
+      // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
+      let gpsBackgrounded = false;
       geolocate.on("trackuserlocationstart", () => {
         locationLock.current = true;
+        fittedLake.current = null;
+        gpsBackgrounded = false;
       });
       geolocate.on("geolocate", (event) => {
         const accuracy = event.coords.accuracy;
@@ -148,11 +153,20 @@ export function FishMap({
       geolocate.on("error", (event) => {
         onLocationRef.current({ status: "error", code: event.code });
       });
+      geolocate.on("userlocationlostfocus", () => {
+        gpsBackgrounded = true;
+      });
       geolocate.on("trackuserlocationend", () => {
         locationLock.current = false;
         onLocationRef.current({ status: "idle" });
-        const lake = selectedRef.current;
-        if (lake) fitSelectedLake(lake, 800);
+        queueMicrotask(() => {
+          if (gpsBackgrounded) {
+            gpsBackgrounded = false;
+            return;
+          }
+          const lake = selectedRef.current;
+          if (lake) fitSelectedLake(lake, 800, true);
+        });
       });
 
       const reportExtent = () => {

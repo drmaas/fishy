@@ -132,12 +132,6 @@ export function App() {
     void selectLake(hit.dowlknum, true);
   }
 
-  function onCloseLake() {
-    pendingLake.current = null;
-    setLake(null);
-    setSelected(null);
-  }
-
   function setChrome(open: boolean) {
     setChromeOpen(open);
     writeOpenFlag("fishy-chrome-open", open);
@@ -273,7 +267,7 @@ export function App() {
       <DepthLegend unit={unit} />
       {lake && (
         <div hidden={!panelOpen}>
-          <LakePanel lake={lake} unit={unit} onClose={onCloseLake} onHide={() => setPanel(false)} />
+          <LakePanel lake={lake} unit={unit} onHide={() => setPanel(false)} />
         </div>
       )}
       {lake && !panelOpen && (
@@ -287,35 +281,43 @@ export function App() {
           {lake.name}
         </button>
       )}
-      <footer className="credits">
-        <p>
-          {basemap !== "none" && (
-            <>
-              <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>
-              {basemap === "openfreemap" ? " · OpenFreeMap" : " · © MapTiler"}
-              {" · "}
-            </>
-          )}
-          Bathymetry © Minnesota DNR
-          {lake ? ` · ${lake.name} ${formatDepth(lake.maxDepthFt, unit)}` : ""}
-        </p>
-        <button type="button" onClick={() => setCreditsOpen((open) => !open)}>
+      <div className="credits">
+        <button
+          type="button"
+          className="credits-toggle tap-target"
+          aria-expanded={creditsOpen}
+          aria-controls="credits-panel"
+          onClick={() => setCreditsOpen((open) => !open)}
+        >
           Credits
         </button>
         {creditsOpen && (
-          <ul>
-            <li>Minnesota DNR lake bathymetry. Access constraints: none. Credit the DNR.</li>
-            <li>USGS National Hydrography Dataset is public domain. Credit the U.S. Geological Survey.</li>
-            <li>NOAA NCEI Great Lakes bathymetry is public domain. Credit NOAA NCEI.</li>
-            <li>
-              OpenStreetMap data stays under ODbL. Attribute{" "}
-              <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>.
-            </li>
-            <li>Open-Meteo, when wired, is CC BY 4.0. Credit Open-Meteo.</li>
-            <li>National Weather Service data is public domain. Credit NWS.</li>
-          </ul>
+          <aside className="credits-panel" id="credits-panel" aria-label="Data credits">
+            <div className="credits-panel-head">
+              <p className="credits-panel-title">Credits</p>
+              <button type="button" className="credits-panel-close" onClick={() => setCreditsOpen(false)}>
+                Done
+              </button>
+            </div>
+            <ul className="credits-list">
+              {basemap !== "none" && (
+                <li>
+                  <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>
+                  {basemap === "openfreemap" ? " · OpenFreeMap" : " · © MapTiler"}
+                </li>
+              )}
+              <li>
+                Bathymetry © Minnesota DNR
+                {lake ? ` · ${lake.name} ${formatDepth(lake.maxDepthFt, unit)}` : ""}
+              </li>
+              <li>USGS NHD · public domain</li>
+              <li>NOAA NCEI Great Lakes · public domain</li>
+              <li>Open-Meteo · CC BY 4.0 (when wired)</li>
+              <li>NWS · public domain</li>
+            </ul>
+          </aside>
         )}
-      </footer>
+      </div>
     </div>
   );
 }

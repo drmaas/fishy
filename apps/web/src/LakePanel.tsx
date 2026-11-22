@@ -3,24 +3,18 @@ import { formatArea, formatDepth, lakeFinderUrl, type DepthUnit, type LakeInfo }
 interface LakePanelProps {
   lake: LakeInfo;
   unit: DepthUnit;
-  onClose: () => void;
   onHide: () => void;
 }
 
-export function LakePanel({ lake, unit, onClose, onHide }: LakePanelProps) {
+export function LakePanel({ lake, unit, onHide }: LakePanelProps) {
   const finder = lakeFinderUrl(lake.dowlknum);
   return (
     <aside className="panel" id="lake-panel" aria-label="Lake">
       <div className="panel-head">
         <h2>{lake.name}</h2>
-        <div className="panel-actions">
-          <button type="button" className="tap-target" onClick={onHide} aria-expanded="true" aria-controls="lake-panel">
-            Hide
-          </button>
-          <button type="button" className="tap-target" onClick={onClose} aria-label="Close lake info">
-            Close
-          </button>
-        </div>
+        <button type="button" className="tap-target" onClick={onHide} aria-expanded="true" aria-controls="lake-panel">
+          Hide
+        </button>
       </div>
       <dl>
         <div>
