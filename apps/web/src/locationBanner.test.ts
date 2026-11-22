@@ -43,11 +43,11 @@ describe("reduceLocationBanner", () => {
     expect(locationBannerVisible(model)).toBe(true);
   });
 
-  it("clears error on permission granted", () => {
+  it("keeps error copy until a fix on permission granted", () => {
     const model = reduceLocationBanner(denied, { type: "permission_granted" });
-    expect(model.location).toEqual({ status: "idle" });
+    expect(model.location).toEqual(denied.location);
     expect(model.dismissed).toBe(false);
-    expect(locationBannerVisible(model)).toBe(false);
+    expect(locationBannerVisible(model)).toBe(true);
   });
 
   it("updates location from the map", () => {

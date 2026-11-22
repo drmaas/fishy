@@ -13,8 +13,10 @@ import {
 
 function mockGeolocateButton(classes: string[], disabled = false): HTMLButtonElement {
   const classSet = new Set(classes);
+  const attrs = new Map<string, string>();
   return {
     disabled,
+    title: "",
     classList: {
       contains: (name: string) => classSet.has(name),
       add: (name: string) => {
@@ -24,6 +26,10 @@ function mockGeolocateButton(classes: string[], disabled = false): HTMLButtonEle
         classSet.delete(name);
       },
     },
+    setAttribute: (name: string, value: string) => {
+      attrs.set(name, value);
+    },
+    getAttribute: (name: string) => attrs.get(name) ?? null,
     removeAttribute: () => undefined,
   } as unknown as HTMLButtonElement;
 }
@@ -96,6 +102,8 @@ describe("runGeolocateFreshStart", () => {
     const button = mockGeolocateButton([], true);
     runGeolocateFreshStart(() => true, button);
     expect(button.disabled).toBe(false);
+    expect(button.title).toBe("Find my location");
+    expect(button.getAttribute("aria-label")).toBe("Find my location");
   });
 });
 

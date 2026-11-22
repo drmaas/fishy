@@ -7,13 +7,20 @@ import {
 import { useEffect, useRef, type MutableRefObject } from "react";
 import { DEPTH_COLOR, contourLabelField, fishSources } from "./layers.ts";
 import type { GeoJsonFeatureCollection, LakeDetail, LakeExtent } from "./lakeApi.ts";
-import { shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
+import { GEOLOCATION_ERROR, shouldClearLocationOnTrackingEnd } from "./locationBanner.ts";
 import {
+  prepareGeolocateButtonForRetry,
   readGeolocateWatchState,
   runGeolocateFreshStart,
   runGeolocatePermissionGrantStart,
   shouldInterceptGeolocateButtonClick,
 } from "./geolocateRetry.ts";
+import {
+  armGeolocateHangTimer,
+  createFishyGeolocateControl,
+  replaceGeolocateControl,
+  shouldRecreateGeolocateAfterError,
+} from "./mapGeolocateSession.ts";
 import type { LocationHintState } from "./locationHint.ts";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
@@ -147,80 +154,114 @@ export function FishMap({
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
-      const geolocate = new maplibregl.GeolocateControl({
-        positionOptions: { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 },
-        trackUserLocation: true,
-        showUserLocation: true,
-        showAccuracyCircle: true,
-        zoomToUserAccuracy: true,
-        fitBoundsOptions: { maxZoom: 16, padding: 80 },
-      });
+      let geolocate = createFishyGeolocateControl(maplibregl);
       map.addControl(geolocate, "bottom-right");
+      let geolocateNeedsRecreate = false;
+      let clearHangTimer: (() => void) | undefined;
       const geolocateButtonFor = (): HTMLButtonElement | null =>
         map?.getContainer().querySelector<HTMLButtonElement>(".maplibregl-ctrl-geolocate") ?? null;
-      locationRetryRef.current = () => {
-        runGeolocateFreshStart(() => geolocate.trigger(), geolocateButtonFor());
-      };
-      locationPermissionGrantRef.current = () => {
-        runGeolocatePermissionGrantStart(() => geolocate.trigger(), geolocateButtonFor());
-      };
-      geolocateButton = geolocateButtonFor();
-      onGeolocateButtonClick = (event: Event) => {
-        const button = event.currentTarget as HTMLButtonElement;
-        onLocationAttemptRef.current();
-        const watchState = readGeolocateWatchState(button);
-        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled)) {
-          event.stopImmediatePropagation();
-          runGeolocateFreshStart(() => geolocate.trigger(), button);
+      const detachGeolocateClick = () => {
+        if (geolocateButton && onGeolocateButtonClick) {
+          geolocateButton.removeEventListener("click", onGeolocateButtonClick, true);
         }
       };
-      if (geolocateButton && onGeolocateButtonClick) {
-        geolocateButton.addEventListener("click", onGeolocateButtonClick, true);
-      }
+      const attachGeolocateClick = () => {
+        geolocateButton = geolocateButtonFor();
+        if (geolocateButton && onGeolocateButtonClick) {
+          geolocateButton.addEventListener("click", onGeolocateButtonClick, true);
+        }
+      };
       // BACKGROUND (user pan) fires trackuserlocationend then userlocationlostfocus sync.
       // Defer fit so BACKGROUND can skip; OFF (deselect) still snaps back to the lake.
       let gpsBackgrounded = false;
       let geolocationFailed = false;
-      geolocate.on("trackuserlocationstart", () => {
-        geolocationFailed = false;
-        onLocationAttemptRef.current();
-        locationLock.current = true;
-        fittedLake.current = null;
-        gpsBackgrounded = false;
-      });
-      geolocate.on("geolocate", (event) => {
-        geolocationFailed = false;
-        const button = geolocateButtonFor();
-        if (button?.disabled) {
-          button.disabled = false;
-        }
-        const accuracy = event.coords.accuracy;
-        onLocationRef.current({
-          status: "active",
-          accuracyMeters: typeof accuracy === "number" ? accuracy : null,
+      function wireGeolocate(control: typeof geolocate) {
+        control.on("trackuserlocationstart", () => {
+          geolocationFailed = false;
+          clearHangTimer?.();
+          onLocationAttemptRef.current();
+          locationLock.current = true;
+          fittedLake.current = null;
+          gpsBackgrounded = false;
+          clearHangTimer = armGeolocateHangTimer(geolocateButtonFor(), () => {
+            geolocationFailed = true;
+            onLocationRef.current({ status: "error", code: GEOLOCATION_ERROR.TIMEOUT });
+          });
         });
-      });
-      geolocate.on("error", (event) => {
-        geolocationFailed = true;
-        onLocationRef.current({ status: "error", code: event.code });
-      });
-      geolocate.on("userlocationlostfocus", () => {
-        gpsBackgrounded = true;
-      });
-      geolocate.on("trackuserlocationend", () => {
-        locationLock.current = false;
-        if (shouldClearLocationOnTrackingEnd(lastLocationRef.current, geolocationFailed)) {
-          onLocationRef.current({ status: "idle" });
-        }
-        queueMicrotask(() => {
-          if (gpsBackgrounded) {
-            gpsBackgrounded = false;
-            return;
+        control.on("geolocate", (event) => {
+          geolocationFailed = false;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          const button = geolocateButtonFor();
+          prepareGeolocateButtonForRetry(button);
+          const accuracy = event.coords.accuracy;
+          onLocationRef.current({
+            status: "active",
+            accuracyMeters: typeof accuracy === "number" ? accuracy : null,
+          });
+        });
+        control.on("error", (event) => {
+          geolocationFailed = true;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          if (shouldRecreateGeolocateAfterError(event.code)) {
+            geolocateNeedsRecreate = true;
           }
-          const lake = selectedRef.current;
-          if (lake) fitSelectedLake(lake, 800, true);
+          onLocationRef.current({ status: "error", code: event.code });
         });
-      });
+        control.on("userlocationlostfocus", () => {
+          gpsBackgrounded = true;
+        });
+        control.on("trackuserlocationend", () => {
+          locationLock.current = false;
+          clearHangTimer?.();
+          clearHangTimer = undefined;
+          if (shouldClearLocationOnTrackingEnd(lastLocationRef.current, geolocationFailed)) {
+            onLocationRef.current({ status: "idle" });
+          }
+          queueMicrotask(() => {
+            if (gpsBackgrounded) {
+              gpsBackgrounded = false;
+              return;
+            }
+            const lake = selectedRef.current;
+            if (lake) fitSelectedLake(lake, 800, true);
+          });
+        });
+      }
+      const ensureGeolocateControl = (): typeof geolocate => {
+        if (!geolocateNeedsRecreate || !map) return geolocate;
+        detachGeolocateClick();
+        clearHangTimer?.();
+        clearHangTimer = undefined;
+        geolocate = replaceGeolocateControl(map, maplibregl, geolocate);
+        wireGeolocate(geolocate);
+        geolocateNeedsRecreate = false;
+        attachGeolocateClick();
+        return geolocate;
+      };
+      const startFreshGeolocate = (button: HTMLButtonElement | null) => {
+        const control = ensureGeolocateControl();
+        runGeolocateFreshStart(() => control.trigger(), button);
+      };
+      locationRetryRef.current = () => {
+        startFreshGeolocate(geolocateButtonFor());
+      };
+      locationPermissionGrantRef.current = () => {
+        ensureGeolocateControl();
+        runGeolocatePermissionGrantStart(() => geolocate.trigger(), geolocateButtonFor());
+      };
+      onGeolocateButtonClick = (event: Event) => {
+        const button = event.currentTarget as HTMLButtonElement;
+        onLocationAttemptRef.current();
+        const watchState = readGeolocateWatchState(button);
+        if (shouldInterceptGeolocateButtonClick(watchState, button.disabled) || geolocateNeedsRecreate) {
+          event.stopImmediatePropagation();
+          startFreshGeolocate(button);
+        }
+      };
+      wireGeolocate(geolocate);
+      attachGeolocateClick();
 
       const reportExtent = () => {
         if (!map) return;

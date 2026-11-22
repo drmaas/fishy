@@ -30,7 +30,7 @@ export function reduceLocationBanner(
     case "attempt":
       return { ...model, dismissed: false };
     case "permission_granted":
-      return { location: { status: "idle" }, dismissed: false };
+      return { ...model, dismissed: false };
     default:
       return model;
   }

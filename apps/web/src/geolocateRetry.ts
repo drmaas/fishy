@@ -44,6 +44,8 @@ export function shouldInterceptGeolocateButtonClick(
   return watchState === "ACTIVE_ERROR" || watchState === "BACKGROUND_ERROR";
 }
 
+export const GEOLOCATE_FIND_LABEL = "Find my location";
+
 export function planGeolocateFreshStart(
   watchState: GeolocateWatchState,
   buttonDisabled: boolean,
@@ -60,12 +62,20 @@ export function planGeolocateFreshStart(
   return { triggerCount: 2, enableButton: buttonDisabled };
 }
 
-export function prepareGeolocateButtonForRetry(button: HTMLButtonElement | null): void {
+export function prepareGeolocateButtonForRetry(
+  button: HTMLButtonElement | null,
+  labels: { title: string; ariaLabel: string } = {
+    title: GEOLOCATE_FIND_LABEL,
+    ariaLabel: GEOLOCATE_FIND_LABEL,
+  },
+): void {
   if (!button) return;
   button.disabled = false;
   button.removeAttribute("aria-disabled");
   button.classList.remove("maplibregl-ctrl-geolocate-active-error");
   button.classList.remove("maplibregl-ctrl-geolocate-background-error");
+  button.title = labels.title;
+  button.setAttribute("aria-label", labels.ariaLabel);
 }
 
 /** Models a single MapLibre trigger() when trackUserLocation is true. */
