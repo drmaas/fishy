@@ -5,7 +5,7 @@ Fishy’s Python tooling turns lake bathymetry into PMTiles for the map. Layout 
 | State | Runtime path |
 | --- | --- |
 | Minnesota (`mn`) | **No pipeline.** The Worker queries the [MN DNR MapServer](https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer) live. |
-| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. Stubs only for now. |
+| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest` is implemented; `georef` and `contours` remain stubs. |
 | Sample / dev | Shared **`fishy_pipeline/common/`** build on `fixtures/sample-pond` (synthetic DNR-shaped data). |
 
 ## Shared build (`common/`)
@@ -32,7 +32,8 @@ PYTHONPATH=pipeline python3 -m fishy_pipeline build fixtures/sample-pond apps/we
 pnpm pipeline:r2-upload -- path/to/file.pmtiles some/key.pmtiles
 
 # Wisconsin stages (stubs; need optional deps later)
-PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest --fixtures
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest --harvest-catalog --hydro /path/to/24k-hydro-snippet.geojson
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours
 ```
@@ -41,7 +42,7 @@ Legacy module names still work: `python3 -m fishy_pipeline.build` and `python3 -
 
 ## Optional dependencies
 
-Heavy Wisconsin tooling (GDAL/rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light:
+Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus GDAL/rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries.
 
 ```bash
 cd pipeline && pip install -e '.[wi]'
