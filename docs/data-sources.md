@@ -97,6 +97,8 @@ The data stay under the Open Database License. The visible credit is “© OpenS
 
 Default style, no key (200): https://tiles.openfreemap.org/styles/liberty
 
+Dark style, no key (200): https://tiles.openfreemap.org/styles/dark
+
 OpenFreeMap serves OpenStreetMap data. Keep the OpenStreetMap credit visible. An optional MapTiler outdoor style is proxied by the Worker only when `MAPTILER_API_KEY` is set in the environment. The key is not written into the repository or into the style document sent to the browser.
 
 ## Weather (later)

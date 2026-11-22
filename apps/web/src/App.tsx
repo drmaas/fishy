@@ -23,6 +23,15 @@ import {
 } from "./locationBanner.ts";
 import { locationHint } from "./locationHint.ts";
 import { STATES, stateById } from "./states.ts";
+import { ThemeSwitch } from "./ThemeSwitch.tsx";
+import {
+  applyDocumentTheme,
+  readThemePreference,
+  resolveColorScheme,
+  THEME_STORAGE_KEY,
+  type ColorScheme,
+  type ThemePreference,
+} from "./theme.ts";
 
 interface Config {
   basemap: "openfreemap" | "maptiler";
@@ -88,6 +97,16 @@ export function App() {
   const locationPermissionGrantRef = useRef<(() => void) | null>(null);
   const [chromeOpen, setChromeOpen] = useState(() => readOpenFlag("fishy-chrome-open", true));
   const [panelOpen, setPanelOpen] = useState(() => readOpenFlag("fishy-panel-open", true));
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
+    typeof window === "undefined"
+      ? "auto"
+      : readThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY)),
+  );
+  const [colorScheme, setColorScheme] = useState<ColorScheme>(() => {
+    if (typeof window === "undefined") return "light";
+    const preference = readThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY));
+    return resolveColorScheme(preference, window.matchMedia("(prefers-color-scheme: dark)").matches);
+  });
   const nearbyTimer = useRef<number | null>(null);
   const pendingLake = useRef<string | null>(initial.lakeId);
 
@@ -105,6 +124,18 @@ export function App() {
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => {
+      const next = resolveColorScheme(themePreference, media.matches);
+      setColorScheme(next);
+      applyDocumentTheme(next);
+    };
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, [themePreference]);
 
   useEffect(() => {
     if (selected) pendingLake.current = null;
@@ -139,6 +170,11 @@ export function App() {
   function chooseUnit(next: DepthUnit) {
     setUnit(next);
     window.localStorage.setItem("fishy-units", next);
+  }
+
+  function chooseTheme(next: ThemePreference) {
+    setThemePreference(next);
+    window.localStorage.setItem(THEME_STORAGE_KEY, next);
   }
 
   function onSearchSelect(hit: LakeSearchHit) {
@@ -227,6 +263,7 @@ export function App() {
 
   return (
     <div className={appClass}>
+      <ThemeSwitch value={themePreference} onChange={chooseTheme} />
       <header className="chrome" id="fishy-chrome" hidden={!chromeOpen}>
         <div className="chrome-head">
           <div className="brand">
@@ -317,6 +354,7 @@ export function App() {
         hillshadeUrl={config.hillshadeUrl}
         basemap={basemap}
         maptilerStyleUrl={config.maptiler ? "/api/basemap/style.json" : undefined}
+        colorScheme={colorScheme}
         unit={unit}
         stateBounds={state.bounds}
         nearby={nearby}

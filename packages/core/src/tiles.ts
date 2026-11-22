@@ -6,6 +6,7 @@ export const SAMPLE_VIEW = {
 } as const;
 
 export const OPENFREEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+export const OPENFREEMAP_DARK_STYLE = "https://tiles.openfreemap.org/styles/dark";
 
 /**
  * MapLibre PMTiles protocol URL.

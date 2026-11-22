@@ -5,10 +5,31 @@
   --paper-edge: #d5cdc0;
   --water-deep: #14324f;
   --water: #2f6f9f;
+  --control-bg: #fff;
+  --control-border: #b7c3c9;
+  --control-pressed: #f4f7f8;
+  --search-hover: #e7f1f6;
+  --shadow: rgb(20 32 40 / 14%);
+  --page-bg: #dfe8ee;
   color: var(--ink);
-  background: #dfe8ee;
+  background: var(--page-bg);
   font-family: "Segoe UI", "Helvetica Neue", sans-serif;
   font-size: 16px;
+}
+
+:root[data-theme="dark"] {
+  --ink: #e8eef2;
+  --ink-soft: #9aadb8;
+  --paper: #1c262e;
+  --paper-edge: #31414c;
+  --water-deep: #8eb9d6;
+  --water: #5f9ec4;
+  --control-bg: #24313a;
+  --control-border: #3d505c;
+  --control-pressed: #f4f7f8;
+  --search-hover: #2c3b46;
+  --shadow: rgb(0 0 0 / 40%);
+  --page-bg: #12181d;
 }
 
 * { box-sizing: border-box; }
@@ -21,6 +42,41 @@ html, body, #root, .app {
 .app {
   position: relative;
   min-height: 100%;
+}
+
+.theme-switch {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: stretch;
+  height: 32px;
+  padding: 2px;
+  background: #1a1f24;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 9999px;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 28%);
+}
+
+.theme-switch-option {
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9999px;
+  background: transparent;
+  color: #b7c0c7;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.theme-switch-option.is-selected {
+  background: #e8ecef;
+  color: #12161a;
 }
 
 .chrome {
@@ -36,7 +92,7 @@ html, body, #root, .app {
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 12px;
-  box-shadow: 0 12px 32px rgb(20 32 40 / 14%);
+  box-shadow: 0 12px 32px var(--shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -70,7 +126,7 @@ html, body, #root, .app {
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  box-shadow: 0 8px 20px rgb(20 32 40 / 12%);
+  box-shadow: 0 8px 20px var(--shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -92,7 +148,7 @@ html, body, #root, .app {
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  box-shadow: 0 8px 20px rgb(20 32 40 / 12%);
+  box-shadow: 0 8px 20px var(--shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -182,8 +238,8 @@ select, button, a, input {
 }
 
 button, select, input[type="search"] {
-  background: #fff;
-  border: 1px solid #b7c3c9;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 6px 10px;
   color: var(--ink);
@@ -192,7 +248,11 @@ button, select, input[type="search"] {
 button[aria-pressed="true"] {
   background: var(--water-deep);
   border-color: var(--water-deep);
-  color: #f4f7f8;
+  color: var(--control-pressed);
+}
+
+:root[data-theme="dark"] button[aria-pressed="true"] {
+  color: #12161a;
 }
 
 .search input {
@@ -208,10 +268,10 @@ button[aria-pressed="true"] {
   margin: 0;
   padding: 4px;
   list-style: none;
-  background: #fff;
+  background: var(--control-bg);
   border: 1px solid var(--paper-edge);
   border-radius: 8px;
-  box-shadow: 0 10px 24px rgb(20 32 40 / 14%);
+  box-shadow: 0 10px 24px var(--shadow);
   max-height: 240px;
   overflow: auto;
 }
@@ -232,7 +292,7 @@ button[aria-pressed="true"] {
 
 .search-results button.active,
 .search-results button:hover {
-  background: #e7f1f6;
+  background: var(--search-hover);
 }
 
 .search-name { font-weight: 600; }
@@ -266,7 +326,7 @@ button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  box-shadow: 0 8px 20px rgb(20 32 40 / 12%);
+  box-shadow: 0 8px 20px var(--shadow);
 }
 
 .legend-title {
@@ -300,6 +360,10 @@ button[aria-pressed="true"] {
   border: 1px solid rgb(20 32 40 / 18%);
 }
 
+:root[data-theme="dark"] .legend-swatch {
+  border-color: rgb(232 238 242 / 22%);
+}
+
 .panel {
   position: absolute;
   z-index: 2;
@@ -310,7 +374,7 @@ button[aria-pressed="true"] {
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
   padding: 12px 14px 16px;
-  box-shadow: 0 8px 24px rgb(20 32 40 / 12%);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 
 .panel-head, .panel dl div {
@@ -330,7 +394,7 @@ button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 8px;
-  box-shadow: 0 6px 16px rgb(20 32 40 / 12%);
+  box-shadow: 0 6px 16px var(--shadow);
   backdrop-filter: blur(8px);
   color: var(--ink);
   cursor: pointer;
@@ -342,7 +406,7 @@ button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--paper) 96%, transparent);
   border: 1px solid var(--paper-edge);
   border-radius: 10px;
-  box-shadow: 0 10px 28px rgb(20 32 40 / 16%);
+  box-shadow: 0 10px 28px var(--shadow);
   backdrop-filter: blur(10px);
   color: var(--ink-soft);
   font-size: 12px;
@@ -369,8 +433,8 @@ button[aria-pressed="true"] {
   padding: 4px 8px;
   min-height: 0;
   font-size: 12px;
-  background: #fff;
-  border: 1px solid #b7c3c9;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   cursor: pointer;
 }
@@ -390,6 +454,21 @@ button[aria-pressed="true"] {
 .maplibregl-ctrl-bottom-right {
   right: 12px;
   bottom: 52px;
+}
+
+:root[data-theme="dark"] .maplibregl-ctrl-group {
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  border: 1px solid var(--paper-edge);
+  box-shadow: 0 6px 16px var(--shadow);
+}
+
+:root[data-theme="dark"] .maplibregl-ctrl-group button {
+  background: transparent;
+  border-color: transparent;
+}
+
+:root[data-theme="dark"] .maplibregl-ctrl button .maplibregl-ctrl-icon {
+  filter: invert(1) brightness(1.1);
 }
 
 .maplibregl-user-location-dot {
@@ -426,6 +505,10 @@ button[aria-pressed="true"] {
 @media (max-width: 720px) {
   .chrome {
     width: calc(100% - 24px);
+  }
+
+  .app.chrome-open .chrome {
+    top: 52px;
   }
 
   .panel {
