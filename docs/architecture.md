@@ -6,7 +6,7 @@ Fishy is a monorepo. The web app and the bathymetry pipeline do not share a proc
 
 `apps/web` is a Vite + React app on a Cloudflare Worker (`wrangler.jsonc`, `@cloudflare/vite-plugin`).
 
-- The browser loads MapLibre. The default style is OpenFreeMap Liberty, which needs no key. The map opens on Minnesota. A state control lists Minnesota only for now.
+- The browser loads MapLibre. The default style is OpenFreeMap Liberty, which needs no key. The map opens on Minnesota. A state control lists Minnesota only for now. The locate control is opt-in; the GPS coordinate never leaves the browser.
 - Depth contours, depth-zone polygons, and the lake polygon can come from a vector PMTiles archive (`pmtiles` protocol). Sample Pond still ships that way for local demos.
 - Surveyed Minnesota lakes are fetched through Worker routes under `/api/lakes`. The Worker queries the DNR MapServer, rewrites properties to positive `depth_ft`, and stores successful responses in the Cache API for one day. Search matches a lake name or an 8-digit DOW id. Zoomed-in views load nearby shore outlines. Selecting a lake loads its outline and generalized contours as GeoJSON.
 - A terrarium raster-dem PMTiles archive drives `map.setTerrain` (3D relief). A hillshade PMTiles archive is a raster overlay.

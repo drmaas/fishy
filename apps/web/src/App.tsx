@@ -13,6 +13,7 @@ import {
 } from "./lakeApi.ts";
 import { LakePanel } from "./LakePanel.tsx";
 import { LakeSearch } from "./LakeSearch.tsx";
+import { locationHint, type LocationHintState } from "./locationHint.ts";
 import { STATES, stateById } from "./states.ts";
 
 interface Config {
@@ -59,6 +60,7 @@ export function App() {
   const [nearby, setNearby] = useState<GeoJsonFeatureCollection | null>(null);
   const [creditsOpen, setCreditsOpen] = useState(false);
   const [loadingLake, setLoadingLake] = useState(false);
+  const [locationState, setLocationState] = useState<LocationHintState>({ status: "idle" });
   const nearbyTimer = useRef<number | null>(null);
   const pendingLake = useRef<string | null>(initial.lakeId);
 
@@ -189,7 +191,8 @@ export function App() {
           </label>
         </div>
         <p className="hint">
-          {loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`}
+          {locationHint(locationState) ??
+            (loadingLake ? "Loading contours…" : `Surveyed lakes in ${state.label}. Search, or zoom in.`)}
         </p>
       </header>
       <FishMap
@@ -205,6 +208,7 @@ export function App() {
         onLake={setLake}
         onSelectDowlknum={(dowlknum) => void selectLake(dowlknum)}
         onExtent={onExtent}
+        onLocation={setLocationState}
       />
       <DepthLegend unit={unit} />
       {lake && <LakePanel lake={lake} unit={unit} onClose={onCloseLake} />}
