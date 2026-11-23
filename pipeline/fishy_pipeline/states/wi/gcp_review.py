@@ -16,8 +16,10 @@ from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pilot_data import (
     REVIEWED_GCP_DIR,
     load_reviewed_gcps,
+    pilot_wbics,
     save_reviewed_gcps,
 )
+from fishy_pipeline.states.wi.pilot_setup import PILOT_HYDRO_NAME, PILOT_SETUP_CLI
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
 from fishy_pipeline.states.wi.shoreline import extract_shoreline
 from fishy_pipeline.states.wi.pngutil import read_png
@@ -35,7 +37,7 @@ PAGE_HTML = """<!doctype html>
   <style>
     body { font-family: system-ui, sans-serif; margin: 1rem; }
     .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-start; }
-  bracket canvas { border: 1px solid #888; max-width: 48vw; cursor: crosshair; }
+    canvas { border: 1px solid #888; max-width: 48vw; cursor: crosshair; }
     #map { background: #e8f0f8; }
     select, button { font-size: 1rem; margin: 0.25rem 0.5rem 0.25rem 0; }
     table { border-collapse: collapse; }
@@ -49,7 +51,7 @@ PAGE_HTML = """<!doctype html>
   <button id="undo">Undo last</button>
   <button id="save">Save GCPs</button>
   <span id="msg"></span>
-  <Auth class="row">
+  <div class="row">
     <canvas id="sheet" width="800" height="600"></canvas>
     <canvas id="map" width="800" height="600"></canvas>
   </div>
@@ -215,7 +217,7 @@ loadLake();
 <script type="application/json" id="lake-data">__LAKE_JSON__</script>
 </body>
 </html>
-""".replace(" bracket", "").replace("<Auth", "<div")
+"""
 
 
 class ReviewContext:
@@ -280,7 +282,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fishy_pipeline.states.wi.gcp_review")
     parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK)
     parser.add_argument("--manifest", type=Path, help="ingest manifest JSON")
-    parser.add_argument("--hydro", type=Path, required=True, help="24K Hydro GeoJSON in EPSG:3071")
+    parser.add_argument(
+        "--hydro",
+        type=Path,
+        help=f"24K Hydro GeoJSON in EPSG:3071 (default: <work-dir>/{PILOT_HYDRO_NAME})",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -317,6 +323,9 @@ def serve(context: ReviewContext, *, host: str, port: int) -> None:
 
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/lakes":
+                self._send_json(200, {"lakes": context.lake_rows()})
+                return
             if parsed.path == "/" or parsed.path == "/index.html":
                 page = PAGE_HTML.replace("__LAKE_JSON__", lakes_json)
                 payload = page.encode("utf-8")
@@ -401,16 +410,54 @@ def serve(context: ReviewContext, *, host: str, port: int) -> None:
     server.serve_forever()
 
 
+def _require_pilot_work_dir(manifest_path: Path, hydro_path: Path) -> None:
+    if not manifest_path.is_file():
+        raise SystemExit(
+            f"manifest not found: {manifest_path}\n\n"
+            f"From the repository root, bootstrap the pilot work tree:\n"
+            f"  {PILOT_SETUP_CLI}\n"
+        )
+    manifest = read_manifest(manifest_path)
+    entries = manifest.get("entries") or []
+    if not entries:
+        raise SystemExit(
+            f"manifest has no lakes: {manifest_path}\n\n"
+            f"From the repository root, bootstrap the pilot work tree:\n"
+            f"  {PILOT_SETUP_CLI}\n"
+        )
+    found = {
+        normalize_wbic(entry.get("wbic"))
+        for entry in entries
+        if normalize_wbic(entry.get("wbic"))
+    }
+    missing = [wbic for wbic in pilot_wbics() if wbic not in found]
+    if missing:
+        raise SystemExit(
+            f"manifest is missing pilot lakes: {', '.join(missing)}\n\n"
+            f"Re-run pilot setup (safe to repeat):\n"
+            f"  {PILOT_SETUP_CLI}\n"
+        )
+    if not hydro_path.is_file():
+        raise SystemExit(
+            f"hydro not found: {hydro_path}\n\n"
+            f"From the repository root, bootstrap the pilot work tree:\n"
+            f"  {PILOT_SETUP_CLI}\n"
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     manifest_path = args.manifest or (args.work_dir / "manifest.json")
-    if not manifest_path.is_file():
-        raise SystemExit(f"manifest not found: {manifest_path}")
-    if not args.hydro.is_file():
-        raise SystemExit(f"hydro not found: {args.hydro}")
+    hydro_path = args.hydro or (args.work_dir / PILOT_HYDRO_NAME)
+    _require_pilot_work_dir(manifest_path, hydro_path)
     if not args.allow_remote and not _loopback_host(args.host):
         raise SystemExit(f"refusing non-loopback --host {args.host!r}; pass --allow-remote")
-    context = ReviewContext(manifest_path=manifest_path, hydro_path=args.hydro, work_dir=args.work_dir)
+    context = ReviewContext(manifest_path=manifest_path, hydro_path=hydro_path, work_dir=args.work_dir)
+    if not context.lake_rows():
+        raise SystemExit(
+            f"no lakes available for review (manifest: {manifest_path})\n\n"
+            f"  {PILOT_SETUP_CLI}\n"
+        )
     serve(context, host=args.host, port=args.port)
 
 

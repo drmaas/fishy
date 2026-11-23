@@ -15,6 +15,13 @@ RECORDED_LABEL_DIR = WI_DATA / "labels"
 MIN_REVIEWED_GCPS = 4
 
 
+def pilot_wbics() -> list[str]:
+    """WBICs for the committed 10-lake contour pilot (one label file each)."""
+    if not RECORDED_LABEL_DIR.is_dir():
+        return []
+    return sorted(path.stem for path in RECORDED_LABEL_DIR.glob("*.json") if path.stem.isdigit())
+
+
 def reviewed_gcp_path(wbic: str) -> Path:
     return REVIEWED_GCP_DIR / f"{wbic}.json"
 

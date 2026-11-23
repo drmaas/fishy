@@ -5,7 +5,7 @@ Rules for `pipeline/`. Also follow the repository [AGENTS.md](../AGENTS.md).
 ## Layout
 
 - Shared logic: `fishy_pipeline/common/` (`depth.py`, `commands.py`, `build.py`, `upload.py`).
-- Wisconsin batch stages: `fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`, `gcp-review` for localhost GCP review).
+- Wisconsin batch stages: `fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`, `pilot-setup`, `gcp-review` for localhost GCP review).
 - Top-level `fishy_pipeline/depth.py` and `commands.py` re-export `common` for tests and docs.
 - CLI: `python3 -m fishy_pipeline` with optional `--state wi`. Module entries `fishy_pipeline.build` and `fishy_pipeline.upload` remain for pnpm scripts.
 
