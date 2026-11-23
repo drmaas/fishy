@@ -21,6 +21,14 @@ from fishy_pipeline.common.commands import (
     tippecanoe_args,
 )
 from fishy_pipeline.common.depth import normalize_properties
+from fishy_pipeline.common.wi_r2 import (
+    PUBLISHED_QA_STATUS,
+    WI_R2_PREFIX,
+    lake_detail_object_key,
+    lakes_index_object_key,
+    refuse_unless_publishable,
+)
+from fishy_pipeline.states.wi.lake_json import build_lakes_index
 
 
 def load_normalized(path: Path) -> dict:
@@ -158,6 +166,99 @@ def build_lake(source: Path, dest: Path) -> None:
         _run(gdaldem_hillshade_args(str(elev_tif), str(hillshade)))
         raster_pmtiles(terrain_tif, dest / "sample-pond-terrain.pmtiles", work, "terrain")
         raster_pmtiles(hillshade, dest / "sample-pond-hillshade.pmtiles", work, "hillshade")
+
+
+def build_wi_lake_artifacts(
+    dest: Path,
+    *,
+    fixtures: bool = False,
+    details: list[dict] | None = None,
+    skipped: list[dict] | None = None,
+) -> dict:
+    """Write ``wi/v1/lakes/*.json`` and ``wi/v1/lakes_index.json`` locally."""
+    dest.mkdir(parents=True, exist_ok=True)
+    if fixtures:
+        root = Path(__file__).resolve().parents[3]
+        contract = json.loads((root / "fixtures" / "contract.json").read_text(encoding="utf-8"))
+        scalar = contract["wiLakeDetail"]
+        outline = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "lake_name": scalar["name"],
+                        "dowlknum": scalar["id"],
+                        "island": "N",
+                        "area_acres": scalar["areaAcres"],
+                        "cty_name": contract["wiLakeIndex"][0]["county"],
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [scalar["extent"]["west"], scalar["extent"]["south"]],
+                                [scalar["extent"]["east"], scalar["extent"]["south"]],
+                                [scalar["extent"]["east"], scalar["extent"]["north"]],
+                                [scalar["extent"]["west"], scalar["extent"]["north"]],
+                                [scalar["extent"]["west"], scalar["extent"]["south"]],
+                            ]
+                        ],
+                    },
+                }
+            ],
+        }
+        contours = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "lake_name": scalar["name"],
+                        "dowlknum": scalar["id"],
+                        "depth_ft": 20,
+                    },
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [scalar["extent"]["west"] + 0.01, scalar["extent"]["south"] + 0.01],
+                            [scalar["extent"]["east"] - 0.01, scalar["extent"]["north"] - 0.01],
+                        ],
+                    },
+                }
+            ],
+        }
+        detail = {
+            **scalar,
+            "dowlknum": scalar["id"],
+            "extent": dict(scalar["extent"]),
+            "outline": outline,
+            "contours": contours,
+            "county": contract["wiLakeIndex"][0]["county"],
+            "qa_status": PUBLISHED_QA_STATUS,
+        }
+        details = [detail]
+    if details is None:
+        raise ValueError("details are required unless fixtures=True")
+    for detail in details:
+        wbic = str(detail.get("id") or detail.get("dowlknum") or "")
+        if detail.get("qa_status") != PUBLISHED_QA_STATUS:
+            raise ValueError(f"lake {wbic} qa_status is not {PUBLISHED_QA_STATUS!r}")
+        lake_path = dest / lake_detail_object_key(wbic)
+        lake_path.parent.mkdir(parents=True, exist_ok=True)
+        lake_path.write_text(json.dumps(detail, indent=2) + "\n", encoding="utf-8")
+    index_rows = build_lakes_index(details)
+    index_path = dest / lakes_index_object_key()
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(index_rows, indent=2) + "\n", encoding="utf-8")
+    return {
+        "version": 1,
+        "state": "wi",
+        "prefix": WI_R2_PREFIX,
+        "lakes": index_rows,
+        "skipped": skipped or [],
+        "files": [lake_detail_object_key(str(row["id"])) for row in index_rows] + [lakes_index_object_key()],
+    }
 
 
 def main(argv: list[str] | None = None) -> None:
