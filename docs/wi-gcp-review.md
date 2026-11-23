@@ -10,17 +10,15 @@ From the repository root:
 
 ```bash
 # System tools (Arch / CachyOS example)
-sudo pacman -S gdal python-gdal
+sudo pacman -S gdal python-gdal uv
 
-# Editable pipeline + wi extra (Arch ships no pip on PATH and marks system Python
-# externally managed; use a venv that can still import pacman's python-gdal)
-python -m venv --system-site-packages .venv
-source .venv/bin/activate          # bash / zsh
-# source .venv/bin/activate.fish   # fish
-pip install -e 'pipeline[wi]'
+# Editable pipeline + wi extra (Arch marks system Python externally managed;
+# uv venv with --system-site-packages keeps pacman's python-gdal visible)
+uv venv --python /usr/bin/python --system-site-packages .venv
+uv pip install -e 'pipeline[wi]'
 
 # One command: hydro extract, 10 pilot PDFs, rasters, manifest, auto-georef
-python -m fishy_pipeline --state wi pilot-setup \
+PYTHONPATH=pipeline .venv/bin/python -m fishy_pipeline --state wi pilot-setup \
   --work-dir pipeline/work/wi
 ```
 
@@ -31,8 +29,7 @@ Required on `PATH` for full setup: `gdal_translate`, `gdalwarp`. PyMuPDF (`pipel
 ## Run the review UI
 
 ```bash
-source .venv/bin/activate   # if not already active
-python -m fishy_pipeline --state wi gcp-review \
+PYTHONPATH=pipeline .venv/bin/python -m fishy_pipeline --state wi gcp-review \
   --work-dir pipeline/work/wi
 ```
 
@@ -57,7 +54,7 @@ curl -s http://127.0.0.1:8765/api/lakes | python -m json.tool
 The preview IoU updates after four points. Re-run georef after saving:
 
 ```bash
-python -m fishy_pipeline --state wi georef \
+PYTHONPATH=pipeline .venv/bin/python -m fishy_pipeline --state wi georef \
   --work-dir pipeline/work/wi \
   --hydro pipeline/work/wi/pilot-hydro.geojson
 ```

@@ -78,10 +78,15 @@ class PilotSetupTest(unittest.TestCase):
             self.assertTrue(pilot_hydro_complete(path, wbics))
             self.assertFalse(pilot_hydro_complete(path, pilot_wbics()))
 
-    def test_arch_install_hint_documents_venv(self):
+    def test_arch_install_hint_documents_uv_venv(self):
         hint = arch_install_hint()
+        self.assertIn("uv venv", hint)
         self.assertIn("--system-site-packages", hint)
-        self.assertIn("activate.fish", hint)
+        self.assertIn("uv pip install", hint)
+
+    def test_pilot_setup_cli_uses_venv_python(self):
+        self.assertIn(".venv/bin/python", PILOT_SETUP_CLI)
+        self.assertIn("PYTHONPATH=pipeline", PILOT_SETUP_CLI)
 
     def test_check_system_deps_with_gdal(self):
         with patch(

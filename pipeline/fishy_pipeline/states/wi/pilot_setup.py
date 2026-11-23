@@ -28,8 +28,10 @@ DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
 PILOT_HYDRO_NAME = "pilot-hydro.geojson"
 DOC_LINK_BASE = "https://apps.dnr.wi.gov/doclink/lakes_maps"
 
+VENV_PYTHON = ".venv/bin/python"
 PILOT_SETUP_CLI = (
-    "python -m fishy_pipeline --state wi pilot-setup --work-dir pipeline/work/wi"
+    f"PYTHONPATH=pipeline {VENV_PYTHON} -m fishy_pipeline --state wi pilot-setup "
+    "--work-dir pipeline/work/wi"
 )
 
 SYSTEM_DEPS = (
@@ -41,12 +43,10 @@ SYSTEM_DEPS = (
 def arch_install_hint() -> str:
     return (
         "Arch / CachyOS (pacman):\n"
-        "  sudo pacman -S gdal python-gdal\n"
+        "  sudo pacman -S gdal python-gdal uv\n"
         "Python venv (repo root; --system-site-packages keeps pacman's python-gdal):\n"
-        "  python -m venv --system-site-packages .venv\n"
-        "  source .venv/bin/activate    # bash / zsh\n"
-        "  # source .venv/bin/activate.fish   # fish\n"
-        "  pip install -e 'pipeline[wi]'   # PyMuPDF for ingest raster step\n"
+        "  uv venv --python /usr/bin/python --system-site-packages .venv\n"
+        "  uv pip install -e 'pipeline[wi]'   # PyMuPDF for ingest raster step\n"
     )
 
 
@@ -219,7 +219,7 @@ def run_pilot_setup(args: argparse.Namespace) -> None:
     print("pilot setup complete", flush=True)
     print(
         "Start GCP review:\n"
-        "  python -m fishy_pipeline --state wi gcp-review \\\n"
+        f"  PYTHONPATH=pipeline {VENV_PYTHON} -m fishy_pipeline --state wi gcp-review \\\n"
         f"    --work-dir {work_dir} \\\n"
         f"    --hydro {hydro_path}",
         flush=True,
