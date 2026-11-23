@@ -29,8 +29,7 @@ PILOT_HYDRO_NAME = "pilot-hydro.geojson"
 DOC_LINK_BASE = "https://apps.dnr.wi.gov/doclink/lakes_maps"
 
 PILOT_SETUP_CLI = (
-    "PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi pilot-setup "
-    "--work-dir pipeline/work/wi"
+    "python -m fishy_pipeline --state wi pilot-setup --work-dir pipeline/work/wi"
 )
 
 SYSTEM_DEPS = (
@@ -43,7 +42,10 @@ def arch_install_hint() -> str:
     return (
         "Arch / CachyOS (pacman):\n"
         "  sudo pacman -S gdal python-gdal\n"
-        "Python (repo root, optional extra for PDF rendering):\n"
+        "Python venv (repo root; --system-site-packages keeps pacman's python-gdal):\n"
+        "  python -m venv --system-site-packages .venv\n"
+        "  source .venv/bin/activate    # bash / zsh\n"
+        "  # source .venv/bin/activate.fish   # fish\n"
         "  pip install -e 'pipeline[wi]'   # PyMuPDF for ingest raster step\n"
     )
 
@@ -172,8 +174,6 @@ def run_pilot_setup(args: argparse.Namespace) -> None:
             "Missing system tools: " + ", ".join(missing),
             "",
             arch_install_hint(),
-            "Optional (PDF page rendering): pip install -e 'pipeline[wi]'",
-            "",
             f"Then re-run:\n  {PILOT_SETUP_CLI}",
         ]
         raise SystemExit("\n".join(lines))
@@ -219,7 +219,7 @@ def run_pilot_setup(args: argparse.Namespace) -> None:
     print("pilot setup complete", flush=True)
     print(
         "Start GCP review:\n"
-        "  PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi gcp-review \\\n"
+        "  python -m fishy_pipeline --state wi gcp-review \\\n"
         f"    --work-dir {work_dir} \\\n"
         f"    --hydro {hydro_path}",
         flush=True,
