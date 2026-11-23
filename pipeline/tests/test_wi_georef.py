@@ -12,14 +12,22 @@ from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
+    MAX_ANISOTROPY,
     Affine,
     Registration,
     ThinPlateSpline,
+    anisotropy,
     fit_affine,
+    fit_similarity,
     polygon_iou,
     register_shoreline,
 )
-from fishy_pipeline.states.wi.shoreline import extract_shoreline, extract_shoreline_candidates
+from fishy_pipeline.states.wi import register as wi_register
+from fishy_pipeline.states.wi.shoreline import (
+    extract_shoreline,
+    extract_shoreline_candidates,
+    extract_shoreline_figures,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "fixtures" / "wi-georef" / "known-transform.json"
@@ -27,6 +35,97 @@ SPEC_PATH = ROOT / "fixtures" / "wi-georef" / "known-transform.json"
 
 def _by_pair(results: dict) -> dict[tuple[str, str], dict]:
     return {(item["wbic"], item["map_key"]): item for item in results["items"]}
+
+
+def _invert_affine(affine: Affine, easting: float, northing: float) -> tuple[float, float]:
+    det = affine.a * affine.d - affine.b * affine.c
+    ex = easting - affine.tx
+    ny = northing - affine.ty
+    col = (affine.d * ex - affine.b * ny) / det
+    row = (-affine.c * ex + affine.a * ny) / det
+    return (col, row)
+
+
+def _angle_delta(left: float, right: float) -> float:
+    delta = abs(left - right) % 360.0
+    return min(delta, 360.0 - delta)
+
+
+def _clip_open(
+    ring: list[tuple[float, float]],
+    cut_x: float,
+) -> tuple[list[tuple[float, float]], list[bool]]:
+    """Keep the part of ``ring`` with x >= cut_x. New edge vertices are on the frame."""
+
+    def inside(point: tuple[float, float]) -> bool:
+        return point[0] >= cut_x - 1e-9
+
+    def cross(start: tuple[float, float], end: tuple[float, float]) -> tuple[float, float]:
+        fraction = (cut_x - start[0]) / (end[0] - start[0])
+        return (cut_x, start[1] + fraction * (end[1] - start[1]))
+
+    output: list[tuple[float, float]] = []
+    flags: list[bool] = []
+    previous = ring[-1]
+    previous_in = inside(previous)
+    for point in ring:
+        current_in = inside(point)
+        if current_in:
+            if not previous_in:
+                output.append(cross(previous, point))
+                flags.append(True)
+            output.append(point)
+            flags.append(abs(point[0] - cut_x) <= 1e-6)
+        elif previous_in:
+            output.append(cross(previous, point))
+            flags.append(True)
+        previous = point
+        previous_in = current_in
+    return output, flags
+
+
+def _ink_polyline(
+    rgb: bytearray,
+    width: int,
+    ring: list[tuple[int, int]],
+    *,
+    close: bool,
+    skip_start: int = 0,
+) -> None:
+    points = list(ring)
+    if close:
+        points = points + [points[0]]
+    first = True
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        pixels = _bresenham(x1, y1, x2, y2)
+        if first and skip_start:
+            pixels = pixels[skip_start:]
+            first = False
+        for x, y in pixels:
+            index = (y * width + x) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+
+
+def _bresenham(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
+    pixels: list[tuple[int, int]] = []
+    dx = abs(x2 - x1)
+    dy = -abs(y2 - y1)
+    sx = 1 if x1 < x2 else -1
+    sy = 1 if y1 < y2 else -1
+    err = dx + dy
+    x, y = x1, y1
+    while True:
+        pixels.append((x, y))
+        if x == x2 and y == y2:
+            break
+        step = 2 * err
+        if step >= dy:
+            err += dy
+            x += sx
+        if step <= dx:
+            err += dx
+            y += sy
+    return pixels
 
 
 class PngTest(unittest.TestCase):
@@ -68,6 +167,78 @@ class RegisterMathTest(unittest.TestCase):
             easting, northing = expected.apply(col, row)
             got_e, got_n = registration.affine.apply(col, row)
             self.assertLess(math.hypot(got_e - easting, got_n - northing), 2.0 * scale)
+
+    def test_continuous_rotation_recovers_an_off_axis_pose(self):
+        hydro = [(0.0, 0.0), (90.0, 8.0), (110.0, 55.0), (60.0, 100.0), (12.0, 70.0), (-8.0, 24.0)]
+        theta_deg = 37.0
+        scale = 3.0
+        theta = math.radians(theta_deg)
+        forward = Affine(
+            a=scale * math.cos(theta),
+            b=-scale * math.sin(theta),
+            tx=1000.0,
+            c=-scale * math.sin(theta),
+            d=-scale * math.cos(theta),
+            ty=2000.0,
+        )
+        pixels = [_invert_affine(forward, easting, northing) for easting, northing in hydro]
+        registration = register_shoreline(pixels, hydro, gcp_count=8)
+        self.assertGreaterEqual(registration.iou, 0.90)
+        self.assertLess(_angle_delta(registration.rotation_deg, theta_deg), 8.0)
+        for (col, row), (easting, northing) in zip(pixels, hydro, strict=True):
+            got_e, got_n = registration.affine.apply(col, row)
+            self.assertLess(math.hypot(got_e - easting, got_n - northing), 2.0 * scale)
+
+    def test_edge_cut_ring_matches_the_visible_portion(self):
+        hydro = [(0.0, 0.0), (120.0, 6.0), (140.0, 70.0), (80.0, 130.0), (10.0, 90.0), (-15.0, 30.0)]
+        cut_x = 50.0
+        visible, flags = _clip_open(hydro, cut_x)
+        theta_deg = 37.0
+        scale = 4.0
+        theta = math.radians(theta_deg)
+        forward = Affine(
+            a=scale * math.cos(theta),
+            b=-scale * math.sin(theta),
+            tx=500.0,
+            c=-scale * math.sin(theta),
+            d=-scale * math.cos(theta),
+            ty=800.0,
+        )
+        pixels = [_invert_affine(forward, easting, northing) for easting, northing in visible]
+        registration = register_shoreline(pixels, hydro, gcp_count=8, on_frame=flags)
+        self.assertGreaterEqual(registration.iou, 0.85)
+        self.assertLess(_angle_delta(registration.rotation_deg, theta_deg), 12.0)
+
+    def test_similarity_roundtrip_direct_and_reflected(self):
+        source = [(0.0, 0.0), (4.0, 0.5), (5.0, 3.0), (1.0, 4.0), (-1.0, 2.0)]
+        theta = math.radians(20.0)
+        scale = 2.5
+        forward = Affine(
+            a=scale * math.cos(theta),
+            b=-scale * math.sin(theta),
+            tx=10.0,
+            c=scale * math.sin(theta),
+            d=scale * math.cos(theta),
+            ty=-4.0,
+        )
+        target = [forward.apply(x, y) for x, y in source]
+        fit = fit_similarity(source, target)
+        for (x, y), (u, v) in zip(source, target, strict=True):
+            got_u, got_v = fit.apply(x, y)
+            self.assertLess(math.hypot(got_u - u, got_v - v), 1e-6)
+        reflected = Affine(
+            a=-forward.a,
+            b=forward.b,
+            tx=forward.tx + 2.0 * forward.a * 2.0,
+            c=-forward.c,
+            d=forward.d,
+            ty=forward.ty + 2.0 * forward.c * 2.0,
+        )
+        reflected_target = [reflected.apply(x, y) for x, y in source]
+        reflected_fit = fit_similarity(source, reflected_target)
+        for (x, y), (u, v) in zip(source, reflected_target, strict=True):
+            got_u, got_v = reflected_fit.apply(x, y)
+            self.assertLess(math.hypot(got_u - u, got_v - v), 1e-6)
 
 
 class IouGateTest(unittest.TestCase):
@@ -163,6 +334,33 @@ class ShorelineTest(unittest.TestCase):
             xs = [point[0] for point in ring]
             self.assertLess(min(xs), 45)
             self.assertGreater(max(xs), 140)
+
+    def test_gap_in_the_outer_line_still_closes(self):
+        width, height = 160, 140
+        rgb = bytearray([255]) * (width * height * 3)
+        # An irregular shore with a two-pixel gap. A rectangle would look like a neatline.
+        ring = [(24, 40), (70, 22), (120, 36), (132, 78), (100, 112), (48, 108), (22, 74)]
+        _ink_polyline(rgb, width, ring, close=True, skip_start=3)
+        figures = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertGreaterEqual(len(figures), 1)
+        xs = [point[0] for point in figures[0].ring]
+        ys = [point[1] for point in figures[0].ring]
+        self.assertLess(min(xs), 40)
+        self.assertGreater(max(xs), 110)
+        self.assertLess(min(ys), 40)
+        self.assertGreater(max(ys), 95)
+
+    def test_shore_that_hits_the_page_edge_is_marked(self):
+        width, height = 120, 100
+        rgb = bytearray([255]) * (width * height * 3)
+        # Leaves the right edge, so the water polygon is closed by the page border.
+        ring = [(20, 30), (55, 18), (width - 1, 28), (width - 1, 72), (50, 84), (18, 60)]
+        _ink_polyline(rgb, width, ring, close=True)
+        figures = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertGreaterEqual(len(figures), 1)
+        marked = [figure for figure in figures if any(figure.on_frame)]
+        self.assertGreaterEqual(len(marked), 1)
+        self.assertLess(sum(1 for flag in marked[0].on_frame if flag) / len(marked[0].on_frame), 0.62)
 
 
 class HydroPolygonTest(unittest.TestCase):
@@ -330,14 +528,42 @@ class FixtureGeorefTest(unittest.TestCase):
         self.assertEqual(queued["map_key"], "1403299a")
         self.assertIn("flowage", queued["reasons"])
 
-    def test_multi_sheet_is_queued_even_when_iou_is_high(self):
+    def test_multi_sheet_publishes_when_every_sheet_passes(self):
+        combined = []
         for map_key in ("2271600a", "2271600b"):
             item = self.by_pair[("2271600", map_key)]
             self.assertGreaterEqual(item["iou"], 0.90)
-            self.assertIn("multi_sheet", item["reasons"])
-            self.assertEqual(item["qa_status"], "needs_review")
+            self.assertNotIn("multi_sheet", item["reasons"])
+            self.assertEqual(item["qa_status"], "auto")
+            self.assertGreaterEqual(item["combined_iou"], 0.90)
+            combined.append(item["combined_iou"])
+        self.assertEqual(combined[0], combined[1])
         queued = [row for row in self.queue["items"] if row["wbic"] == "2271600"]
-        self.assertEqual({row["map_key"] for row in queued}, {"2271600a", "2271600b"})
+        self.assertEqual(queued, [])
+
+    def test_multi_sheet_blocks_when_a_sheet_misses_the_gate(self):
+        items = [
+            {
+                "wbic": "2271600",
+                "qa_status": "auto",
+                "multi_sheet": True,
+                "iou": 0.95,
+                "sheets": [{"iou": 0.95}],
+                "reasons": [],
+            },
+            {
+                "wbic": "2271600",
+                "qa_status": "needs_review",
+                "multi_sheet": True,
+                "iou": 0.40,
+                "sheets": [{"iou": 0.40}],
+                "reasons": ["iou_below_threshold"],
+            },
+        ]
+        georef._fail_closed_multi_sheet(items, {}, DEFAULT_IOU_THRESHOLD)
+        self.assertIn("multi_sheet", items[0]["reasons"])
+        self.assertEqual(items[0]["qa_status"], "needs_review")
+        self.assertIn("multi_sheet", items[1]["reasons"])
 
     def test_skipped_sources_keep_their_reason(self):
         shapefile = self.by_pair[("0850800", "0850800b")]
@@ -469,13 +695,12 @@ class ManifestIdentityTest(unittest.TestCase):
             real = georef.register_shoreline
             calls = {"n": 0}
 
-            def wrapped(pixel_ring, hydro_ring, gcp_count=8):
-                # The first sheet has two lake-scale figures. Both fail, and the
-                # batch still registers the later lakes.
+            def wrapped(pixel_ring, hydro_ring, gcp_count=8, on_frame=None):
+                # The first sheet's figures fail. Later lakes still register.
                 calls["n"] += 1
                 if calls["n"] <= 2:
                     raise ValueError("singular linear system")
-                return real(pixel_ring, hydro_ring, gcp_count=gcp_count)
+                return real(pixel_ring, hydro_ring, gcp_count=gcp_count, on_frame=on_frame)
 
             with patch("fishy_pipeline.states.wi.georef.register_shoreline", side_effect=wrapped):
                 results = georef.run_georef(
@@ -497,6 +722,95 @@ class ManifestIdentityTest(unittest.TestCase):
             queue = json.loads((work / "georef" / "review_queue.json").read_text(encoding="utf-8"))
             queued = next(row for row in queue["items"] if row["wbic"] == "0417300")
             self.assertIn("registration_error", queued["reasons"])
+
+
+def _sheet(iou: float, cut: float, name: str, ring: list[tuple[float, float]] | None = None) -> dict:
+    affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+    blank = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 0.0, 0.0),
+        northing_affine=(0.0, 0.0, 0.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=blank,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="affine",
+    )
+    sheet = {
+        "page": Path(name),
+        "cut_fraction": cut,
+        "registration": registration,
+        "ring": ring if ring is not None else [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+    }
+    return sheet
+
+
+class FailClosedGateTest(unittest.TestCase):
+    def test_cut_page_is_not_dropped_for_a_near_best_closed_ring(self):
+        closed = _sheet(0.86, 0.0, "a.png")
+        cut = _sheet(0.40, 0.20, "b.png")
+        pages = [Path("a.png"), Path("b.png"), Path("c.png")]
+        kept, missed = georef._select_lake_sheets([closed, cut], pages)
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png"})
+        self.assertEqual([page.name for page in missed], ["c.png"])
+
+    def test_closed_pages_collapse_to_the_best_sheet(self):
+        pages = [Path("a.png"), Path("b.png")]
+        kept, missed = georef._select_lake_sheets(
+            [_sheet(0.91, 0.0, "a.png"), _sheet(0.55, 0.0, "b.png")],
+            pages,
+        )
+        self.assertEqual([sheet["page"].name for sheet in kept], ["a.png"])
+        self.assertEqual(missed, [])
+
+    def test_several_passing_pages_are_queued_and_each_is_warped(self):
+        first = _sheet(0.92, 0.0, "north.png")
+        second = _sheet(0.90, 0.0, "south.png")
+        for sheet in (first, second):
+            sheet["gate_iou"] = sheet["registration"].iou
+        plan = georef._warp_plan_for([first, second], first, DEFAULT_IOU_THRESHOLD)
+        self.assertEqual([name for _sheet_row, name in plan], ["warped.tif", "warped-south.tif"])
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=False,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=True,
+        )
+        self.assertIn("multi_sheet", reasons)
+        self.assertNotIn("iou_below_threshold", reasons)
+
+    def test_partial_fragment_cannot_clear_the_gate_on_footprint_iou(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        fragment = [(0.0, 0.0), (20.0, 0.0), (20.0, 16.0), (0.0, 16.0)]
+        sheet = _sheet(0.95, 0.25, "cut.png", ring=fragment)
+        full = georef._full_hydro_iou(sheet, hydro)
+        gate = min(sheet["registration"].iou, full)
+        self.assertGreaterEqual(sheet["registration"].iou, DEFAULT_IOU_THRESHOLD)
+        self.assertLess(full, 0.5)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
+        covered = _sheet(0.90, 0.20, "whole.png", ring=list(hydro))
+        self.assertGreaterEqual(
+            min(covered["registration"].iou, georef._full_hydro_iou(covered, hydro)),
+            DEFAULT_IOU_THRESHOLD,
+        )
+
+    def test_sheared_sweep_fallback_is_rejected(self):
+        shear = Affine(a=5.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+        similar = Affine(a=2.0, b=0.0, tx=0.0, c=0.0, d=-2.0, ty=0.0)
+        self.assertGreater(anisotropy(shear), MAX_ANISOTROPY)
+        self.assertLessEqual(anisotropy(similar), MAX_ANISOTROPY)
+        self.assertIs(wi_register._sweep_fallback([shear, similar]), similar)
+        with self.assertRaises(ValueError):
+            wi_register._sweep_fallback([shear])
 
 
 class CliTest(unittest.TestCase):

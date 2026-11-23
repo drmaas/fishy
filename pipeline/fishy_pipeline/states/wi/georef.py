@@ -7,18 +7,21 @@ document and may be shared by many lakes (Chain O' Lakes is one PDF and many
 WBICs). The fit for a pair uses that WBIC's own shoreline. Rows ingest skipped
 (shapefile, unknown, and any other ``skip_reason``) stay skipped.
 
-Registration is bbox/orientation, then affine point registration, then a thin-plate
-spline. When ``gdal_translate`` and ``gdalwarp`` are on ``PATH``, the spline is
-applied with ``gdalwarp -tps -dstalpha`` in EPSG:3071. Bathymetry ink is black
-(value 0). An alpha band marks the valid sheet so a later clip does not treat
-that ink as nodata. The IoU score does not require GDAL.
+Registration sweeps continuous rotation, then affine point registration, then a
+thin-plate spline. A sheet that shows only part of the lake is matched to that
+portion; page-edge vertices are not treated as shore. When ``gdal_translate``
+and ``gdalwarp`` are on ``PATH``, the spline is applied with
+``gdalwarp -tps -dstalpha`` in EPSG:3071. Bathymetry ink is black (value 0).
+An alpha band marks the valid sheet so a later clip does not treat that ink as
+nodata. The IoU score does not require GDAL.
 
 IoU under the default threshold (see ``constants.DEFAULT_IOU_THRESHOLD``), a map
-shared by more than one WBIC, a multi-sheet lake, or a
-flowage (HYDROTYPE 707, or "flowage" in the name) is written to
-``georef/review_queue.json``. A flowage is queued even when its hydro polygon
-is missing. One registration failure is queued for that lake and the rest of
-the batch still runs.
+shared by more than one WBIC, a multi-sheet lake whose sheets do not all clear
+the gate, or a flowage (HYDROTYPE 707, or "flowage" in the name) is written to
+``georef/review_queue.json``. A multi-sheet lake publishes only when every
+sheet passes. A flowage is queued even when its hydro polygon is missing. One
+registration failure is queued for that lake and the rest of the batch still
+runs.
 """
 
 from __future__ import annotations
@@ -35,11 +38,16 @@ from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD  # re-expor
 from fishy_pipeline.states.wi.hydro import FLOWAGE_HYDROTYPE, HydroWaterbody, load_hydro_polygons
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
-from fishy_pipeline.states.wi.register import DEFAULT_GCP_COUNT, register_shoreline
+from fishy_pipeline.states.wi.register import (
+    DEFAULT_GCP_COUNT,
+    polygon_iou,
+    register_shoreline,
+    union_polygon_iou,
+)
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
 from fishy_pipeline.states.wi.raster import select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
-from fishy_pipeline.states.wi.shoreline import extract_shoreline, extract_shoreline_candidates
+from fishy_pipeline.states.wi.shoreline import MIN_FIGURE_SPAN, extract_shoreline, extract_shoreline_figures
 from fishy_pipeline.states.wi.wbic import normalize_wbic
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -204,6 +212,9 @@ def run_georef(
                 gdal_available=tools,
             )
         )
+    _fail_closed_multi_sheet(items, polygons, iou_threshold)
+    for item in items:
+        item.pop("_sheet_rings", None)
     results = {
         "version": 1,
         "state": "wi",
@@ -410,24 +421,14 @@ def _georeference_entry(
             return reviewed_result
 
     page_rasters = _page_rasters(entry, raster)
-    chosen_raster = raster
-    registration = None
-    shoreline = None
-    page_error: str | None = None
-    for page_raster in page_rasters:
-        rings = extract_shoreline_candidates(read_png(page_raster))
-        for ring in rings:
-            try:
-                candidate = register_shoreline(ring, list(water.ring), gcp_count=gcp_count)
-            except Exception as error:
-                page_error = str(error)[:500]
-                continue
-            if registration is None or candidate.iou > registration.iou:
-                registration = candidate
-                shoreline = ring
-                chosen_raster = page_raster
+    sheets, page_error = _score_sheet_pages(
+        page_rasters,
+        hydro_ring=list(water.ring),
+        gcp_count=gcp_count,
+    )
+    sheets, missed_pages = _select_lake_sheets(sheets, page_rasters)
     out_dir = work_dir / "georef" / "lakes" / wbic / map_key
-    if shoreline is None or registration is None:
+    if not sheets:
         return _unscored(
             base,
             reasons=_reasons(
@@ -446,10 +447,29 @@ def _georeference_entry(
             error=page_error,
         )
 
+    for sheet in sheets:
+        full_iou = _full_hydro_iou(sheet, list(water.ring))
+        sheet["full_iou"] = full_iou
+        # A page-edge fragment can score well inside its own footprint and still
+        # leave most of the lake uncovered. The gate uses the worse of the two.
+        if sheet["cut_fraction"] >= _PARTIAL_CUT:
+            sheet["gate_iou"] = min(sheet["registration"].iou, full_iou)
+        else:
+            sheet["gate_iou"] = sheet["registration"].iou
+    primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
+    registration = primary["registration"]
+    shoreline = primary["ring"]
+    chosen_raster = primary["page"]
+    # Several sheets publish only when the weakest sheet still clears the gate.
+    # A large page with no shoreline is a missed sheet and fails the lake.
+    gate_iou = min(sheet["gate_iou"] for sheet in sheets)
+    if missed_pages:
+        gate_iou = 0.0
+    several_pages_passed = sum(1 for sheet in sheets if sheet["gate_iou"] >= iou_threshold) > 1
     affine_iou = round(registration.affine_iou, 6)
     tps_iou = round(registration.tps_iou, 6)
-    iou = round(registration.iou, 6)
-    low_iou = registration.iou < iou_threshold
+    iou = round(gate_iou, 6)
+    low_iou = gate_iou < iou_threshold
     gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
     out_dir.mkdir(parents=True, exist_ok=True)
     gcp_path = out_dir / "gcps.json"
@@ -464,6 +484,7 @@ def _georeference_entry(
             "affine": registration.affine.as_dict(),
             "method": registration.method,
             "source": "auto",
+            "rotation_deg": round(registration.rotation_deg, 3),
         },
     )
     project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
@@ -475,18 +496,29 @@ def _georeference_entry(
             {
                 "wbic": wbic,
                 "map_key": map_key,
-                "iou": iou,
+                "iou": round(registration.iou, 6),
             },
         ),
     )
-    warp_status, warped_path, warp_error = _warp(
-        raster=chosen_raster,
-        out_dir=out_dir,
-        gcps=gcp_dicts,
-        gdal_available=gdal_available,
-        method=registration.method,
-        affine=registration.affine.as_dict(),
-    )
+    warp_plan = _warp_plan_for(sheets, primary, iou_threshold)
+    warp_rows = []
+    warp_status, warped_path, warp_error = "not_run", None, None
+    for sheet, tif_name in warp_plan:
+        reg = sheet["registration"]
+        status, path, error = _warp(
+            raster=sheet["page"],
+            out_dir=out_dir,
+            gcps=[gcp.as_dict() for gcp in reg.gcps],
+            gdal_available=gdal_available,
+            method=reg.method,
+            affine=reg.affine.as_dict(),
+            tif_name=tif_name,
+        )
+        warp_rows.append({"page": sheet["page"].name, "status": status, "path": str(path) if path else None})
+        if sheet is primary:
+            warp_status, warped_path, warp_error = status, path, error
+        elif status == "failed" and warp_status != "failed":
+            warp_status, warp_error = status, error
     reasons = _reasons(
         flowage=flowage,
         shared_sheet=shared_sheet,
@@ -495,25 +527,43 @@ def _georeference_entry(
         shoreline_found=True,
         registration_error=False,
         warp_failed=warp_status == "failed",
+        several_pages_passed=several_pages_passed,
     )
+    public_sheets = [_public_sheet(sheet) for sheet in sheets]
+    for page in missed_pages:
+        public_sheets.append(
+            {"page": page.name, "iou": 0.0, "rotation_deg": None, "cut_fraction": None, "status": "no_shoreline"}
+        )
+    sheet_rings = []
+    for sheet in sheets:
+        warp = sheet["registration"]
+        project_sheet = warp.affine.apply if warp.method == "affine" else warp.tps.apply
+        sheet_rings.append([project_sheet(col, row) for col, row in sheet["ring"]])
+    combined = union_polygon_iou(sheet_rings, list(water.ring)) if len(sheet_rings) > 1 else None
     return {
         **base,
         "qa_status": "needs_review" if reasons else "auto",
         "iou": iou,
         "affine_iou": affine_iou,
         "tps_iou": tps_iou,
+        "rotation_deg": round(registration.rotation_deg, 3),
+        "sheet_count": len(public_sheets),
+        "sheets": public_sheets,
+        **({"combined_iou": round(combined, 6)} if combined is not None else {}),
         "reasons": reasons,
         "affine": registration.affine.as_dict(),
         "gcp_count": len(gcp_dicts),
         "hydrotype": hydrotype,
         "waterbody_name": waterbody_name,
-        "multi_sheet": multi_sheet,
+        "multi_sheet": multi_sheet or len(public_sheets) > 1,
         "flowage": flowage,
         "warp_source": "auto",
+        "_sheet_rings": sheet_rings,
         "paths": {
             "gcps": str(gcp_path),
             "shoreline": str(shore_path),
             "warped": str(warped_path) if warped_path else None,
+            "warps": warp_rows,
         },
         "warp": {
             "tool": "gdal_translate" if registration.method == "affine" else "gdalwarp",
@@ -665,6 +715,198 @@ def _georeference_reviewed(
     }
 
 
+# A shore with at least this much of its boundary on the page edge is a partial sheet.
+_PARTIAL_CUT = 0.08
+
+
+def _score_sheet_pages(
+    page_rasters: list[Path],
+    *,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+) -> tuple[list[dict], str | None]:
+    """Best lake-scale figure on each page, or no entry when the page has none."""
+    sheets: list[dict] = []
+    page_error: str | None = None
+    for page_raster in page_rasters:
+        image = read_png(page_raster)
+        image_area = float(image.width * image.height)
+        best: dict | None = None
+        for figure in extract_shoreline_figures(image):
+            if len(figure.ring) < 12:
+                continue
+            if _span_fraction(figure.ring, image.width, image.height) < max(MIN_FIGURE_SPAN, 0.18):
+                continue
+            area = abs(_polygon_area(figure.ring))
+            if area < 0.03 * image_area or area > 0.72 * image_area:
+                continue
+            try:
+                registration = register_shoreline(
+                    list(figure.ring),
+                    list(hydro_ring),
+                    gcp_count,
+                    on_frame=list(figure.on_frame),
+                )
+            except Exception as error:
+                page_error = str(error)[:500]
+                continue
+            candidate = {
+                "page": page_raster,
+                "registration": registration,
+                "ring": list(figure.ring),
+                "area": area,
+                "cut_fraction": _flag_fraction(figure.on_frame),
+            }
+            if best is None or _prefer_sheet(candidate, best):
+                best = candidate
+        if best is not None:
+            sheets.append(best)
+    return sheets, page_error
+
+
+def _select_lake_sheets(
+    sheets: list[dict],
+    page_rasters: list[Path],
+) -> tuple[list[dict], list[Path]]:
+    """Keep every page when any sheet is cut. Collapse only an all-closed set.
+
+    A closed shore on every page is one lake drawn more than once. The best of
+    those is enough. A cut or partial score on any page means the document does
+    not show one complete shore, so every other large page stays in the gate,
+    including a page that produced no shoreline.
+    """
+    if not sheets:
+        return [], []
+    partial = [sheet for sheet in sheets if sheet["cut_fraction"] >= _PARTIAL_CUT]
+    if not partial:
+        best = max(sheets, key=lambda sheet: sheet["registration"].iou)
+        return [best], []
+    scored = {sheet["page"] for sheet in sheets}
+    missed = [page for page in page_rasters if page not in scored]
+    return list(sheets), missed
+
+
+def _prefer_sheet(new: dict, old: dict) -> bool:
+    """The figure with the higher overlap wins. Area is only a tie break."""
+    new_iou = new["registration"].iou
+    old_iou = old["registration"].iou
+    if abs(new_iou - old_iou) <= 1e-6:
+        return new["area"] > old["area"]
+    return new_iou > old_iou
+
+
+def _public_sheet(sheet: dict) -> dict:
+    registration = sheet["registration"]
+    row = {
+        "page": sheet["page"].name,
+        "iou": round(sheet.get("gate_iou", registration.iou), 6),
+        "footprint_iou": round(registration.iou, 6),
+        "rotation_deg": round(registration.rotation_deg, 3),
+        "cut_fraction": round(sheet["cut_fraction"], 4),
+    }
+    if "full_iou" in sheet:
+        row["full_iou"] = round(sheet["full_iou"], 6)
+    return row
+
+
+def _full_hydro_iou(sheet: dict, hydro_ring: list[tuple[float, float]]) -> float:
+    """Overlap of the mapped ring with the whole hydro polygon, not the footprint."""
+    registration = sheet["registration"]
+    if sheet["cut_fraction"] < _PARTIAL_CUT:
+        return registration.iou
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, row) for col, row in sheet["ring"]]
+    return polygon_iou(mapped, list(hydro_ring))
+
+
+def _warp_plan_for(sheets: list[dict], primary: dict, threshold: float) -> list[tuple[dict, str]]:
+    """Warp the primary page and every other page whose gate IoU clears ``threshold``."""
+    plan = [(primary, "warped.tif")]
+    for sheet in sheets:
+        if sheet is primary:
+            continue
+        if sheet["gate_iou"] >= threshold:
+            plan.append((sheet, f"warped-{sheet['page'].stem}.tif"))
+    return plan
+
+
+def _fail_closed_multi_sheet(
+    items: list[dict],
+    polygons: dict[str, HydroWaterbody],
+    threshold: float,
+) -> None:
+    """Queue a multi-sheet lake unless every scored sheet clears the gate.
+
+    Shared sheets are queued on their own reason and are left alone here.
+    """
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        if item.get("qa_status") == "skipped":
+            continue
+        groups.setdefault(str(item["wbic"]), []).append(item)
+    for wbic, group in groups.items():
+        declared = any(bool(item.get("multi_sheet")) for item in group)
+        sheet_rows = [row for item in group for row in (item.get("sheets") or [])]
+        if not declared and len(sheet_rows) < 2 and len(group) < 2:
+            continue
+        if not declared and len(group) == 1 and len(sheet_rows) < 2:
+            continue
+        ious: list[float | None] = []
+        for item in group:
+            rows = item.get("sheets") or []
+            if rows:
+                ious.extend(row.get("iou") for row in rows)
+            else:
+                ious.append(item.get("iou"))
+        # Catalog multi-sheet lakes name more than one map key. One scored key
+        # is not the whole lake.
+        incomplete = declared and len(group) > 1 and any(iou is None for iou in ious)
+        weak = any(iou is None or float(iou) < threshold for iou in ious)
+        short = declared and len([iou for iou in ious if iou is not None]) < 2 and len(group) < 2
+        water = polygons.get(wbic)
+        rings = [ring for item in group for ring in (item.get("_sheet_rings") or [])]
+        if water is not None and len(rings) >= 2:
+            combined = round(union_polygon_iou(rings, list(water.ring)), 6)
+            for item in group:
+                item["combined_iou"] = combined
+        if not (weak or incomplete or short):
+            continue
+        for item in group:
+            reasons = list(item.get("reasons") or [])
+            if "multi_sheet" not in reasons:
+                reasons.append("multi_sheet")
+            item["reasons"] = _sort_reasons(reasons)
+            if item.get("qa_status") != "skipped":
+                item["qa_status"] = "needs_review"
+
+
+def _sort_reasons(reasons: list[str]) -> list[str]:
+    order = {name: index for index, name in enumerate(_REASON_ORDER)}
+    return sorted(reasons, key=lambda name: order.get(name, len(order)))
+
+
+def _span_fraction(ring: list[tuple[float, float]], width: int, height: int) -> float:
+    xs = [point[0] for point in ring]
+    ys = [point[1] for point in ring]
+    long_side = max(width, height, 1)
+    return max(max(xs) - min(xs), max(ys) - min(ys)) / long_side
+
+
+def _polygon_area(ring: list[tuple[float, float]]) -> float:
+    area = 0.0
+    count = len(ring)
+    for index, (x1, y1) in enumerate(ring):
+        x2, y2 = ring[(index + 1) % count]
+        area += x1 * y2 - x2 * y1
+    return area / 2.0
+
+
+def _flag_fraction(flags: tuple[bool, ...] | list[bool]) -> float:
+    if not flags:
+        return 0.0
+    return sum(1 for flag in flags if flag) / len(flags)
+
+
 def _unscored(
     base: dict,
     *,
@@ -700,6 +942,7 @@ def _reasons(
     shoreline_found: bool | None,
     registration_error: bool,
     warp_failed: bool,
+    several_pages_passed: bool = False,
 ) -> list[str]:
     found = []
     if flowage:
@@ -712,8 +955,12 @@ def _reasons(
         found.append("shoreline_not_found")
     elif shoreline_found and low_iou:
         found.append("iou_below_threshold")
-    if multi_sheet:
+    # Catalog multi-sheet groups are queued later, and only when a sheet misses
+    # the gate. Several pages of this one document that each cleared the gate
+    # are queued here: contours trace a single warped raster.
+    if several_pages_passed:
         found.append("multi_sheet")
+    _ = multi_sheet
     if warp_failed:
         found.append("warp_failed")
     order = {name: index for index, name in enumerate(_REASON_ORDER)}
@@ -747,13 +994,14 @@ def _warp(
     gdal_available: bool,
     method: str = "tps",
     affine: dict[str, float] | None = None,
+    tif_name: str = "warped.tif",
 ) -> tuple[str, Path | None, str | None]:
     if not gdal_available:
         return "unavailable", None, None
-    tif_path = out_dir / "warped.tif"
+    tif_path = out_dir / tif_name
     try:
         if method == "affine" and affine is not None:
-            staged = out_dir / "affine.tif"
+            staged = out_dir / f"{Path(tif_name).stem}-affine.tif"
             _run(gdal_translate_affine_args(str(raster), str(staged), affine))
             # -dstalpha matches the spline warp: black ink stays a color, not nodata.
             _run(
@@ -770,7 +1018,7 @@ def _warp(
                 ]
             )
         else:
-            vrt_path = out_dir / "gcps.vrt"
+            vrt_path = out_dir / f"{Path(tif_name).stem}.vrt"
             _run(gdal_translate_gcp_args(str(raster), str(vrt_path), gcps))
             _run(gdalwarp_tps_args(str(vrt_path), str(tif_path)))
     except RuntimeError as error:
