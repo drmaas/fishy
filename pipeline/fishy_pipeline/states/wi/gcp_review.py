@@ -283,7 +283,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hydro", type=Path, required=True, help="24K Hydro GeoJSON in EPSG:3071")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="bind to a non-loopback --host (default refuses)",
+    )
     return parser
+
+
+def _loopback_host(host: str) -> bool:
+    name = host.strip().lower()
+    if name in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    if name.startswith("127."):
+        return True
+    return False
 
 
 def serve(context: ReviewContext, *, host: str, port: int) -> None:
@@ -335,7 +349,7 @@ def serve(context: ReviewContext, *, host: str, port: int) -> None:
                 return
             if parsed.path.startswith("/api/raster/"):
                 wbic = normalize_wbic(parsed.path.rsplit("/", 1)[-1])
-                if wbic is None:
+                if wbic is None or wbic not in context.entries:
                     self.send_error(404)
                     return
                 raster, _ = context.resolve_raster(wbic)
@@ -363,14 +377,17 @@ def serve(context: ReviewContext, *, host: str, port: int) -> None:
                 return
             if parsed.path.startswith("/api/preview/"):
                 wbic = normalize_wbic(parsed.path.rsplit("/", 1)[-1])
+                if wbic is None or wbic not in context.entries:
+                    self._send_json(404, {"error": "unknown lake"})
+                    return
                 gcps = payload.get("gcps") or []
-                iou = context.preview_iou(wbic, gcps) if wbic else None
+                iou = context.preview_iou(wbic, gcps)
                 self._send_json(200, {"iou": iou})
                 return
             if parsed.path.startswith("/api/lake/"):
                 wbic = normalize_wbic(parsed.path.rsplit("/", 1)[-1])
-                if wbic is None:
-                    self._send_json(404, {"error": "unknown wbic"})
+                if wbic is None or wbic not in context.entries:
+                    self._send_json(404, {"error": "unknown lake"})
                     return
                 path = save_reviewed_gcps(wbic, payload)
                 iou = context.preview_iou(wbic, payload.get("gcps") or [])
@@ -391,6 +408,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"manifest not found: {manifest_path}")
     if not args.hydro.is_file():
         raise SystemExit(f"hydro not found: {args.hydro}")
+    if not args.allow_remote and not _loopback_host(args.host):
+        raise SystemExit(f"refusing non-loopback --host {args.host!r}; pass --allow-remote")
     context = ReviewContext(manifest_path=manifest_path, hydro_path=args.hydro, work_dir=args.work_dir)
     serve(context, host=args.host, port=args.port)
 

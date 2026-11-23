@@ -5,85 +5,17 @@
   "page": "1862100a-p0.png",
   "unit": "m",
   "labels": [
-    {
-      "pixel": [
-        1369.5,
-        1283.5
-      ],
-      "value": 1,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1551.5,
-        1285.5
-      ],
-      "value": 2,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1733.5,
-        1287.5
-      ],
-      "value": 3,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1915.5,
-        1289.5
-      ],
-      "value": 4,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        2097.5,
-        1291.5
-      ],
-      "value": 5,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1999.5,
-        1413.5
-      ],
-      "value": 6,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1817.5,
-        1427.5
-      ],
-      "value": 7,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1635.5,
-        1435.5
-      ],
-      "value": 8,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1461.5,
-        1425.5
-      ],
-      "value": 9,
-      "confidence": 0.9
-    },
-    {
-      "pixel": [
-        1367.5,
-        1341.5
-      ],
-      "value": 10,
-      "confidence": 0.9
-    }
+    {"pixel": [1280, 920], "value": 1, "unit": "m", "confidence": 0.95},
+    {"pixel": [1350, 880], "value": 2, "unit": "m", "confidence": 0.95},
+    {"pixel": [1420, 850], "value": 3, "unit": "m", "confidence": 0.95},
+    {"pixel": [1510, 830], "value": 3.5, "unit": "m", "confidence": 0.95},
+    {"pixel": [2180, 1680], "value": 4, "unit": "m", "confidence": 0.95},
+    {"pixel": [2240, 1620], "value": 5, "unit": "m", "confidence": 0.95},
+    {"pixel": [2290, 1560], "value": 6, "unit": "m", "confidence": 0.95},
+    {"pixel": [2330, 1500], "value": 7, "unit": "m", "confidence": 0.95},
+    {"pixel": [2360, 1440], "value": 8, "unit": "m", "confidence": 0.95},
+    {"pixel": [2380, 1380], "value": 9, "unit": "m", "confidence": 0.95},
+    {"pixel": [2395, 1320], "value": 10, "unit": "m", "confidence": 0.95},
+    {"pixel": [2410, 1260], "value": 10.3, "unit": "m", "confidence": 0.95}
   ]
 }

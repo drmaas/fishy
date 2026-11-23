@@ -198,6 +198,7 @@ def _trace_item(
         "iou": item.get("iou"),
         "georef_qa_status": item.get("qa_status"),
         "georef_reasons": list(item.get("reasons") or []),
+        "warp_source": item.get("warp_source"),
     }
     if item.get("qa_status") == "skipped":
         return {**base, "qa_status": "skipped", "skip_reason": item.get("skip_reason"), "reasons": []}
@@ -301,17 +302,21 @@ def _trace_sheet(
     emitted = [line for line in assignment.features if line.depth_ft is not None and line.source != "hydro"]
     depths = sorted({int(feature.depth_ft) for feature in assignment.features if feature.depth_ft is not None})
     iou = base.get("iou")
+    review = any(line.needs_review for line in assignment.features if line.depth_ft is not None)
     publishable, qa_status, gate_reasons = publish_gate(
         wbic=wbic,
         iou=iou if isinstance(iou, (int, float)) else None,
         depths_ft=[depth for depth in depths if depth != 0],
+        georef_qa_status=base.get("georef_qa_status"),
+        georef_reasons=base.get("georef_reasons"),
+        warp_source=base.get("warp_source"),
     )
     reasons = list(dict.fromkeys(list(assignment.reasons) + gate_reasons))
     if not emitted:
         reasons.append("no_contour_lines")
-    review = any(line.needs_review for line in assignment.features if line.depth_ft is not None)
-    if review or not publishable:
+    if assignment.reasons or review or not publishable:
         qa_status = "needs_review"
+        publishable = False
     collection = features_to_geojson(
         assignment.features,
         wbic=str(base["wbic"]),

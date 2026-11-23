@@ -78,6 +78,53 @@ def label_file_unit(body: dict) -> str:
     return "ft"
 
 
+def validate_recorded_label_file(body: dict, path: Path | None = None) -> list[str]:
+    """Return human-readable schema errors, or [] when the file is valid."""
+    errors: list[str] = []
+    prefix = f"{path}: " if path else ""
+    if not isinstance(body, dict):
+        return [f"{prefix}root must be an object"]
+    for key in ("version", "wbic", "map_key", "page", "unit", "labels"):
+        if key not in body:
+            errors.append(f"{prefix}missing {key}")
+    wbic = body.get("wbic")
+    if wbic is not None and (not isinstance(wbic, str) or not wbic.isdigit() or len(wbic) != 7):
+        errors.append(f"{prefix}wbic must be seven ASCII digits")
+    labels = body.get("labels")
+    if labels is not None:
+        if not isinstance(labels, list):
+            errors.append(f"{prefix}labels must be a list")
+        else:
+            for index, label in enumerate(labels):
+                if not isinstance(label, dict):
+                    errors.append(f"{prefix}labels[{index}] must be an object")
+                    continue
+                if not isinstance(label.get("pixel"), list) or len(label.get("pixel", [])) != 2:
+                    errors.append(f"{prefix}labels[{index}].pixel must be [x, y]")
+                if not isinstance(label.get("value"), (int, float)):
+                    errors.append(f"{prefix}labels[{index}].value must be a number")
+                if label.get("confidence") is not None and not isinstance(label.get("confidence"), (int, float)):
+                    errors.append(f"{prefix}labels[{index}].confidence must be a number")
+    return errors
+
+
+def validate_committed_label_files() -> list[str]:
+    errors: list[str] = []
+    if not RECORDED_LABEL_DIR.is_dir():
+        return errors
+    for path in sorted(RECORDED_LABEL_DIR.glob("*.json")):
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            errors.append(f"{path}: invalid JSON ({error})")
+            continue
+        errors.extend(validate_recorded_label_file(body, path))
+        wbic = str(body.get("wbic", ""))
+        if path.stem != wbic:
+            errors.append(f"{path}: filename does not match wbic {wbic}")
+    return errors
+
+
 def depths_match_recorded(traced_depths: list[int], body: dict) -> tuple[bool, list[str]]:
     expected = set(recorded_depths_ft(body))
     traced = {int(depth) for depth in traced_depths if int(depth) != 0}
