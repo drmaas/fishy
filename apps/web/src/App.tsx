@@ -26,6 +26,7 @@ import { STATES, stateById } from "./states.ts";
 import { ThemeSwitch } from "./ThemeSwitch.tsx";
 import {
   applyDocumentTheme,
+  maptilerStyleUrl,
   readThemePreference,
   resolveColorScheme,
   THEME_STORAGE_KEY,
@@ -353,7 +354,7 @@ export function App() {
         terrainUrl={config.terrainUrl}
         hillshadeUrl={config.hillshadeUrl}
         basemap={basemap}
-        maptilerStyleUrl={config.maptiler ? "/api/basemap/style.json" : undefined}
+        maptilerStyleUrl={config.maptiler ? maptilerStyleUrl(colorScheme) : undefined}
         colorScheme={colorScheme}
         unit={unit}
         stateBounds={state.bounds}

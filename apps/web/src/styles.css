@@ -44,12 +44,20 @@ html, body, #root, .app {
   min-height: 100%;
 }
 
-.theme-switch {
+.theme-controls {
   position: absolute;
   z-index: 3;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  left: auto;
+  transform: none;
+  pointer-events: none;
+}
+
+.theme-switch {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: inline-flex;
   align-items: stretch;
   height: 32px;
@@ -58,6 +66,24 @@ html, body, #root, .app {
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 9999px;
   box-shadow: 0 8px 20px rgb(0 0 0 / 28%);
+  pointer-events: auto;
+}
+
+.theme-switch-icon {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  margin: 0;
+  color: #e8ecef;
+  background: #1a1f24;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 10px;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 28%);
+  cursor: pointer;
+  pointer-events: auto;
 }
 
 .theme-switch-option {
@@ -131,8 +157,8 @@ html, body, #root, .app {
 }
 
 .chrome-show {
-  top: 12px;
-  left: 12px;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  left: max(12px, env(safe-area-inset-left, 0px));
 }
 
 .location-toast {
@@ -167,9 +193,9 @@ html, body, #root, .app {
 }
 
 .panel-show {
-  top: 12px;
-  right: 12px;
-  max-width: min(220px, calc(100% - 24px));
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  max-width: min(220px, calc(100% - 80px));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -502,6 +528,44 @@ button[aria-pressed="true"] {
   background-color: rgb(180 35 24 / 0.18);
 }
 
+/* Wide desktop: centered pill, clear of the lake chip in the upper right. */
+@media (min-width: 721px) and (min-height: 521px) {
+  .theme-controls {
+    top: max(12px, env(safe-area-inset-top, 0px));
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+  }
+
+  .theme-switch {
+    position: static;
+  }
+
+  .panel-show {
+    top: max(calc(12px + 32px + 10px), calc(env(safe-area-inset-top, 0px) + 32px + 10px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+  }
+}
+
+/* Narrow or short viewports: icon toggle in the upper-right corner. */
+@media (max-width: 720px), (max-height: 520px) {
+  .theme-switch {
+    display: none;
+  }
+
+  .theme-switch-icon {
+    display: inline-flex;
+  }
+
+  .panel-show {
+    top: max(calc(12px + 44px + 8px), calc(env(safe-area-inset-top, 0px) + 44px + 8px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+    bottom: auto;
+    left: auto;
+    max-width: min(180px, calc(100% - 80px));
+  }
+}
+
 @media (max-width: 720px) {
   .chrome {
     width: calc(100% - 24px);
@@ -521,9 +585,10 @@ button[aria-pressed="true"] {
 
   .panel-show {
     top: auto;
-    bottom: 56px;
-    right: 12px;
+    bottom: max(56px, env(safe-area-inset-bottom, 0px));
+    right: max(12px, env(safe-area-inset-right, 0px));
     left: auto;
+    max-width: min(220px, calc(100% - 24px));
   }
 
   .legend {

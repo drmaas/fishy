@@ -32,7 +32,10 @@ import {
 } from "../lib/server/lakes";
 import { isLakeIdForState, lakeIdFromDetailPath } from "@fishy/core";
 
-const STYLE_PATH = "/maps/outdoor-v2/style.json";
+const MAPTILER_STYLES = {
+  light: "/maps/outdoor-v2/style.json",
+  dark: "/maps/outdoor-v2-dark/style.json",
+} as const;
 const DNR_HOST = "enterprise.gisdata.mn.gov";
 
 export default {
@@ -53,7 +56,11 @@ export default {
       const key = maptilerKey(env);
       if (url.pathname === "/api/basemap/style.json") {
         if (!key) return text("basemap unavailable", 404);
-        return proxyStyle(request, key);
+        return proxyStyle(request, key, MAPTILER_STYLES.light);
+      }
+      if (url.pathname === "/api/basemap/style-dark.json") {
+        if (!key) return text("basemap unavailable", 404);
+        return proxyStyle(request, key, MAPTILER_STYLES.dark);
       }
       if (url.pathname.startsWith("/api/basemap/upstream/")) {
         if (!key) return text("basemap unavailable", 404);
@@ -220,8 +227,8 @@ async function dnrFetch(target: string): Promise<Response> {
   return upstream;
 }
 
-async function proxyStyle(request: Request, key: string): Promise<Response> {
-  const upstream = await fetch(`https://api.maptiler.com${STYLE_PATH}?key=${encodeURIComponent(key)}`, {
+async function proxyStyle(request: Request, key: string, stylePath: string): Promise<Response> {
+  const upstream = await fetch(`https://api.maptiler.com${stylePath}?key=${encodeURIComponent(key)}`, {
     method: request.method,
     redirect: "manual",
   });

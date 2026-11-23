@@ -36,6 +36,10 @@ export function contoursOnlyBackground(scheme: ColorScheme): string {
   return scheme === "dark" ? "#1b2832" : "#d5e3ec";
 }
 
+export function maptilerStyleUrl(scheme: ColorScheme): string {
+  return scheme === "dark" ? "/api/basemap/style-dark.json" : "/api/basemap/style.json";
+}
+
 export function mapStyleKey(
   basemap: "openfreemap" | "none" | "maptiler",
   scheme: ColorScheme,
@@ -44,4 +48,17 @@ export function mapStyleKey(
   if (basemap === "maptiler" && maptilerStyleUrl) return maptilerStyleUrl;
   if (basemap === "none") return `contours:${scheme}`;
   return openFreeMapStyleUrl(scheme);
+}
+
+const THEME_CYCLE: ThemePreference[] = ["light", "dark", "auto"];
+
+export function cycleThemePreference(current: ThemePreference): ThemePreference {
+  const index = THEME_CYCLE.indexOf(current);
+  return THEME_CYCLE[(index + 1) % THEME_CYCLE.length] ?? "auto";
+}
+
+export function themePreferenceLabel(preference: ThemePreference): string {
+  if (preference === "light") return "Light";
+  if (preference === "dark") return "Dark";
+  return "Auto";
 }
