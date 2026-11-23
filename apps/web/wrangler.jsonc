@@ -26,5 +26,11 @@
     "FISHY_CONTOURS_URL": "/samples/sample-pond.pmtiles",
     "FISHY_TERRAIN_URL": "/samples/sample-pond-terrain.pmtiles",
     "FISHY_HILLSHADE_URL": "/samples/sample-pond-hillshade.pmtiles"
-  }
+  },
+  "r2_buckets": [
+    {
+      "binding": "FISHY_TILES",
+      "bucket_name": "fishy-tiles"
+    }
+  ]
 }

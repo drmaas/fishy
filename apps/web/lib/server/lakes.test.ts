@@ -22,9 +22,9 @@ import {
 } from "./lakes.ts";
 
 describe("lake proxy helpers", () => {
-  it("accepts only minnesota as a state", () => {
+  it("accepts minnesota and wisconsin as states", () => {
     expect(isSupportedState("mn")).toBe(true);
-    expect(isSupportedState("wi")).toBe(false);
+    expect(isSupportedState("wi")).toBe(true);
     expect(isSupportedState(null)).toBe(false);
   });
 
