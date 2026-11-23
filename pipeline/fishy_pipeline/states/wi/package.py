@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +17,7 @@ from fishy_pipeline.states.wi.lake_json import (
     group_contour_items,
     load_contour_results,
 )
-from fishy_pipeline.states.wi.package_verify import load_georef_index, verify_contour_item
+from fishy_pipeline.states.wi.package_verify import cleared_contour_items, load_georef_index
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
@@ -67,36 +66,28 @@ def run_package(
     skipped: list[dict] = []
     publish_items: list[tuple[str, list[dict]]] = []
     for wbic, items in sorted(grouped.items()):
-            active = [
-                item
-                for item in items
-                if item.get("qa_status") not in {"skipped", "failed"}
-            ]
-            if not active:
-                continue
-            try:
-                for item in active:
-                    map_key = str(item.get("map_key") or "")
-                    publishable, _qa = verify_contour_item(item, georef_index.get((wbic, map_key)))
-                    if not publishable:
-                        raise ValueError(f"lake {wbic} is not publishable")
-            except ValueError as error:
-                message = str(error)
-                if "tampered" in message or "disagrees" in message:
-                    raise
-                skipped.append({"wbic": wbic, "error": message})
-                continue
-            publish_items.append((wbic, items))
+        try:
+            cleared = cleared_contour_items(wbic, items, georef_index)
+        except ValueError as error:
+            message = str(error)
+            if "tampered" in message or "disagrees" in message:
+                raise
+            skipped.append({"wbic": wbic, "error": message})
+            continue
+        if not cleared:
+            skipped.append({"wbic": wbic, "error": "no publishable contour sheets"})
+            continue
+        publish_items.append((wbic, cleared))
 
     ogr = find_tool("ogr2ogr", "OGR2OGR")
     if not ogr and publish_items:
         raise SystemExit("ogr2ogr must be on PATH")
     with tempfile.TemporaryDirectory(prefix="fishy-wi-json-") as raw:
         scratch = Path(raw)
-        for wbic, items in publish_items:
+        for wbic, cleared in publish_items:
             detail = build_publishable_lake_detail(
                 wbic=wbic,
-                items=items,
+                items=cleared,
                 manifest_path=manifest_path,
                 hydro_path=hydro_path,
                 ogr=ogr,

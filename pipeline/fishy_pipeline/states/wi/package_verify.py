@@ -149,5 +149,31 @@ def verify_contour_item(item: dict, georef_item: dict | None) -> tuple[bool, str
         "qa_status": expected_qa,
         "reasons": reasons,
     }
-    refuse_unless_publishable(checked)
+    if expected_pub:
+        refuse_unless_publishable(checked)
     return expected_pub, expected_qa
+
+
+def contour_item_cleared_for_publish(item: dict, georef_item: dict | None) -> dict | None:
+    """Return the contour row when verification passes; otherwise ``None``."""
+    publishable, qa = verify_contour_item(item, georef_item)
+    if not publishable:
+        return None
+    return {**item, "publishable": True, "qa_status": qa}
+
+
+def cleared_contour_items(
+    wbic: str,
+    items: list[dict],
+    georef_index: dict[tuple[str, str], dict],
+) -> list[dict]:
+    """Active rows that pass ``verify_contour_item``; skipped/failed rows are ignored."""
+    cleared: list[dict] = []
+    for item in items:
+        if item.get("qa_status") in {"skipped", "failed"}:
+            continue
+        map_key = str(item.get("map_key") or "")
+        row = contour_item_cleared_for_publish(item, georef_index.get((wbic, map_key)))
+        if row is not None:
+            cleared.append(row)
+    return cleared

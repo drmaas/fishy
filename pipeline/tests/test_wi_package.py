@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fishy_pipeline.common.build import build_wi_lake_artifacts, refuse_unless_publishable
 from fishy_pipeline.common.upload import upload_file, upload_wi_artifacts
@@ -92,6 +93,150 @@ class WiPackageTest(unittest.TestCase):
             upload_wi_artifacts(dest, put_object=record_put)
             self.assertNotIn("wi/v1/gendry/lakes/9999999.json", keys)
             self.assertIn(CURRENT_POINTER_KEY, keys)
+
+    @patch("fishy_pipeline.states.wi.lake_json.reproject_geojson_in_memory", side_effect=lambda data, *_args: data)
+    @patch("fishy_pipeline.states.wi.package.find_tool", return_value="ogr2ogr")
+    @patch(
+        "fishy_pipeline.states.wi.package_verify.publish_gate",
+        side_effect=lambda **kwargs: (
+            (False, "needs_review", ["bad_depth"])
+            if 99 in kwargs.get("depths_ft", [])
+            else (True, "auto", [])
+        ),
+    )
+    def test_failed_sheet_excluded_from_emitted_contours(self, _gate, _ogr, _reproject):
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw) / "work"
+            dest = Path(raw) / "dest"
+            good_dir = work / "contours" / "lakes" / "0417300" / "0417300a"
+            bad_dir = work / "contours" / "lakes" / "0417300" / "0417300b"
+            good_dir.mkdir(parents=True)
+            bad_dir.mkdir(parents=True)
+
+            def write_geo(path: Path, depth: int) -> None:
+                path.write_text(
+                    json.dumps(
+                        {
+                            "type": "FeatureCollection",
+                            "qa_status": "auto",
+                            "features": [
+                                {
+                                    "type": "Feature",
+                                    "properties": {"depth_ft": depth, "needs_review": False},
+                                    "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]},
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            good_path = good_dir / "contours.geojson"
+            bad_path = bad_dir / "contours.geojson"
+            write_geo(good_path, 10)
+            write_geo(bad_path, 99)
+
+            (work / "georef").mkdir(parents=True)
+            (work / "georef" / "results.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "qa_status": "auto",
+                                "iou": 0.95,
+                                "reasons": [],
+                                "warp_source": "auto",
+                            },
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300b",
+                                "qa_status": "auto",
+                                "iou": 0.95,
+                                "reasons": [],
+                                "warp_source": "auto",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (work / "contours" / "results.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "publishable": True,
+                                "qa_status": "auto",
+                                "depths_ft": [10],
+                                "path": str(good_path),
+                            },
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300b",
+                                "qa_status": "failed",
+                                "publishable": False,
+                                "depths_ft": [99],
+                                "path": str(bad_path),
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = work / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "name": "Lake Wissota",
+                                "county": "Chippewa",
+                                "acres": 6044,
+                                "max_depth_ft": 72,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hydro = work / "hydro.geojson"
+            hydro.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3071"}},
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {"WATERBODY_WBIC": 417300, "WATERBODY_NAME": "Lake Wissota"},
+                                "geometry": {
+                                    "type": "Polygon",
+                                    "coordinates": [[[0, 0], [100, 0], [100, 100], [0, 0]]],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            body = run_package(work_dir=work, dest=dest, manifest_path=manifest, hydro_path=hydro)
+            self.assertEqual(len(body["lakes"]), 1)
+            build_id = body["build_id"]
+            detail = json.loads(
+                (dest / generation_lake_detail_key(build_id, "0417300")).read_text(encoding="utf-8")
+            )
+            depths = {
+                int(feature["properties"]["depth_ft"])
+                for feature in detail["contours"]["features"]
+            }
+            self.assertEqual(depths, {10})
+            self.assertNotIn(99, depths)
 
     def test_tampered_contours_results_json_refused(self):
         with tempfile.TemporaryDirectory() as raw:
