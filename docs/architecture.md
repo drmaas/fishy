@@ -19,6 +19,8 @@ Non-API requests that reach the Worker return 404. Static files, including `publ
 
 `pipeline/fishy_pipeline` normalizes DNR field names (`depth` / `abs_depth` to `depth_ft`) and builds `ogr2ogr`, `tippecanoe`, GDAL, and `pmtiles convert` commands. `pnpm pipeline:sample` runs that chain on `fixtures/sample-pond`, a synthetic lake with the DNR schema. Real extracts stay in `/data` and are gitignored.
 
+Wisconsin adds a batch path under `fishy_pipeline/states/wi/`: ingest, georeference, then contour tracing. `contours` clips each warped sheet to the 24K Hydro polygon (island rings included), reads depth labels, and writes a per-lake GeoJSON in EPSG:3071. Contour depth is positive `depth_ft`, with `wbic`, `interval_ft`, and `confidence`. The GeoJSON stays in the git-ignored work directory. Publishing it to R2 is a later step.
+
 Wisconsin is a separate batch under `fishy_pipeline/states/wi/`. `ingest` writes a manifest and rasters. `georef` registers each `(wbic, map_key)` pair to that WBIC's 24K Hydro shoreline in EPSG:3071 and writes `georef/review_queue.json` for a low IoU, a shared sheet, a multi-sheet lake, or a flowage. Contour tracing, R2 upload of Wisconsin lakes, and the web app are later stages. Minnesota stays on the live MapServer.
 
 `pnpm pipeline:r2-upload` runs `wrangler r2 object put`. `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `R2_BUCKET` come from the environment. They are not command arguments and they are not files in git.

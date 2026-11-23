@@ -112,6 +112,30 @@ class HydroWaterbody:
     hydrotype: int | None
 
 
+@dataclass(frozen=True)
+class HydroPart:
+    """One polygon part. ``holes`` are island rings inside ``exterior``."""
+
+    exterior: tuple[tuple[float, float], ...]
+    holes: tuple[tuple[tuple[float, float], ...], ...] = ()
+
+
+@dataclass(frozen=True)
+class HydroGeometry:
+    """All parts of the largest 24K Hydro feature for one WBIC, holes kept.
+
+    Georef matches the largest exterior and ignores islands. Contour clipping
+    uses that same feature, including island rings, and does not pull in a
+    second feature that shares the WBIC.
+    """
+
+    wbic: str
+    parts: tuple[HydroPart, ...]
+    waterbody_name: str | None
+    hydroid: int | None
+    hydrotype: int | None
+
+
 def _ring_area(ring: list[tuple[float, float]]) -> float:
     area = 0.0
     for index, (x1, y1) in enumerate(ring):
@@ -152,6 +176,74 @@ def _largest_exterior(geometry: dict) -> list[tuple[float, float]] | None:
                 best_area = area
         return best
     return None
+
+
+def _parts_from_geometry(geometry: dict) -> list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]]:
+    kind = geometry.get("type")
+    coordinates = geometry.get("coordinates")
+    if kind == "Polygon" and isinstance(coordinates, list):
+        polygons = [coordinates]
+    elif kind == "MultiPolygon" and isinstance(coordinates, list):
+        polygons = [polygon for polygon in coordinates if isinstance(polygon, list)]
+    else:
+        return []
+    parts: list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]] = []
+    for polygon in polygons:
+        if not polygon:
+            continue
+        exterior = _clean_ring(polygon[0])
+        if exterior is None:
+            continue
+        holes: list[list[tuple[float, float]]] = []
+        for hole in polygon[1:]:
+            cleaned = _clean_ring(hole)
+            if cleaned is not None:
+                holes.append(cleaned)
+        parts.append((exterior, holes))
+    return parts
+
+
+def _feature_area(parts: list[tuple[list[tuple[float, float]], list]]) -> float:
+    return sum(_ring_area(exterior) for exterior, _holes in parts)
+
+
+def load_hydro_geometries(path: Path) -> dict[str, HydroGeometry]:
+    """Index 24K Hydro polygons by WBIC, keeping island rings.
+
+    Same CRS rule as ``load_hydro_polygons``. When several features share a
+    WBIC, the feature with the largest exterior area is kept (every part of
+    that feature, including holes).
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    _assert_hydro_crs_3071(data)
+    features = data.get("features")
+    if not isinstance(features, list):
+        raise ValueError("hydro GeoJSON must contain a features array")
+    index: dict[str, HydroGeometry] = {}
+    areas: dict[str, float] = {}
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        parts = _parts_from_geometry(feature.get("geometry") or {})
+        if not parts:
+            continue
+        props = feature.get("properties") or {}
+        wbic = normalize_wbic(props.get("WATERBODY_WBIC") or props.get("waterbody_wbic"))
+        if wbic is None:
+            continue
+        area = _feature_area(parts)
+        if wbic in areas and area <= areas[wbic]:
+            continue
+        name = props.get("WATERBODY_NAME") or props.get("WATERBODY_ROW_NAME") or props.get("waterbody_name")
+        index[wbic] = HydroGeometry(
+            wbic=wbic,
+            parts=tuple(HydroPart(exterior=tuple(exterior), holes=tuple(tuple(hole) for hole in holes)) for exterior, holes in parts),
+            waterbody_name=str(name) if name else None,
+            hydroid=_int_or_none(props.get("HYDROID") or props.get("hydroid")),
+            hydrotype=_int_or_none(props.get("HYDROTYPE") or props.get("hydrotype")),
+        )
+        areas[wbic] = area
+    return index
 
 
 def load_hydro_polygons(path: Path) -> dict[str, HydroWaterbody]:

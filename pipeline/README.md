@@ -5,7 +5,7 @@ Fishy’s Python tooling turns lake bathymetry into PMTiles for the map. Layout 
 | State | Runtime path |
 | --- | --- |
 | Minnesota (`mn`) | **No pipeline.** The Worker queries the [MN DNR MapServer](https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer) live. |
-| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest` and `georef` are implemented; `contours` remains a stub. |
+| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest`, `georef`, and `contours` are implemented. |
 | Sample / dev | Shared **`fishy_pipeline/common/`** build on `fixtures/sample-pond` (synthetic DNR-shaped data). |
 
 ## Shared build (`common/`)
@@ -39,8 +39,9 @@ PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi ingest --harvest-catalo
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef --fixtures --work-dir pipeline/work/wi
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef --hydro /path/to/24k-hydro.geojson
 
-# Contours are still a stub
-PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours
+# Wisconsin contours (synthetic fixture, or a work dir produced by georef)
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours --fixtures --work-dir pipeline/work/wi
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours --hydro /path/to/24k-hydro.geojson
 ```
 
 ## Wisconsin georef
@@ -55,11 +56,21 @@ A `map_key` shared by more than one WBIC is queued with reason `shared_sheet`. T
 
 `fixtures/wi-georef/known-transform.json` is a synthetic sheet. The test draws the raster in memory. No DNR raster is committed.
 
+## Wisconsin contours
+
+`contours` reads `georef/results.json`, the ingest manifest, and the same 24K Hydro GeoJSON. It clips `warped.tif` to that lake's hydro polygon, including island rings, with `gdalwarp -cutline -dstalpha`. Depth labels are read with EasyOCR (the one OCR engine for this stage). Label boxes are inpainted, the remaining ink is skeletonized, and the strokes become LineStrings in EPSG:3071.
+
+Depths snap to those labels. Closed basin rings with no label take the next interval inward from the parent, starting at the hydro shoreline as depth 0. A ring stops inside `max_depth_ft` from the manifest. Conflicting labels, a step that breaks the interval, an unlabeled island collar, or a depth past the max are `needs_review`. The GeoJSON properties are positive `depth_ft`, `wbic`, `interval_ft`, and `confidence`.
+
+Output lands in `contours/lakes/<wbic>/<map_key>/contours.geojson` and `contours/results.json` under the work directory. Rasters and GeoJSON stay out of git. `--fixtures` writes a synthetic pond and does not load EasyOCR.
+
+EasyOCR, OpenCV, and scikit-image are in the `wi` extra. The depth rules and the clip command are covered by `pnpm run pipeline:test` without that extra. GDAL is MIT/X. EasyOCR's detector weights download on first use and are not committed.
+
 Legacy module names still work: `python3 -m fishy_pipeline.build` and `python3 -m fishy_pipeline.upload`.
 
 ## Optional dependencies
 
-Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus rasterio, OpenCV, scikit-image, OCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries. Georeferencing does not import that extra. The spline warp uses the GDAL command-line tools (**MIT/X**), which CI installs as `gdal-bin`.
+Heavy Wisconsin tooling (PyMuPDF for PDF rasterization, plus rasterio, OpenCV, scikit-image, EasyOCR) lives in the **`wi`** extra so default install and CI stay light. PyMuPDF is **AGPL-3.0** (or a commercial license from Artifex) — review before distributing combined binaries. Georeferencing does not import that extra. Contour tracing imports OpenCV, scikit-image, and EasyOCR only when a real sheet is traced. The spline warp and the hydro clip use the GDAL command-line tools (**MIT/X**), which CI installs as `gdal-bin`.
 
 ```bash
 cd pipeline && pip install -e '.[wi]'
