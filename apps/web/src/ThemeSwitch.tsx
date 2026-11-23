@@ -56,14 +56,35 @@ function ThemeIcon({ preference }: { preference: ThemePreference }) {
   return <AutoIcon />;
 }
 
+export interface ThemeIconButtonProps {
+  value: ThemePreference;
+  onChange: (value: ThemePreference) => void;
+  className?: string;
+}
+
+export function ThemeIconButton({ value, onChange, className }: ThemeIconButtonProps) {
+  const label = themePreferenceLabel(value);
+  const classes = ["theme-switch-icon", "tap-target", className].filter(Boolean).join(" ");
+
+  return (
+    <button
+      type="button"
+      className={classes}
+      onClick={() => onChange(cycleThemePreference(value))}
+      aria-label={`Color scheme: ${label}. Activate to switch.`}
+      title={`${label} mode — tap to switch`}
+    >
+      <ThemeIcon preference={value} />
+    </button>
+  );
+}
+
 interface ThemeSwitchProps {
   value: ThemePreference;
   onChange: (value: ThemePreference) => void;
 }
 
 export function ThemeSwitch({ value, onChange }: ThemeSwitchProps) {
-  const label = themePreferenceLabel(value);
-
   return (
     <div className="theme-controls">
       <div className="theme-switch" role="radiogroup" aria-label="Color scheme">
@@ -83,15 +104,7 @@ export function ThemeSwitch({ value, onChange }: ThemeSwitchProps) {
           );
         })}
       </div>
-      <button
-        type="button"
-        className="theme-switch-icon tap-target"
-        onClick={() => onChange(cycleThemePreference(value))}
-        aria-label={`Color scheme: ${label}. Activate to switch.`}
-        title={`${label} mode — tap to switch`}
-      >
-        <ThemeIcon preference={value} />
-      </button>
+      <ThemeIconButton value={value} onChange={onChange} />
     </div>
   );
 }

@@ -136,6 +136,17 @@ html, body, #root, .app {
   gap: 8px;
 }
 
+.chrome-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chrome-theme-toggle {
+  display: none;
+}
+
 .brand { display: grid; gap: 2px; flex: 1 1 auto; min-width: 0; }
 
 .tap-target {
@@ -557,6 +568,16 @@ button[aria-pressed="true"] {
     display: inline-flex;
   }
 
+  .chrome-theme-toggle {
+    display: inline-flex;
+  }
+
+  /* Corner icon hides while the control card is open; header toggle replaces it. */
+  .app.chrome-open .theme-controls {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
   .panel-show {
     top: max(calc(12px + 44px + 8px), calc(env(safe-area-inset-top, 0px) + 44px + 8px));
     right: max(12px, env(safe-area-inset-right, 0px));
@@ -566,20 +587,34 @@ button[aria-pressed="true"] {
   }
 }
 
+/* Short landscape: keep the lake panel and its chip below the corner theme icon. */
+@media (max-height: 520px) {
+  .panel {
+    top: max(calc(12px + 44px + 8px), calc(env(safe-area-inset-top, 0px) + 44px + 8px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+    left: 12px;
+    bottom: auto;
+    width: auto;
+  }
+}
+
 @media (max-width: 720px) {
   .chrome {
+    top: max(12px, env(safe-area-inset-top, 0px));
+    left: max(12px, env(safe-area-inset-left, 0px));
     width: calc(100% - 24px);
   }
 
   .app.chrome-open .chrome {
-    top: 52px;
+    top: max(12px, env(safe-area-inset-top, 0px));
+    width: calc(100% - max(24px, calc(env(safe-area-inset-left, 0px) + env(safe-area-inset-right, 0px))));
   }
 
   .panel {
     top: auto;
-    bottom: 56px;
-    right: 12px;
-    left: 12px;
+    bottom: max(56px, env(safe-area-inset-bottom, 0px));
+    right: max(12px, env(safe-area-inset-right, 0px));
+    left: max(12px, env(safe-area-inset-left, 0px));
     width: auto;
   }
 
