@@ -12,16 +12,13 @@ from pathlib import Path
 from fishy_pipeline.common.build import build_wi_lake_artifacts
 from fishy_pipeline.common.commands import find_tool
 from fishy_pipeline.common.upload import upload_wi_artifacts
-from fishy_pipeline.common.wi_r2 import (
-    WI_R2_PREFIX,
-    refuse_unless_publishable,
-    wbic_ready_for_publish,
-)
+from fishy_pipeline.common.wi_r2 import WI_R2_PREFIX
 from fishy_pipeline.states.wi.lake_json import (
     build_publishable_lake_detail,
     group_contour_items,
     load_contour_results,
 )
+from fishy_pipeline.states.wi.package_verify import load_georef_index, verify_contour_item
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
@@ -63,26 +60,40 @@ def run_package(
     manifest_path: Path,
     hydro_path: Path,
 ) -> dict:
-    ogr = find_tool("ogr2ogr", "OGR2OGR")
-    if not ogr:
-        raise SystemExit("ogr2ogr must be on PATH")
     results = load_contour_results(work_dir)
+    georef_index = load_georef_index(work_dir)
     grouped = group_contour_items(results)
     details: list[dict] = []
     skipped: list[dict] = []
+    publish_items: list[tuple[str, list[dict]]] = []
+    for wbic, items in sorted(grouped.items()):
+            active = [
+                item
+                for item in items
+                if item.get("qa_status") not in {"skipped", "failed"}
+            ]
+            if not active:
+                continue
+            try:
+                for item in active:
+                    map_key = str(item.get("map_key") or "")
+                    publishable, _qa = verify_contour_item(item, georef_index.get((wbic, map_key)))
+                    if not publishable:
+                        raise ValueError(f"lake {wbic} is not publishable")
+            except ValueError as error:
+                message = str(error)
+                if "tampered" in message or "disagrees" in message:
+                    raise
+                skipped.append({"wbic": wbic, "error": message})
+                continue
+            publish_items.append((wbic, items))
+
+    ogr = find_tool("ogr2ogr", "OGR2OGR")
+    if not ogr and publish_items:
+        raise SystemExit("ogr2ogr must be on PATH")
     with tempfile.TemporaryDirectory(prefix="fishy-wi-json-") as raw:
         scratch = Path(raw)
-        for wbic, items in sorted(grouped.items()):
-            if not wbic_ready_for_publish(items):
-                for item in items:
-                    if item.get("qa_status") not in {"skipped", "failed"} and not item.get("publishable"):
-                        try:
-                            refuse_unless_publishable(item)
-                        except ValueError as error:
-                            skipped.append({"wbic": wbic, "error": str(error)})
-                continue
-            for item in items:
-                refuse_unless_publishable(item)
+        for wbic, items in publish_items:
             detail = build_publishable_lake_detail(
                 wbic=wbic,
                 items=items,

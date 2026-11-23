@@ -13,7 +13,7 @@ from fishy_pipeline.common.wi_r2 import (
     generation_lakes_index_key,
 )
 from fishy_pipeline.depth import is_lake_id_for_state, is_wbic
-from fishy_pipeline.states.wi.package import run_fixture
+from fishy_pipeline.states.wi.package import run_fixture, run_package
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = json.loads((ROOT / "fixtures" / "contract.json").read_text(encoding="utf-8"))
@@ -92,6 +92,103 @@ class WiPackageTest(unittest.TestCase):
             upload_wi_artifacts(dest, put_object=record_put)
             self.assertNotIn("wi/v1/gendry/lakes/9999999.json", keys)
             self.assertIn(CURRENT_POINTER_KEY, keys)
+
+    def test_tampered_contours_results_json_refused(self):
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw) / "work"
+            dest = Path(raw) / "dest"
+            lake_dir = work / "contours" / "lakes" / "0417300" / "0417300a"
+            lake_dir.mkdir(parents=True)
+            geo = {
+                "type": "FeatureCollection",
+                "qa_status": "auto",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"depth_ft": 5, "needs_review": False},
+                        "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]},
+                    }
+                ],
+            }
+            geo_path = lake_dir / "contours.geojson"
+            geo_path.write_text(json.dumps(geo), encoding="utf-8")
+            (work / "georef").mkdir(parents=True)
+            (work / "georef" / "results.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "qa_status": "auto",
+                                "iou": 0.55,
+                                "reasons": ["iou_below_threshold"],
+                                "warp_source": "auto",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (work / "contours").mkdir(parents=True, exist_ok=True)
+            (work / "contours" / "results.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "publishable": True,
+                                "qa_status": "auto",
+                                "depths_ft": [5],
+                                "path": str(geo_path),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = work / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "wbic": "0417300",
+                                "map_key": "0417300a",
+                                "name": "Fake",
+                                "county": "Test",
+                                "acres": 100,
+                                "max_depth_ft": 20,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hydro = work / "hydro.geojson"
+            hydro.write_text(
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3071"}},
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {"WATERBODY_WBIC": 417300, "WATERBODY_NAME": "Fake"},
+                                "geometry": {
+                                    "type": "Polygon",
+                                    "coordinates": [[[0, 0], [100, 0], [100, 100], [0, 0]]],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as ctx:
+                run_package(work_dir=work, dest=dest, manifest_path=manifest, hydro_path=hydro)
+            self.assertIn("tampered", str(ctx.exception).lower())
 
     def test_hand_edited_publishable_true_needs_review_refused(self):
         with self.assertRaises(ValueError):
