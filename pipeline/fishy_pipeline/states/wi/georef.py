@@ -34,8 +34,10 @@ from fishy_pipeline.states.wi.hydro import FLOWAGE_HYDROTYPE, HydroWaterbody, lo
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
 from fishy_pipeline.states.wi.register import DEFAULT_GCP_COUNT, register_shoreline
+from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
 from fishy_pipeline.states.wi.raster import select_sheet_pages
-from fishy_pipeline.states.wi.shoreline import extract_shoreline_candidates
+from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
+from fishy_pipeline.states.wi.shoreline import extract_shoreline, extract_shoreline_candidates
 from fishy_pipeline.states.wi.wbic import normalize_wbic
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -385,6 +387,27 @@ def _georeference_entry(
             "iou": None,
         }
 
+    reviewed = load_reviewed_gcps(wbic) if wbic else None
+    if reviewed:
+        reviewed_result = _georeference_reviewed(
+            base,
+            entry=entry,
+            reviewed=reviewed,
+            water=water,
+            work_dir=work_dir,
+            manifest_path=manifest_path,
+            raster=raster,
+            flowage=flowage,
+            shared_sheet=shared_sheet,
+            multi_sheet=multi_sheet,
+            iou_threshold=iou_threshold,
+            gdal_available=gdal_available,
+            hydrotype=hydrotype,
+            waterbody_name=waterbody_name,
+        )
+        if reviewed_result is not None:
+            return reviewed_result
+
     page_rasters = _page_rasters(entry, raster)
     chosen_raster = raster
     registration = None
@@ -432,7 +455,15 @@ def _georeference_entry(
     shore_path = out_dir / "shoreline.geojson"
     _write_json(
         gcp_path,
-        {"crs": WI_CRS, "wbic": wbic, "map_key": map_key, "gcps": gcp_dicts},
+        {
+            "crs": WI_CRS,
+            "wbic": wbic,
+            "map_key": map_key,
+            "gcps": gcp_dicts,
+            "affine": registration.affine.as_dict(),
+            "method": registration.method,
+            "source": "auto",
+        },
     )
     project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
     mapped = [project(col, row) for col, row in shoreline]
@@ -477,6 +508,7 @@ def _georeference_entry(
         "waterbody_name": waterbody_name,
         "multi_sheet": multi_sheet,
         "flowage": flowage,
+        "warp_source": "auto",
         "paths": {
             "gcps": str(gcp_path),
             "shoreline": str(shore_path),
@@ -488,6 +520,144 @@ def _georeference_entry(
             "resample": "near",
             "method": registration.method,
             "page": chosen_raster.name,
+            "crs": WI_CRS,
+            **({"error": warp_error} if warp_error else {}),
+        },
+    }
+
+
+def _georeference_reviewed(
+    base: dict,
+    *,
+    entry: dict,
+    reviewed: dict,
+    water: HydroWaterbody,
+    work_dir: Path,
+    manifest_path: Path,
+    raster: Path,
+    flowage: bool,
+    shared_sheet: bool,
+    multi_sheet: bool,
+    iou_threshold: float,
+    gdal_available: bool,
+    hydrotype: int | None,
+    waterbody_name: str | None,
+) -> dict | None:
+    wbic = base["wbic"]
+    map_key = base["map_key"]
+    raw_gcps = reviewed.get("gcps")
+    if not isinstance(raw_gcps, list) or len(raw_gcps) < 4:
+        return None
+    page_name = reviewed.get("page")
+    chosen: Path | None = None
+    for page in _page_rasters(entry, raster):
+        if page_name is None or page.name == str(page_name):
+            chosen = page
+            break
+    if chosen is None:
+        return None
+    shoreline = extract_shoreline(read_png(chosen))
+    if shoreline is None:
+        return None
+    gcps = [
+        GroundControlPoint(
+            pixel=float(item["pixel"]),
+            line=float(item["line"]),
+            easting=float(item["easting"]),
+            northing=float(item["northing"]),
+        )
+        for item in raw_gcps
+    ]
+    method = str(reviewed.get("method") or "tps")
+    try:
+        registration = registration_from_reviewed(shoreline, list(water.ring), gcps, method=method)
+    except Exception as error:
+        return _unscored(
+            base,
+            reasons=_reasons(
+                flowage=flowage,
+                shared_sheet=shared_sheet,
+                low_iou=False,
+                multi_sheet=multi_sheet,
+                shoreline_found=True,
+                registration_error=True,
+                warp_failed=False,
+            ),
+            hydrotype=hydrotype,
+            waterbody_name=waterbody_name,
+            multi_sheet=multi_sheet,
+            flowage=flowage,
+            error=str(error)[:500],
+        )
+    gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
+    iou = round(registration.iou, 6)
+    affine_iou = round(registration.affine_iou, 6)
+    tps_iou = round(registration.tps_iou, 6)
+    low_iou = registration.iou < iou_threshold
+    out_dir = work_dir / "georef" / "lakes" / wbic / map_key
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gcp_path = out_dir / "gcps.json"
+    shore_path = out_dir / "shoreline.geojson"
+    _write_json(
+        gcp_path,
+        {
+            "crs": WI_CRS,
+            "wbic": wbic,
+            "map_key": map_key,
+            "gcps": gcp_dicts,
+            "affine": registration.affine.as_dict(),
+            "method": registration.method,
+            "source": "reviewed",
+        },
+    )
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, row) for col, row in shoreline]
+    _write_json(
+        shore_path,
+        _shoreline_collection(mapped, {"wbic": wbic, "map_key": map_key, "iou": iou}),
+    )
+    warp_status, warped_path, warp_error = _warp(
+        raster=chosen,
+        out_dir=out_dir,
+        gcps=gcp_dicts,
+        gdal_available=gdal_available,
+        method=registration.method,
+        affine=registration.affine.as_dict(),
+    )
+    reasons = _reasons(
+        flowage=flowage,
+        shared_sheet=shared_sheet,
+        low_iou=low_iou,
+        multi_sheet=multi_sheet,
+        shoreline_found=True,
+        registration_error=False,
+        warp_failed=warp_status == "failed",
+    )
+    return {
+        **base,
+        "qa_status": "needs_review" if reasons else "auto",
+        "iou": iou,
+        "affine_iou": affine_iou,
+        "tps_iou": tps_iou,
+        "reasons": reasons,
+        "affine": registration.affine.as_dict(),
+        "gcp_count": len(gcp_dicts),
+        "hydrotype": hydrotype,
+        "waterbody_name": waterbody_name,
+        "multi_sheet": multi_sheet,
+        "flowage": flowage,
+        "warp_source": "reviewed",
+        "paths": {
+            "gcps": str(gcp_path),
+            "shoreline": str(shore_path),
+            "warped": str(warped_path) if warped_path else None,
+        },
+        "warp": {
+            "tool": "gdal_translate" if registration.method == "affine" else "gdalwarp",
+            "status": warp_status,
+            "resample": "near",
+            "method": registration.method,
+            "page": chosen.name,
             "crs": WI_CRS,
             **({"error": warp_error} if warp_error else {}),
         },

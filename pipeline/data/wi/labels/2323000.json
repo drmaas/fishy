@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "wbic": "2323000",
+  "map_key": "2323000a",
+  "page": "2323000a-p0.png",
+  "unit": "ft",
+  "labels": [
+    {
+      "pixel": [
+        1559.5,
+        803.5
+      ],
+      "value": 10,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2043.5,
+        1621.5
+      ],
+      "value": 20,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1833.5,
+        1751.5
+      ],
+      "value": 30,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1111.5,
+        1899.5
+      ],
+      "value": 40,
+      "confidence": 0.9
+    }
+  ]
+}

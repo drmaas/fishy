@@ -244,6 +244,36 @@ def register_shoreline(
     )
 
 
+def registration_from_reviewed(
+    pixel_ring: list[tuple[float, float]],
+    hydro_ring: list[tuple[float, float]],
+    gcps: list[GroundControlPoint],
+    *,
+    method: str = "tps",
+) -> Registration:
+    """Score a shoreline using human-placed control points."""
+    if len(gcps) < 3:
+        raise ValueError("reviewed registration needs at least 3 GCPs")
+    sources = [(gcp.pixel, gcp.line) for gcp in gcps]
+    targets = [(gcp.easting, gcp.northing) for gcp in gcps]
+    affine = fit_affine(sources, targets)
+    tps = fit_tps(gcps)
+    affine_ring = [affine.apply(col, row) for col, row in pixel_ring]
+    tps_ring = [tps.apply(col, row) for col, row in pixel_ring]
+    hydro_list = list(hydro_ring)
+    affine_iou = polygon_iou(affine_ring, hydro_list)
+    tps_iou = polygon_iou(tps_ring, hydro_list)
+    chosen = "affine" if method == "affine" else "tps"
+    return Registration(
+        affine=affine,
+        tps=tps,
+        gcps=tuple(gcps),
+        affine_iou=affine_iou,
+        tps_iou=tps_iou,
+        method=chosen,
+    )
+
+
 def fit_tps(gcps: list[GroundControlPoint]) -> ThinPlateSpline:
     """Solve a 2D thin-plate spline. Kernel is ``r^2 log r``, matching GDAL."""
     count = len(gcps)

@@ -3,16 +3,17 @@
 Trace Wisconsin depth contours and tag them with positive depth_ft.
 
 Reads ``georef/results.json`` and the 24K Hydro polygon (island rings included).
-Each warped sheet is clipped to that polygon, depth labels are read with
-EasyOCR, the label ink is inpainted, and the remaining strokes are skeletonized
-and traced. Depths snap to those labels and then step inward from the 0
-shoreline by ``interval_ft``, staying inside ``max_depth_ft``. Ambiguous rings
-are marked ``needs_review``.
+Each warped sheet is clipped to that polygon. Depth labels come from committed
+``pipeline/data/wi/labels/<wbic>.json`` when present; EasyOCR runs only with
+``--ocr-fallback``. Label ink is inpainted, strokes are skeletonized and traced.
+Depths snap to labels and step inward from the 0 shoreline by ``interval_ft``,
+staying inside ``max_depth_ft``. A lake publishes only when shoreline IoU is at
+least 0.90 and traced depths match the recorded labels; everything else is
+``needs_review`` and is not published.
 
 Per-lake GeoJSON is written under ``contours/lakes/<wbic>/<map_key>/contours.geojson``.
-Rasters stay in the work directory and are not part of the git tree. The OCR
-engine is EasyOCR. OpenCV, scikit-image, EasyOCR, and the GDAL bindings are
-imported only when a real sheet is traced.
+OpenCV, scikit-image, EasyOCR, and the GDAL bindings are imported only when a
+real sheet is traced.
 """
 
 from __future__ import annotations
@@ -32,9 +33,10 @@ from fishy_pipeline.states.wi.depth_tag import (
     cutline_collection,
     features_to_geojson,
 )
-from fishy_pipeline.states.wi.georef import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.hydro import HydroGeometry, HydroPart, load_hydro_geometries
 from fishy_pipeline.states.wi.manifest import read_manifest
+from fishy_pipeline.states.wi.pilot_data import load_recorded_labels
+from fishy_pipeline.states.wi.publish import publish_gate
 from fishy_pipeline.states.wi.trace import clip_raster, trace_sheet
 from fishy_pipeline.states.wi.wbic import normalize_wbic
 
@@ -55,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write a synthetic pond GeoJSON (no raster, no OCR, no DNR extract)",
     )
+    parser.add_argument(
+        "--ocr-fallback",
+        action="store_true",
+        help="use EasyOCR when recorded labels are absent or projected off the clip",
+    )
+    parser.add_argument(
+        "--compare-ocr",
+        action="store_true",
+        help="also trace with EasyOCR-only labels and report depths_ft_ocr",
+    )
     return parser
 
 
@@ -65,6 +77,8 @@ def run_contours(
     work_dir: Path,
     wbic: str | None = None,
     map_key: str | None = None,
+    ocr_fallback: bool = False,
+    compare_ocr: bool = False,
 ) -> dict:
     """Trace every georeferenced sheet that has a warped raster."""
     manifest = read_manifest(manifest_path)
@@ -98,9 +112,17 @@ def run_contours(
                 entry=by_entry.get((item_wbic, item_key)),
                 geometry=geometries.get(item_wbic),
                 work_dir=work_dir,
+                ocr_fallback=ocr_fallback,
+                compare_ocr=compare_ocr,
             )
         )
-    body = {"version": 1, "state": "wi", "crs": WI_CRS, "ocr": "easyocr", "items": traced}
+    body = {
+        "version": 1,
+        "state": "wi",
+        "crs": WI_CRS,
+        "label_source": "recorded",
+        "items": traced,
+    }
     _write_json(work_dir / "contours" / "results.json", body)
     return body
 
@@ -138,7 +160,7 @@ def run_fixture(work_dir: Path) -> dict:
         "version": 1,
         "state": "wi",
         "crs": WI_CRS,
-        "ocr": "easyocr",
+        "label_source": "fixture",
         "items": [
             {
                 "wbic": "0000101",
@@ -158,7 +180,15 @@ def run_fixture(work_dir: Path) -> dict:
     return body
 
 
-def _trace_item(item: dict, *, entry: dict | None, geometry: HydroGeometry | None, work_dir: Path) -> dict:
+def _trace_item(
+    item: dict,
+    *,
+    entry: dict | None,
+    geometry: HydroGeometry | None,
+    work_dir: Path,
+    ocr_fallback: bool,
+    compare_ocr: bool,
+) -> dict:
     wbic = normalize_wbic(item.get("wbic")) or str(item.get("wbic") or "")
     map_key = str(item.get("map_key") or "")
     base = {
@@ -178,7 +208,17 @@ def _trace_item(item: dict, *, entry: dict | None, geometry: HydroGeometry | Non
         return {**base, "qa_status": "skipped", "skip_reason": "hydro_geometry_missing", "reasons": []}
     out_dir = work_dir / "contours" / "lakes" / wbic / map_key
     try:
-        return _trace_sheet(base, entry=entry, geometry=geometry, warped=Path(str(warped)), out_dir=out_dir)
+        return _trace_sheet(
+            base,
+            entry=entry,
+            geometry=geometry,
+            warped=Path(str(warped)),
+            out_dir=out_dir,
+            work_dir=work_dir,
+            gcp_path=(item.get("paths") or {}).get("gcps"),
+            ocr_fallback=ocr_fallback,
+            compare_ocr=compare_ocr,
+        )
     except Exception as error:
         return {
             **base,
@@ -189,16 +229,66 @@ def _trace_item(item: dict, *, entry: dict | None, geometry: HydroGeometry | Non
         }
 
 
-def _trace_sheet(base: dict, *, entry: dict | None, geometry: HydroGeometry, warped: Path, out_dir: Path) -> dict:
+def _trace_sheet(
+    base: dict,
+    *,
+    entry: dict | None,
+    geometry: HydroGeometry,
+    warped: Path,
+    out_dir: Path,
+    work_dir: Path,
+    gcp_path: str | None,
+    ocr_fallback: bool,
+    compare_ocr: bool,
+) -> dict:
     parts = [_water_part(part) for part in geometry.parts]
     out_dir.mkdir(parents=True, exist_ok=True)
     cutline_path = out_dir / "cutline.geojson"
     clipped_path = out_dir / "clipped.tif"
     _write_json(cutline_path, cutline_collection(parts))
     clip_raster(warped, clipped_path, cutline_path)
-    traced = trace_sheet(clipped_path, out_dir)
+    sheet_gcp = Path(str(gcp_path)) if gcp_path else None
+    if sheet_gcp is not None and not sheet_gcp.is_file():
+        sheet_gcp = None
+    wbic = str(base["wbic"])
+    traced = trace_sheet(
+        clipped_path,
+        out_dir,
+        wbic=wbic,
+        sheet_gcp_path=sheet_gcp,
+        ocr_fallback=ocr_fallback,
+    )
     max_depth = _max_depth(entry)
     assign_max = max_depth * 0.3048 if traced.unit == "m" and max_depth is not None else max_depth
+    depths_ocr: list[int] | None = None
+    if compare_ocr and ocr_fallback:
+        traced_ocr = trace_sheet(
+            clipped_path,
+            out_dir / "ocr-compare",
+            wbic=None,
+            sheet_gcp_path=None,
+            ocr_fallback=True,
+        )
+        ocr_max = max_depth * 0.3048 if traced_ocr.unit == "m" and max_depth is not None else max_depth
+        assignment_ocr = assign_depths(
+            [Line(coords=line.coords, closed=line.closed) for line in traced_ocr.lines],
+            [
+                Label(x=label.x, y=label.y, depth_ft=label.depth_ft, confidence=label.confidence)
+                for label in traced_ocr.labels
+            ],
+            parts,
+            max_depth_ft=ocr_max,
+            snap_m=traced_ocr.snap_m,
+        )
+        if traced_ocr.unit == "m":
+            assignment_ocr = assignment_to_feet(assignment_ocr)
+        depths_ocr = sorted(
+            {
+                int(feature.depth_ft)
+                for feature in assignment_ocr.features
+                if feature.depth_ft is not None and feature.source != "hydro"
+            }
+        )
     assignment = assign_depths(
         [Line(coords=line.coords, closed=line.closed) for line in traced.lines],
         [Label(x=label.x, y=label.y, depth_ft=label.depth_ft, confidence=label.confidence) for label in traced.labels],
@@ -208,17 +298,20 @@ def _trace_sheet(base: dict, *, entry: dict | None, geometry: HydroGeometry, war
     )
     if traced.unit == "m":
         assignment = assignment_to_feet(assignment)
-    reasons = list(assignment.reasons)
-    iou = base.get("iou")
-    if isinstance(iou, (int, float)) and iou < DEFAULT_IOU_THRESHOLD:
-        reasons.append("georef_iou_below_threshold")
-    elif iou is None:
-        reasons.append("georef_unscored")
     emitted = [line for line in assignment.features if line.depth_ft is not None and line.source != "hydro"]
+    depths = sorted({int(feature.depth_ft) for feature in assignment.features if feature.depth_ft is not None})
+    iou = base.get("iou")
+    publishable, qa_status, gate_reasons = publish_gate(
+        wbic=wbic,
+        iou=iou if isinstance(iou, (int, float)) else None,
+        depths_ft=[depth for depth in depths if depth != 0],
+    )
+    reasons = list(dict.fromkeys(list(assignment.reasons) + gate_reasons))
     if not emitted:
         reasons.append("no_contour_lines")
     review = any(line.needs_review for line in assignment.features if line.depth_ft is not None)
-    qa_status = "needs_review" if review or reasons else "auto"
+    if review or not publishable:
+        qa_status = "needs_review"
     collection = features_to_geojson(
         assignment.features,
         wbic=str(base["wbic"]),
@@ -228,24 +321,27 @@ def _trace_sheet(base: dict, *, entry: dict | None, geometry: HydroGeometry, war
     )
     geojson_path = out_dir / "contours.geojson"
     _write_json(geojson_path, collection)
-    depths = sorted({int(feature["properties"]["depth_ft"]) for feature in collection["features"]})
     summary = {
         **base,
         "qa_status": qa_status,
+        "publishable": publishable,
         "interval_ft": assignment.interval_ft,
         "max_depth_ft": max_depth,
         "depths_ft": depths,
+        "depths_ft_ocr": depths_ocr,
+        "recorded_labels": load_recorded_labels(wbic) is not None,
+        "label_source": "recorded" if load_recorded_labels(wbic) else ("ocr" if ocr_fallback else "none"),
         "contour_count": len(emitted),
         "label_count": len(traced.labels),
         "needs_review_count": sum(1 for line in emitted if line.needs_review),
         "unassigned_count": assignment.unassigned_count,
-        "reasons": list(dict.fromkeys(reasons)),
+        "reasons": reasons,
         "pixel_size_m": round(traced.pixel_size_m, 4),
         "snap_m": round(traced.snap_m, 2),
         "path": str(geojson_path),
     }
     print(
-        f"{base['wbic']} {base['map_key']} {qa_status} iou={iou} interval={assignment.interval_ft} depths={depths}",
+        f"{base['wbic']} {base['map_key']} {qa_status} publishable={publishable} iou={iou} interval={assignment.interval_ft} depths={depths}",
         flush=True,
     )
     return summary
@@ -302,6 +398,8 @@ def main(argv: list[str] | None = None) -> None:
             work_dir=work_dir,
             wbic=args.wbic,
             map_key=args.map_key,
+            ocr_fallback=args.ocr_fallback,
+            compare_ocr=args.compare_ocr,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error

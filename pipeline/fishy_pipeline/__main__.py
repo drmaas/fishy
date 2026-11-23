@@ -9,10 +9,11 @@ import sys
 from fishy_pipeline.common import build as common_build
 from fishy_pipeline.common import upload as common_upload
 from fishy_pipeline.states.wi import contours as wi_contours
+from fishy_pipeline.states.wi import gcp_review as wi_gcp_review
 from fishy_pipeline.states.wi import georef as wi_georef
 from fishy_pipeline.states.wi import ingest as wi_ingest
 
-WI_COMMANDS = frozenset({"ingest", "georef", "contours"})
+WI_COMMANDS = frozenset({"ingest", "georef", "contours", "gcp-review"})
 SHARED_COMMANDS = frozenset({"build", "upload"})
 
 
@@ -35,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("ingest", help="(wi) Ingest DNR PDF bathymetry maps")
     sub.add_parser("georef", help="(wi) Georeference ingested map images")
-    sub.add_parser("contours", help="(wi) Vectorize contours and tile for R2")
+    sub.add_parser("contours", help="(wi) Vectorize contours and tag depth_ft")
+    sub.add_parser("gcp-review", help="(wi) Local GCP review UI (localhost only)")
     return parser
 
 
@@ -75,6 +77,9 @@ def dispatch(argv: list[str]) -> None:
         return
     if command == "contours":
         wi_contours.main(extra)
+        return
+    if command == "gcp-review":
+        wi_gcp_review.main(extra)
         return
 
 

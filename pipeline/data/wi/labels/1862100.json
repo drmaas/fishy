@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "wbic": "1862100",
+  "map_key": "1862100a",
+  "page": "1862100a-p0.png",
+  "unit": "m",
+  "labels": [
+    {
+      "pixel": [
+        1369.5,
+        1283.5
+      ],
+      "value": 1,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1551.5,
+        1285.5
+      ],
+      "value": 2,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1733.5,
+        1287.5
+      ],
+      "value": 3,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1915.5,
+        1289.5
+      ],
+      "value": 4,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2097.5,
+        1291.5
+      ],
+      "value": 5,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1999.5,
+        1413.5
+      ],
+      "value": 6,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1817.5,
+        1427.5
+      ],
+      "value": 7,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1635.5,
+        1435.5
+      ],
+      "value": 8,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1461.5,
+        1425.5
+      ],
+      "value": 9,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1367.5,
+        1341.5
+      ],
+      "value": 10,
+      "confidence": 0.9
+    }
+  ]
+}

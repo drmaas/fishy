@@ -10,6 +10,7 @@ stdlib pieces and never import those libraries.
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -364,11 +365,54 @@ def clip_raster(source: Path, dest: Path, cutline: Path) -> None:
     _run(gdalwarp_clip_args(str(source), str(dest), str(cutline)))
 
 
-def trace_sheet(raster_path: Path, work_dir: Path) -> TracedSheet:
-    """OCR labels, inpaint them, skeletonize, and trace lines in map coordinates."""
+def trace_sheet(
+    raster_path: Path,
+    work_dir: Path,
+    *,
+    wbic: str | None = None,
+    sheet_gcp_path: Path | None = None,
+    ocr_fallback: bool = False,
+) -> TracedSheet:
+    """Inpaint recorded labels when present, optionally OCR, then trace lines in map coordinates."""
     prepared = _cap_raster(raster_path, work_dir / "trace-raster.tif")
     rgb, alpha, transform, width, height = read_geotiff(prepared)
-    labels_px, boxes, texts = _ocr_labels(rgb, width, height)
+    labels_px: list[tuple[float, float, float, float]] = []
+    boxes: list[tuple[int, int, int, int]] = []
+    texts: list[str] = []
+    unit = "ft"
+    if wbic and sheet_gcp_path and sheet_gcp_path.is_file():
+        from fishy_pipeline.states.wi.recorded_labels import labels_for_trace, load_gcps_from_work
+
+        body = json.loads(sheet_gcp_path.read_text(encoding="utf-8"))
+        gcps, _default_method, _affine_dict = load_gcps_from_work(sheet_gcp_path)
+        method = str(body.get("method") or _default_method)
+        affine = None
+        if isinstance(body.get("affine"), dict):
+            from fishy_pipeline.states.wi.register import Affine
+
+            aff = body["affine"]
+            affine = Affine(
+                a=float(aff["a"]),
+                b=float(aff["b"]),
+                tx=float(aff["tx"]),
+                c=float(aff["c"]),
+                d=float(aff["d"]),
+                ty=float(aff["ty"]),
+            )
+        labels_px, boxes, texts, unit = labels_for_trace(
+            wbic,
+            gcps=gcps,
+            method=method,
+            affine=affine,
+            geotransform=transform,
+            clipped_width=width,
+            clipped_height=height,
+        )
+    if not labels_px and ocr_fallback:
+        labels_px, boxes, texts = _ocr_labels(rgb, width, height)
+        from fishy_pipeline.states.wi.depth_tag import sheet_depth_unit
+
+        unit = sheet_depth_unit(texts)
     repaired = _inpaint(rgb, width, height, boxes)
     mask = ink_mask(repaired, width, height, alpha)
     mask = bridge_label_gaps(mask, width, height, boxes)
@@ -385,14 +429,19 @@ def trace_sheet(raster_path: Path, work_dir: Path) -> TracedSheet:
         easting, northing = _pixel_to_map(col, row, transform)
         labels.append(TracedLabel(x=easting, y=northing, depth_ft=depth, confidence=confidence))
     pixel_size = math.hypot(transform[1], transform[5])
-    from fishy_pipeline.states.wi.depth_tag import sheet_depth_unit
+    if wbic and labels_px:
+        from fishy_pipeline.states.wi.pilot_data import label_file_unit, load_recorded_labels
+
+        recorded = load_recorded_labels(wbic)
+        if recorded is not None:
+            unit = label_file_unit(recorded)
 
     return TracedSheet(
         lines=tuple(lines),
         labels=tuple(labels),
         pixel_size_m=pixel_size,
         snap_m=max(12.0, SNAP_PX * pixel_size),
-        unit=sheet_depth_unit(texts),
+        unit=unit,
     )
 
 
