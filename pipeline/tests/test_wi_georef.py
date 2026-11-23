@@ -350,6 +350,40 @@ class ShorelineTest(unittest.TestCase):
         self.assertLess(min(ys), 40)
         self.assertGreater(max(ys), 95)
 
+    def test_long_road_enclosure_is_not_the_outer_shore_candidate(self):
+        width, height = 220, 180
+        rgb = bytearray([255]) * (width * height * 3)
+        road = [(20, 70), (200, 70), (200, 82), (20, 82), (20, 70)]
+        lake = [(70, 50), (150, 44), (165, 100), (120, 125), (60, 110), (55, 75)]
+        _ink_polyline(rgb, width, road, close=True)
+        _ink_polyline(rgb, width, lake, close=True)
+        for cx, cy in ((95, 70), (115, 88), (90, 98)):
+            index = (cy * width + cx) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        rings = extract_shoreline_candidates(image)
+        self.assertGreaterEqual(len(rings), 1)
+        self.assertLess(_ring_centroid_distance(rings[0], lake), 35.0)
+
+    def test_dual_disconnected_basins_both_surface_as_figures(self):
+        width, height = 200, 120
+        rgb = bytearray([255]) * (width * height * 3)
+        left = [(25, 30), (70, 25), (80, 70), (30, 75)]
+        right = [(115, 35), (165, 32), (170, 78), (120, 82)]
+        _ink_polyline(rgb, width, left, close=True)
+        _ink_polyline(rgb, width, right, close=True)
+        figures = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        centroids = [
+            (
+                sum(point[0] for point in figure.ring) / len(figure.ring),
+                sum(point[1] for point in figure.ring) / len(figure.ring),
+            )
+            for figure in figures
+        ]
+        self.assertGreaterEqual(len(centroids), 2)
+        gap = abs(centroids[0][0] - centroids[1][0])
+        self.assertGreater(gap, 35.0)
+
     def test_shore_that_hits_the_page_edge_is_marked(self):
         width, height = 120, 100
         rgb = bytearray([255]) * (width * height * 3)
@@ -748,6 +782,63 @@ def _sheet(iou: float, cut: float, name: str, ring: list[tuple[float, float]] | 
         "ring": ring if ring is not None else [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
     }
     return sheet
+
+
+def _ring_centroid_distance(
+    ring: list[tuple[float, float]],
+    target: list[tuple[int, int]],
+) -> float:
+    cx = sum(point[0] for point in ring) / len(ring)
+    cy = sum(point[1] for point in ring) / len(ring)
+    tx = sum(point[0] for point in target) / len(target)
+    ty = sum(point[1] for point in target) / len(target)
+    return math.hypot(cx - tx, cy - ty)
+
+
+class StitchedGateTest(unittest.TestCase):
+    def test_stitched_partial_pages_use_combined_iou(self):
+        sheets = [
+            _sheet(0.72, 0.0, "p0.png"),
+            _sheet(0.50, 0.12, "p1.png"),
+        ]
+        combined = 0.91
+        self.assertTrue(georef._use_stitched_gate(sheets, [Path("p0.png"), Path("p1.png")], combined, 0.85))
+
+    def test_figure_quality_prefers_bathymetry_ink_on_near_ties(self):
+        high_ink = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.58,
+            tps_iou=0.58,
+            method="affine",
+        ), "ink": 0.18, "area": 10}
+        low_ink = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.62,
+            tps_iou=0.62,
+            method="affine",
+        ), "ink": 0.004, "area": 10}
+        self.assertTrue(georef._prefer_sheet(high_ink, low_ink))
+        strong = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.91,
+            tps_iou=0.91,
+            method="affine",
+        ), "ink": 0.004, "area": 10}
+        weak = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.62,
+            tps_iou=0.62,
+            method="affine",
+        ), "ink": 0.22, "area": 10}
+        self.assertTrue(georef._prefer_sheet(strong, weak))
 
 
 class FailClosedGateTest(unittest.TestCase):
