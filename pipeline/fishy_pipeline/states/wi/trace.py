@@ -47,7 +47,7 @@ class TracedLine:
 class TracedLabel:
     x: float
     y: float
-    depth_ft: int
+    depth_ft: float
     confidence: float
 
 
@@ -57,6 +57,7 @@ class TracedSheet:
     labels: tuple[TracedLabel, ...]
     pixel_size_m: float
     snap_m: float
+    unit: str = "ft"
 
 
 def gdal_tools_available() -> bool:
@@ -305,6 +306,44 @@ def simplify(path: list[tuple[float, float]], epsilon: float) -> list[tuple[floa
     return [path[index] for index in sorted(keep)]
 
 
+def bridge_label_gaps(
+    mask: bytearray,
+    width: int,
+    height: int,
+    boxes: list[tuple[int, int, int, int]],
+) -> bytearray:
+    """Reconnect a contour whose label was inpainted out.
+
+    A depth number sits on the line. After the glyphs are removed, the stroke
+    has two ink clusters on the box edge. Draw the short segment between them.
+    More than two clusters is ambiguous and is left alone.
+    """
+    if not boxes:
+        return mask
+    out = bytearray(mask)
+    for x0, y0, x1, y1 in boxes:
+        left = max(0, x0)
+        top = max(0, y0)
+        right = min(width, x1)
+        bottom = min(height, y1)
+        if right - left < 2 or bottom - top < 2:
+            continue
+        seeds: list[tuple[int, int]] = []
+        for y in range(max(0, top - 3), min(height, bottom + 3)):
+            row = y * width
+            for x in range(max(0, left - 3), min(width, right + 3)):
+                if left <= x < right and top <= y < bottom:
+                    continue
+                if out[row + x]:
+                    seeds.append((x, y))
+        clusters = _cluster_seeds(seeds)
+        if len(clusters) != 2:
+            continue
+        start, end = _closest_seeds(clusters[0], clusters[1])
+        _stamp_line(out, width, height, start, end)
+    return out
+
+
 def close_gap(path: list[tuple[int, int]], gap_px: float = CLOSE_GAP_PX) -> tuple[list[tuple[int, int]], bool]:
     if len(path) < 4:
         return path, False
@@ -329,9 +368,10 @@ def trace_sheet(raster_path: Path, work_dir: Path) -> TracedSheet:
     """OCR labels, inpaint them, skeletonize, and trace lines in map coordinates."""
     prepared = _cap_raster(raster_path, work_dir / "trace-raster.tif")
     rgb, alpha, transform, width, height = read_geotiff(prepared)
-    labels_px, boxes = _ocr_labels(rgb, width, height)
+    labels_px, boxes, texts = _ocr_labels(rgb, width, height)
     repaired = _inpaint(rgb, width, height, boxes)
     mask = ink_mask(repaired, width, height, alpha)
+    mask = bridge_label_gaps(mask, width, height, boxes)
     mask = _close_mask(mask, width, height)
     mask = filter_small_components(mask, width, height)
     points = prune_spurs(skeleton_points(mask, width, height), SPUR_PX)
@@ -345,11 +385,14 @@ def trace_sheet(raster_path: Path, work_dir: Path) -> TracedSheet:
         easting, northing = _pixel_to_map(col, row, transform)
         labels.append(TracedLabel(x=easting, y=northing, depth_ft=depth, confidence=confidence))
     pixel_size = math.hypot(transform[1], transform[5])
+    from fishy_pipeline.states.wi.depth_tag import sheet_depth_unit
+
     return TracedSheet(
         lines=tuple(lines),
         labels=tuple(labels),
         pixel_size_m=pixel_size,
         snap_m=max(12.0, SNAP_PX * pixel_size),
+        unit=sheet_depth_unit(texts),
     )
 
 
@@ -435,8 +478,10 @@ def _cap_raster(source: Path, dest: Path) -> Path:
     return dest
 
 
-def _ocr_labels(rgb: bytes, width: int, height: int) -> tuple[list[tuple[float, float, int, float]], list[tuple[int, int, int, int]]]:
-    from fishy_pipeline.states.wi.depth_tag import parse_depth_text
+def _ocr_labels(
+    rgb: bytes, width: int, height: int
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[int, int, int, int]], list[str]]:
+    from fishy_pipeline.states.wi.depth_tag import parse_depth_token
 
     try:
         import numpy as np
@@ -445,9 +490,11 @@ def _ocr_labels(rgb: bytes, width: int, height: int) -> tuple[list[tuple[float, 
     reader = _reader()
     image = np.frombuffer(rgb, dtype=np.uint8).reshape(height, width, 3).copy()
     raw = reader.readtext(image)
-    labels: list[tuple[float, float, int, float]] = []
+    labels: list[tuple[float, float, float, float]] = []
     boxes: list[tuple[int, int, int, int]] = []
+    texts: list[str] = []
     for box, text, confidence in raw:
+        texts.append(str(text))
         xs = [float(point[0]) for point in box]
         ys = [float(point[1]) for point in box]
         x0 = int(math.floor(min(xs))) - 2
@@ -457,11 +504,11 @@ def _ocr_labels(rgb: bytes, width: int, height: int) -> tuple[list[tuple[float, 
         if x1 - x0 < 4 or y1 - y0 < 4:
             continue
         boxes.append((x0, y0, x1, y1))
-        depth = parse_depth_text(str(text))
-        if depth is None or float(confidence) < OCR_MIN_CONFIDENCE:
+        parsed = parse_depth_token(str(text))
+        if parsed is None or float(confidence) < OCR_MIN_CONFIDENCE:
             continue
-        labels.append((sum(xs) / len(xs), sum(ys) / len(ys), depth, float(confidence)))
-    return labels, boxes
+        labels.append((sum(xs) / len(xs), sum(ys) / len(ys), parsed[0], float(confidence)))
+    return labels, boxes, texts
 
 
 def _reader():
@@ -598,6 +645,59 @@ def _pixel_to_map(col: float, row: float, transform: tuple[float, ...]) -> tuple
     x = transform[0] + col * transform[1] + row * transform[2]
     y = transform[3] + col * transform[4] + row * transform[5]
     return x, y
+
+
+def _cluster_seeds(seeds: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+    remaining = set(seeds)
+    clusters: list[list[tuple[int, int]]] = []
+    while remaining:
+        start = remaining.pop()
+        cluster = [start]
+        stack = [start]
+        while stack:
+            x, y = stack.pop()
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nxt = (x + dx, y + dy)
+                    if nxt in remaining:
+                        remaining.remove(nxt)
+                        cluster.append(nxt)
+                        stack.append(nxt)
+        clusters.append(cluster)
+    return clusters
+
+
+def _closest_seeds(
+    left: list[tuple[int, int]], right: list[tuple[int, int]]
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    best = (left[0], right[0])
+    best_d = math.inf
+    for a in left:
+        for b in right:
+            dist = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+            if dist < best_d:
+                best_d = dist
+                best = (a, b)
+    return best
+
+
+def _stamp_line(
+    mask: bytearray,
+    width: int,
+    height: int,
+    start: tuple[int, int],
+    end: tuple[int, int],
+) -> None:
+    x0, y0 = start
+    x1, y1 = end
+    steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+    for step in range(steps + 1):
+        x = int(round(x0 + (x1 - x0) * step / steps))
+        y = int(round(y0 + (y1 - y0) * step / steps))
+        if 0 <= x < width and 0 <= y < height:
+            mask[y * width + x] = 1
 
 
 def _edge(a: tuple[int, int], b: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:

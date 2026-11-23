@@ -3,13 +3,14 @@
 
 Initialization is a bounding-box scale plus four orientations (and a mirrored
 copy). Refinement is affine point registration: arc-length phase search and
-iterative closest points. The winning affine places a small set of ground
-control points. A thin-plate spline through those points is what ``gdalwarp
--tps`` applies to the raster.
+iterative closest points. The affine is the candidate with the best polygon
+overlap, not the lowest nearest-point residual. A low residual can sit on the
+wrong phase of a lobed shore.
 
-The reported IoU is the lower of the affine overlap and the TPS overlap. The
-spline may bend a shoreline toward the hydro ring, and the affine score keeps
-a mismatched waterbody below the review threshold.
+Ground control points stay on that affine unless the nearest hydro vertex is
+close. A thin-plate spline through those points is used only when it does not
+pull the shore farther than the affine residual. Otherwise the warp is the
+affine itself. The reported IoU is the overlap of the warp that is applied.
 """
 
 from __future__ import annotations
@@ -93,10 +94,13 @@ class Registration:
     gcps: tuple[GroundControlPoint, ...]
     affine_iou: float
     tps_iou: float
+    method: str = "tps"
 
     @property
     def iou(self) -> float:
-        return min(self.affine_iou, self.tps_iou)
+        if self.method == "affine":
+            return self.affine_iou
+        return self.tps_iou
 
 
 def signed_area(ring: list[tuple[float, float]]) -> float:
@@ -215,17 +219,28 @@ def register_shoreline(
     source = resample_closed(ensure_orientation(pixel_ring), _SAMPLE_COUNT)
     hydro = resample_closed(ensure_orientation(list(hydro_ring)), _DENSE_COUNT)
     affine = _best_affine(source, hydro)
-    gcps = _control_points(pixel_ring, hydro, affine, gcp_count)
+    affine_error = _nn_rms(source, hydro, affine)
+    gcps = _control_points(pixel_ring, hydro, affine, gcp_count, snap_limit=max(affine_error * 3.0, 1.0))
     tps = fit_tps(gcps)
     affine_ring = [affine.apply(col, row) for col, row in pixel_ring]
     tps_ring = [tps.apply(col, row) for col, row in pixel_ring]
     hydro_list = list(hydro_ring)
+    affine_iou = polygon_iou(affine_ring, hydro_list)
+    tps_iou = polygon_iou(tps_ring, hydro_list)
+    shift = _model_shift(source, affine, tps)
+    # A spline that walks across the lake raises overlap on paper and shears the
+    # raster. Keep it only when it stays near the affine and does not lose overlap.
+    if tps_iou + 1e-9 < affine_iou or shift > max(affine_error, 1e-6) * 2.5:
+        method = "affine"
+    else:
+        method = "tps"
     return Registration(
         affine=affine,
         tps=tps,
         gcps=tuple(gcps),
-        affine_iou=polygon_iou(affine_ring, hydro_list),
-        tps_iou=polygon_iou(tps_ring, hydro_list),
+        affine_iou=affine_iou,
+        tps_iou=tps_iou,
+        method=method,
     )
 
 
@@ -279,13 +294,39 @@ def _best_affine(
     for candidate in candidates:
         refined.append(_icp(phase_source, hydro_dense, candidate))
     best = refined[0]
-    best_error = _nn_rms(phase_source, hydro_dense, best)
+    best_key = _affine_rank(best, phase_source, phase_target, hydro_dense)
     for candidate in refined[1:]:
-        error = _nn_rms(phase_source, hydro_dense, candidate)
-        if error < best_error:
+        key = _affine_rank(candidate, phase_source, phase_target, hydro_dense)
+        if key > best_key:
             best = candidate
-            best_error = error
+            best_key = key
     return best
+
+
+def _affine_rank(
+    affine: Affine,
+    source: list[tuple[float, float]],
+    target: list[tuple[float, float]],
+    hydro_dense: list[tuple[float, float]],
+) -> tuple[float, float]:
+    """Higher polygon overlap wins. Residual breaks a tie."""
+    mapped = [affine.apply(x, y) for x, y in source]
+    overlap = polygon_iou(mapped, target, grid=96)
+    return (overlap, -_nn_rms(source, hydro_dense, affine))
+
+
+def _model_shift(
+    source: list[tuple[float, float]],
+    affine: Affine,
+    tps: ThinPlateSpline,
+) -> float:
+    """RMS distance between the affine image of the shore and the spline image."""
+    error = 0.0
+    for x, y in source:
+        ax, ay = affine.apply(x, y)
+        tx, ty = tps.apply(x, y)
+        error += (ax - tx) ** 2 + (ay - ty) ** 2
+    return math.sqrt(error / len(source))
 
 
 def _bbox_orientation_affines(
@@ -401,11 +442,15 @@ def _control_points(
     hydro_dense: list[tuple[float, float]],
     affine: Affine,
     gcp_count: int,
+    snap_limit: float | None = None,
 ) -> list[GroundControlPoint]:
     samples = resample_closed(pixel_ring, gcp_count)
     gcps: list[GroundControlPoint] = []
     for col, row in samples:
-        easting, northing = _nearest(affine.apply(col, row), hydro_dense)
+        easting, northing = affine.apply(col, row)
+        nearest = _nearest((easting, northing), hydro_dense)
+        if snap_limit is None or math.hypot(nearest[0] - easting, nearest[1] - northing) <= snap_limit:
+            easting, northing = nearest
         gcps.append(GroundControlPoint(pixel=col, line=row, easting=easting, northing=northing))
     return gcps
 

@@ -28,6 +28,7 @@ from fishy_pipeline.states.wi.depth_tag import (
     Line,
     WaterPart,
     assign_depths,
+    assignment_to_feet,
     cutline_collection,
     features_to_geojson,
 )
@@ -197,13 +198,16 @@ def _trace_sheet(base: dict, *, entry: dict | None, geometry: HydroGeometry, war
     clip_raster(warped, clipped_path, cutline_path)
     traced = trace_sheet(clipped_path, out_dir)
     max_depth = _max_depth(entry)
+    assign_max = max_depth * 0.3048 if traced.unit == "m" and max_depth is not None else max_depth
     assignment = assign_depths(
         [Line(coords=line.coords, closed=line.closed) for line in traced.lines],
         [Label(x=label.x, y=label.y, depth_ft=label.depth_ft, confidence=label.confidence) for label in traced.labels],
         parts,
-        max_depth_ft=max_depth,
+        max_depth_ft=assign_max,
         snap_m=traced.snap_m,
     )
+    if traced.unit == "m":
+        assignment = assignment_to_feet(assignment)
     reasons = list(assignment.reasons)
     iou = base.get("iou")
     if isinstance(iou, (int, float)) and iou < DEFAULT_IOU_THRESHOLD:

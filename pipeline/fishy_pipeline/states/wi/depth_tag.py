@@ -40,7 +40,7 @@ class Line:
 class Label:
     x: float
     y: float
-    depth_ft: int
+    depth_ft: float
     confidence: float
 
 
@@ -54,8 +54,8 @@ class WaterPart:
 class TaggedLine:
     coords: tuple[tuple[float, float], ...]
     closed: bool
-    depth_ft: int | None
-    interval_ft: int | None
+    depth_ft: float | None
+    interval_ft: float | None
     confidence: float
     needs_review: bool
     reason: str | None
@@ -65,7 +65,7 @@ class TaggedLine:
 @dataclass
 class Assignment:
     features: list[TaggedLine]
-    interval_ft: int | None
+    interval_ft: float | None
     reasons: list[str] = field(default_factory=list)
     unassigned_count: int = 0
 
@@ -163,22 +163,94 @@ def infer_interval(depths: list[int]) -> int | None:
 
 def parse_depth_text(text: str) -> int | None:
     """Read a depth token. Years and mixed junk are not depths."""
-    stripped = text.strip()
+    parsed = parse_depth_token(text)
+    if parsed is None or parsed[1] != "ft":
+        return None
+    if parsed[0] != int(parsed[0]):
+        return None
+    return int(parsed[0])
+
+
+def parse_depth_token(text: str) -> tuple[float, str] | None:
+    """Read a depth and its unit. ``10m`` is meters. A bare number is feet.
+
+    A trailing ``m`` is the only letter a meter label may carry. ``10FT`` and
+    a year are still rejected.
+    """
+    stripped = text.strip().rstrip(".")
     if not stripped:
         return None
-    digits = []
-    saw_other = False
-    for char in stripped:
-        if char.isdigit():
-            digits.append(char)
-        elif char.isalpha():
-            saw_other = True
-    if saw_other or not digits or len(digits) > 3:
+    unit = "ft"
+    body = stripped
+    if len(stripped) >= 2 and stripped[-1] in {"m", "M"} and stripped[-2].isdigit():
+        unit = "m"
+        body = stripped[:-1].strip()
+    if any(char.isalpha() for char in body):
         return None
-    value = int("".join(digits))
+    number = body.replace(".", "", 1)
+    if not number.isdigit() or body.count(".") > 1:
+        return None
+    if len(number) > 3 and unit == "ft":
+        return None
+    if len(number) > 4:
+        return None
+    value = float(body)
     if value <= 0 or value > 400:
         return None
-    return value
+    return value, unit
+
+
+def sheet_depth_unit(texts: list[str]) -> str:
+    """``m`` when the sheet says meters, otherwise feet."""
+    import re
+
+    meter_word = re.compile(r"\bmeters?\b|\bmetres?\b", re.IGNORECASE)
+    if any(meter_word.search(text) for text in texts):
+        return "m"
+    meter_labels = 0
+    for text in texts:
+        parsed = parse_depth_token(text)
+        if parsed is not None and parsed[1] == "m":
+            meter_labels += 1
+    if meter_labels >= 2:
+        return "m"
+    return "ft"
+
+
+def meters_to_feet(meters: float, digits: int = 0) -> float:
+    """International foot. Rounded half away from zero."""
+    return round_half_away_from_zero(meters / 0.3048, digits)
+
+
+def assignment_to_feet(assignment: Assignment) -> Assignment:
+    """Convert an assignment that was tagged in meters into integer feet."""
+    interval = None if assignment.interval_ft is None else meters_to_feet(assignment.interval_ft, 2)
+    features: list[TaggedLine] = []
+    for line in assignment.features:
+        depth = line.depth_ft
+        line_interval = line.interval_ft
+        if depth is not None and line.source != "hydro":
+            depth = int(meters_to_feet(depth, 0))
+        if line_interval is not None:
+            line_interval = interval
+        features.append(
+            TaggedLine(
+                coords=line.coords,
+                closed=line.closed,
+                depth_ft=depth,
+                interval_ft=line_interval,
+                confidence=line.confidence,
+                needs_review=line.needs_review,
+                reason=line.reason,
+                source=line.source,
+            )
+        )
+    return Assignment(
+        features=features,
+        interval_ft=interval,
+        reasons=list(assignment.reasons),
+        unassigned_count=assignment.unassigned_count,
+    )
 
 
 def assign_depths(

@@ -10,16 +10,21 @@ from fishy_pipeline.states.wi.depth_tag import (
     Line,
     WaterPart,
     assign_depths,
+    assignment_to_feet,
     cutline_collection,
     features_to_geojson,
     infer_interval,
     parse_depth_text,
+    parse_depth_token,
     point_in_water,
+    sheet_depth_unit,
     signed_area,
 )
 from fishy_pipeline.states.wi.hydro import load_hydro_geometries
+from fishy_pipeline.states.wi.raster import fit_page_zoom, max_render_pixels
 from fishy_pipeline.states.wi.trace import (
     blank_text_boxes,
+    bridge_label_gaps,
     clip_raster,
     close_gap,
     filter_small_components,
@@ -502,6 +507,80 @@ class FixtureCliTest(unittest.TestCase):
             collection = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
         self.assertEqual(collection["wbic"], "0000101")
         self.assertTrue(all(feature["properties"]["depth_ft"] >= 0 for feature in collection["features"]))
+
+
+class MeterSheetTest(unittest.TestCase):
+    def test_meter_suffix_and_legend_word(self):
+        self.assertEqual(parse_depth_token("10m"), (10.0, "m"))
+        self.assertEqual(parse_depth_token("10"), (10.0, "ft"))
+        self.assertIsNone(parse_depth_text("10m"))
+        self.assertIsNone(parse_depth_token("10FT"))
+        self.assertEqual(sheet_depth_unit(["MAX. DEPTH 10.3 METER", "4"]), "m")
+        self.assertEqual(sheet_depth_unit(["5", "10", "15"]), "ft")
+
+    def test_meter_labels_become_integer_feet(self):
+        shore = [WaterPart(exterior=_box(0, 0, 200, 200))]
+        rings = [
+            Line(coords=_box(20, 20, 180, 180), closed=True),
+            Line(coords=_box(60, 60, 140, 140), closed=True),
+        ]
+        assignment = assign_depths(
+            rings,
+            [
+                Label(x=20, y=100, depth_ft=2, confidence=0.9),
+                Label(x=60, y=100, depth_ft=4, confidence=0.9),
+            ],
+            shore,
+            max_depth_ft=10.3 * 0.3048,
+            snap_m=8,
+        )
+        converted = assignment_to_feet(assignment)
+        self.assertEqual(converted.interval_ft, 6.56)
+        self.assertEqual(
+            sorted(line.depth_ft for line in converted.features if line.source != "hydro"),
+            [7, 13],
+        )
+
+
+class LabelGapTest(unittest.TestCase):
+    def test_bridge_joins_the_two_sides_of_a_label(self):
+        width, height = 40, 11
+        mask = bytearray(width * height)
+        for x in range(4, 14):
+            mask[5 * width + x] = 1
+        for x in range(26, 36):
+            mask[5 * width + x] = 1
+        bridged = bridge_label_gaps(mask, width, height, [(14, 2, 26, 9)])
+        self.assertTrue(any(bridged[5 * width + x] for x in range(14, 26)))
+
+
+class RenderCapTest(unittest.TestCase):
+    def test_oversized_page_scales_into_the_cap(self):
+        max_w, max_h = max_render_pixels(300)
+        zoom, actual_dpi, within_cap = fit_page_zoom(
+            page_width_pt=46 * 72,
+            page_height_pt=36 * 72,
+            dpi=300,
+            max_w=max_w,
+            max_h=max_h,
+            native_zoom=None,
+        )
+        self.assertFalse(within_cap)
+        self.assertLessEqual(46 * 72 * zoom, max_w + 1e-6)
+        self.assertLessEqual(36 * 72 * zoom, max_h + 1e-6)
+        self.assertLess(actual_dpi, 300)
+
+    def test_coarse_scan_is_not_upsampled(self):
+        _zoom, actual_dpi, within_cap = fit_page_zoom(
+            page_width_pt=38 * 72,
+            page_height_pt=34 * 72,
+            dpi=300,
+            max_w=11700,
+            max_h=10500,
+            native_zoom=1.0,
+        )
+        self.assertTrue(within_cap)
+        self.assertAlmostEqual(actual_dpi, 72.0)
 
 
 if __name__ == "__main__":

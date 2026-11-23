@@ -200,6 +200,21 @@ class RasterTest(unittest.TestCase):
         self.assertEqual(raster_skip, 1)
         self.assertIn("unsupported_media_type", updated[0]["raster_skip_reason"])
 
+    def test_letter_notes_page_is_not_the_map_sheet(self):
+        pages = [
+            {"path": "map", "pixels": [2784, 2464], "dpi": 72},
+            {"path": "notes", "pixels": [2550, 3300], "dpi": 300},
+        ]
+        chosen = raster.select_sheet_pages(pages)
+        self.assertEqual([page["path"] for page in chosen], ["map"])
+
+    def test_letter_only_scan_keeps_every_page(self):
+        pages = [
+            {"path": "a", "pixels": [3300, 2550], "dpi": 300},
+            {"path": "b", "pixels": [2550, 3300], "dpi": 300},
+        ]
+        self.assertEqual(raster.select_sheet_pages(pages), pages)
+
 
 class IngestFixtureTest(unittest.TestCase):
     def test_fixture_pipeline_offline(self):
