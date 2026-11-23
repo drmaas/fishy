@@ -35,7 +35,9 @@ interface FishMapProps {
   maptilerStyleUrl?: string;
   colorScheme: ColorScheme;
   unit: DepthUnit;
+  stateId: string;
   stateBounds: [number, number, number, number];
+  bathymetryAttribution: string;
   nearby: GeoJsonFeatureCollection | null;
   selected: LakeDetail | null;
   onLake: (lake: LakeInfo) => void;
@@ -107,9 +109,15 @@ function installFishLayers(
     colorScheme: ColorScheme;
     nearby: GeoJsonFeatureCollection | null;
     selected: LakeDetail | null;
+    bathymetryAttribution: string;
   },
 ) {
-  const sources = fishSources(options.contoursUrl, options.terrainUrl, options.hillshadeUrl);
+  const sources = fishSources(
+    options.contoursUrl,
+    options.terrainUrl,
+    options.hillshadeUrl,
+    options.bathymetryAttribution,
+  );
   const ink = contourInk(options.colorScheme);
 
   if (sources.hillshade && !map.getSource("hillshade")) {
@@ -245,7 +253,9 @@ export function FishMap({
   maptilerStyleUrl,
   colorScheme,
   unit,
+  stateId,
   stateBounds,
+  bathymetryAttribution,
   nearby,
   selected,
   onLake,
@@ -271,6 +281,8 @@ export function FishMap({
   const contoursUrlRef = useRef(contoursUrl);
   const terrainUrlRef = useRef(terrainUrl);
   const hillshadeUrlRef = useRef(hillshadeUrl);
+  const stateIdRef = useRef(stateId);
+  const bathymetryAttributionRef = useRef(bathymetryAttribution);
   const mapRef = useRef<import("maplibre-gl").Map | null>(null);
   const mapReady = useRef(false);
   const fittedLake = useRef<string | null>(null);
@@ -294,6 +306,8 @@ export function FishMap({
   contoursUrlRef.current = contoursUrl;
   terrainUrlRef.current = terrainUrl;
   hillshadeUrlRef.current = hillshadeUrl;
+  stateIdRef.current = stateId;
+  bathymetryAttributionRef.current = bathymetryAttribution;
 
   useEffect(() => {
     const node = nodeRef.current;
@@ -493,6 +507,7 @@ export function FishMap({
           colorScheme: colorSchemeRef.current,
           nearby: nearbyRef.current,
           selected: selectedRef.current,
+          bathymetryAttribution: bathymetryAttributionRef.current,
         });
         appliedStyleKeyRef.current = mapStyleKey(
           basemapRef.current,
@@ -521,7 +536,7 @@ export function FishMap({
         const surveyLayers = ["survey-nearby-fill", "survey-outline-fill"];
         const surveyHits = map?.queryRenderedFeatures(event.point, { layers: surveyLayers }) ?? [];
         const dowlknum = String(surveyHits[0]?.properties?.dowlknum ?? "");
-        if (isLakeIdForState("mn", dowlknum)) {
+        if (isLakeIdForState(stateIdRef.current, dowlknum)) {
           onSelectRef.current(dowlknum);
           return;
         }
@@ -547,7 +562,7 @@ export function FishMap({
       onLocationRef.current({ status: "idle" });
       map?.remove();
     };
-  }, [contoursUrl, hillshadeUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
+  }, [bathymetryAttribution, contoursUrl, hillshadeUrl, locationPermissionGrantRef, locationRetryRef, stateBounds, terrainUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -567,6 +582,7 @@ export function FishMap({
         colorScheme,
         nearby: nearbyRef.current,
         selected: selectedRef.current,
+        bathymetryAttribution: bathymetryAttributionRef.current,
       });
       appliedStyleKeyRef.current = nextKey;
       mapReady.current = true;

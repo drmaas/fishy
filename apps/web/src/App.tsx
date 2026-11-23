@@ -1,4 +1,4 @@
-import { formatDepth, type DepthUnit, type LakeInfo } from "@fishy/core";
+import { formatDepth, isLakeIdForState, type DepthUnit, type LakeInfo } from "@fishy/core";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { DepthLegend } from "./DepthLegend.tsx";
 import { FishMap } from "./FishMap.tsx";
@@ -22,7 +22,7 @@ import {
   reduceLocationBanner,
 } from "./locationBanner.ts";
 import { locationHint } from "./locationHint.ts";
-import { STATES, stateById } from "./states.ts";
+import { STATES, bathymetryAttribution, stateById } from "./states.ts";
 import { ThemeIconButton, ThemeSwitch } from "./ThemeSwitch.tsx";
 import {
   applyDocumentTheme,
@@ -55,7 +55,7 @@ function readRoute(): { stateId: string; lakeId: string | null } {
   const params = new URLSearchParams(window.location.search);
   const state = stateById(params.get("state"));
   const lake = params.get("lake");
-  return { stateId: state.id, lakeId: lake && /^[0-9]{8}$/.test(lake) ? lake : null };
+  return { stateId: state.id, lakeId: lake && isLakeIdForState(state.id, lake) ? lake : null };
 }
 
 function writeRoute(stateId: string, lakeId: string | null) {
@@ -364,7 +364,9 @@ export function App() {
         maptilerStyleUrl={config.maptiler ? maptilerStyleUrl(colorScheme) : undefined}
         colorScheme={colorScheme}
         unit={unit}
+        stateId={stateId}
         stateBounds={state.bounds}
+        bathymetryAttribution={bathymetryAttribution(stateId)}
         nearby={nearby}
         selected={selected}
         onLake={(next) => {
@@ -380,7 +382,21 @@ export function App() {
       />
       {lake && (
         <div hidden={!panelOpen}>
-          <LakePanel lake={lake} unit={unit} onHide={() => setPanel(false)} />
+          <LakePanel
+            lake={lake}
+            unit={unit}
+            stateId={stateId}
+            wiFields={
+              stateId === "wi" && selected
+                ? {
+                    source_pdf_url: selected.source_pdf_url,
+                    qa_status: selected.qa_status,
+                    survey_date: selected.survey_date,
+                  }
+                : undefined
+            }
+            onHide={() => setPanel(false)}
+          />
         </div>
       )}
       {lake && !panelOpen && (
@@ -395,6 +411,16 @@ export function App() {
         </button>
       )}
       <div className="map-corner">
+        <div className="map-attribution" role="group" aria-label="Map data attribution">
+          {basemap !== "none" && (
+            <p className="map-attribution-line">
+              <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>
+              {basemap === "openfreemap" ? " · OpenFreeMap" : " · © MapTiler"}
+            </p>
+          )}
+          <p className="map-attribution-line">{bathymetryAttribution(stateId)}</p>
+          {stateId === "wi" && <p className="map-attribution-line map-attribution-caution">Not for navigation.</p>}
+        </div>
         <DepthLegend unit={unit} />
         {creditsOpen && (
           <aside className="credits-panel" id="credits-panel" aria-label="Data credits">
@@ -412,9 +438,10 @@ export function App() {
                 </li>
               )}
               <li>
-                Bathymetry © Minnesota DNR
+                {bathymetryAttribution(stateId)}
                 {lake ? ` · ${lake.name} ${formatDepth(lake.maxDepthFt, unit)}` : ""}
               </li>
+              {stateId === "wi" && <li>Not for navigation.</li>}
               <li>USGS NHD · public domain</li>
               <li>NOAA NCEI Great Lakes · public domain</li>
               <li>Open-Meteo · CC BY 4.0 (when wired)</li>

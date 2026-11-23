@@ -30,12 +30,17 @@ export function contourLabelField(unit: DepthUnit): ExpressionSpecification {
   ] as ExpressionSpecification;
 }
 
-export function fishSources(contoursUrl: string, terrainUrl: string, hillshadeUrl: string) {
+export function fishSources(
+  contoursUrl: string,
+  terrainUrl: string,
+  hillshadeUrl: string,
+  bathymetryAttribution = "Bathymetry © Minnesota DNR",
+) {
   return {
     contours: {
       type: "vector" as const,
       url: pmtilesProtocolUrl(contoursUrl),
-      attribution: "Bathymetry © Minnesota DNR",
+      attribution: bathymetryAttribution,
     },
     terrain: terrainUrl
       ? {

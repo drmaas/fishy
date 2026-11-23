@@ -26,6 +26,7 @@ export {
   type LakeIndexRow,
   type LakeIndexBbox,
 } from "./lake.ts";
+export { safeHttpsUrl } from "./url.ts";
 export {
   OPENFREEMAP_DARK_STYLE,
   OPENFREEMAP_STYLE,
