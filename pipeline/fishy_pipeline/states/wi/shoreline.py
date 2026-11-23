@@ -6,7 +6,13 @@ is chosen. The kept curve is the outer edge of the largest white region that
 the ink fully encloses: that is the water inside the drawn shore. An inner
 depth contour is a smaller hole, so it loses to the shore when the shore is
 closed. A hole that covers the whole sheet is the map frame and is skipped.
-Real DNR sheets that still fail this heuristic land in the review queue.
+
+Real sheets often leave a gap in that outer line, or the line runs off the
+page. A second pass closes small gaps, keeps a detected neatline as a wall,
+and returns those water polygons too. Vertices that sit on the neatline or the
+page edge are marked ``on_frame`` so registration can treat them as unknown
+shore. The georeferencer keeps whichever figure overlaps the hydro polygon
+more.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import math
 from array import array
 from collections import deque
+from dataclasses import dataclass
 
 from fishy_pipeline.states.wi.pngutil import RasterImage
 
@@ -29,6 +36,12 @@ FRAME_HOLE_AREA = 0.45
 SHORE_MAX_SIDE = 1800
 # A ring this small on the long side of the sheet is a symbol or a letter, not the lake.
 MIN_FIGURE_SPAN = 0.12
+# Gap-closing works on a smaller mask. Coordinates are scaled back to the scan.
+SHORE_WORK_SIDE = 720
+# A white region smaller than this fraction of the work mask is not the lake.
+MIN_HOLE_FRACTION = 0.025
+# Land inside the neatline has most of its boundary on the frame. A cut lake does not.
+MAX_FRAME_BOUNDARY = 0.62
 
 
 def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
@@ -482,3 +495,409 @@ def _trace_outer(filled: bytearray, width: int, height: int) -> list[tuple[float
         if not moved:
             break
     return contour
+
+
+@dataclass(frozen=True)
+class ShoreFigure:
+    """A candidate water polygon. ``on_frame`` is aligned with ``ring`` vertices."""
+
+    ring: tuple[tuple[float, float], ...]
+    on_frame: tuple[bool, ...]
+
+
+def extract_shoreline_figures(image: RasterImage) -> list[ShoreFigure]:
+    """Closed-shore candidates plus gap-closed and page-edge-cut figures.
+
+    The list is small. Registration scores every figure and keeps the best
+    overlap, so a tight inner contour loses to the outer shore when the outer
+    shore is actually in the list.
+    """
+    figures: list[ShoreFigure] = []
+    for ring in extract_shoreline_candidates(image):
+        figures.append(ShoreFigure(tuple((float(x), float(y)) for x, y in ring), tuple(False for _ in ring)))
+    figures.extend(_gap_closed_figures(image))
+    return _dedup_figures(figures)[:8]
+
+
+def _gap_closed_figures(image: RasterImage) -> list[ShoreFigure]:
+    width = image.width
+    height = image.height
+    if width < 8 or height < 8:
+        return []
+    mask = _dark_mask(image)
+    small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_WORK_SIDE)
+    frame = _detect_frame(small, small_w, small_h)
+    _clear_long_runs(
+        small,
+        small_w,
+        small_h,
+        max(8, int(0.16 * max(small_w, small_h))),
+        keep=frame,
+    )
+    walled = _burn_walls(small, small_w, small_h, frame)
+    figures: list[ShoreFigure] = []
+    for radius in (2, 3, 5):
+        closed = _dilate_mask(walled, small_w, small_h, radius)
+        holes = _large_holes(closed, small_w, small_h, frame)
+        if not holes:
+            continue
+        grow = max(1, radius - 1)
+        for hole, _area in holes[:3]:
+            expanded = _dilate_mask(hole, small_w, small_h, grow)
+            ring = _trace_outer(expanded, small_w, small_h)
+            figure = _figure_from_work_ring(ring, factor, small_w, small_h, frame, width, height)
+            if figure is not None:
+                figures.append(figure)
+        if len(holes) >= 2:
+            union = bytearray(small_w * small_h)
+            for hole, _area in holes[:3]:
+                for index, value in enumerate(hole):
+                    if value:
+                        union[index] = 1
+            bridged = _erode_mask(_dilate_mask(union, small_w, small_h, 6), small_w, small_h, 6)
+            ring = _trace_outer(bridged, small_w, small_h)
+            figure = _figure_from_work_ring(ring, factor, small_w, small_h, frame, width, height)
+            if figure is not None:
+                figures.append(figure)
+    return figures
+
+
+def _figure_from_work_ring(
+    ring: list[tuple[float, float]],
+    factor: int,
+    work_w: int,
+    work_h: int,
+    frame: tuple[int, int, int, int] | None,
+    width: int,
+    height: int,
+) -> ShoreFigure | None:
+    if len(ring) < 12:
+        return None
+    scaled = _scale_ring(ring, factor)
+    if _span_fraction(scaled, width, height) < MIN_FIGURE_SPAN:
+        return None
+    # Flags are decided in work pixels, before the scale, so the tolerance
+    # stays a couple of mask pixels rather than a couple of scan pixels.
+    flags = tuple(
+        _vertex_on_frame(point[0], point[1], work_w, work_h, frame, tol=3.0) for point in ring
+    )
+    if sum(1 for flag in flags if flag) / len(flags) > MAX_FRAME_BOUNDARY:
+        return None
+    return ShoreFigure(tuple((float(x), float(y)) for x, y in scaled), flags)
+
+
+def _vertex_on_frame(
+    x: float,
+    y: float,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+    tol: float,
+) -> bool:
+    if x <= tol or y <= tol or x >= width - 1 - tol or y >= height - 1 - tol:
+        return True
+    if frame is None:
+        return False
+    left, top, right, bottom = frame
+    on_horizontal = (abs(y - top) <= tol or abs(y - bottom) <= tol) and left - tol <= x <= right + tol
+    on_vertical = (abs(x - left) <= tol or abs(x - right) <= tol) and top - tol <= y <= bottom + tol
+    return on_horizontal or on_vertical
+
+
+def _detect_frame(mask: bytearray, width: int, height: int) -> tuple[int, int, int, int] | None:
+    """Outermost heavy axis-aligned neatline, or None when the sheet has no rectangle."""
+    y0 = max(2, int(height * 0.05))
+    y1 = min(height - 2, int(height * 0.95))
+    x0 = max(2, int(width * 0.05))
+    x1 = min(width - 2, int(width * 0.95))
+    if y1 <= y0 or x1 <= x0:
+        return None
+    col_need = 0.35 * (y1 - y0)
+    row_need = 0.35 * (x1 - x0)
+    columns = [
+        x
+        for x in range(2, width - 2)
+        if sum(mask[y * width + x] for y in range(y0, y1)) >= col_need
+    ]
+    rows = [
+        y
+        for y in range(2, height - 2)
+        if sum(mask[y * width + x] for x in range(x0, x1)) >= row_need
+    ]
+    if len(columns) < 2 or len(rows) < 2:
+        return None
+    left, right = min(columns), max(columns)
+    top, bottom = min(rows), max(rows)
+    if right - left < 0.45 * width or bottom - top < 0.45 * height:
+        return None
+    return (left, top, right, bottom)
+
+
+def _burn_walls(
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+) -> bytearray:
+    """Page edge, and the neatline when one was found, so a cut shore can close."""
+    out = bytearray(mask)
+    for x in range(width):
+        out[x] = 1
+        out[(height - 1) * width + x] = 1
+    for y in range(height):
+        out[y * width] = 1
+        out[y * width + width - 1] = 1
+    if frame is not None:
+        left, top, right, bottom = frame
+        for x in range(max(0, left), min(width, right + 1)):
+            out[top * width + x] = 1
+            out[bottom * width + x] = 1
+        for y in range(max(0, top), min(height, bottom + 1)):
+            out[y * width + left] = 1
+            out[y * width + right] = 1
+    return out
+
+
+def _clear_long_runs(
+    mask: bytearray,
+    width: int,
+    height: int,
+    min_len: int,
+    keep: tuple[int, int, int, int] | None = None,
+) -> None:
+    """Drop long straight ink (section lines) and keep pixels where a shore leaves the run."""
+    horizontal: list[tuple[int, int, int]] = []
+    for y in range(height):
+        x = 0
+        row = y * width
+        while x < width:
+            if mask[row + x]:
+                x0 = x
+                while x < width and mask[row + x]:
+                    x += 1
+                if x - x0 >= min_len:
+                    horizontal.append((y, x0, x))
+            else:
+                x += 1
+    vertical: list[tuple[int, int, int]] = []
+    for x in range(width):
+        y = 0
+        while y < height:
+            if mask[y * width + x]:
+                y0 = y
+                while y < height and mask[y * width + x]:
+                    y += 1
+                if y - y0 >= min_len:
+                    vertical.append((x, y0, y))
+            else:
+                y += 1
+    for y, x0, x1 in horizontal:
+        for x in range(x0, x1):
+            if _on_kept_frame(x, y, keep) or _run_has_side_ink(mask, width, height, x, y, axis="row"):
+                continue
+            mask[y * width + x] = 0
+    for x, y0, y1 in vertical:
+        for y in range(y0, y1):
+            if _on_kept_frame(x, y, keep) or _run_has_side_ink(mask, width, height, x, y, axis="col"):
+                continue
+            mask[y * width + x] = 0
+
+
+def _on_kept_frame(x: int, y: int, frame: tuple[int, int, int, int] | None) -> bool:
+    if frame is None:
+        return False
+    left, top, right, bottom = frame
+    if abs(y - top) <= 2 or abs(y - bottom) <= 2:
+        return left - 2 <= x <= right + 2
+    if abs(x - left) <= 2 or abs(x - right) <= 2:
+        return top - 2 <= y <= bottom + 2
+    return False
+
+
+def _run_has_side_ink(
+    mask: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    *,
+    axis: str,
+) -> bool:
+    if axis == "row":
+        for dy in (-2, -1, 1, 2):
+            ny = y + dy
+            if ny < 0 or ny >= height:
+                continue
+            for dx in range(-1, 2):
+                nx = x + dx
+                if 0 <= nx < width and mask[ny * width + nx]:
+                    return True
+        return False
+    for dx in (-2, -1, 1, 2):
+        nx = x + dx
+        if nx < 0 or nx >= width:
+            continue
+        for dy in range(-1, 2):
+            ny = y + dy
+            if 0 <= ny < height and mask[ny * width + nx]:
+                return True
+    return False
+
+
+def _dilate_mask(mask: bytearray, width: int, height: int, radius: int) -> bytearray:
+    if radius <= 0:
+        return bytearray(mask)
+    return _filter_cols(_filter_rows(mask, width, height, radius, erode=False), width, height, radius, erode=False)
+
+
+def _erode_mask(mask: bytearray, width: int, height: int, radius: int) -> bytearray:
+    if radius <= 0:
+        return bytearray(mask)
+    return _filter_cols(_filter_rows(mask, width, height, radius, erode=True), width, height, radius, erode=True)
+
+
+def _filter_rows(mask: bytearray, width: int, height: int, radius: int, *, erode: bool) -> bytearray:
+    out = bytearray(width * height)
+    for y in range(height):
+        row = y * width
+        prefix = [0] * (width + 1)
+        for x in range(width):
+            prefix[x + 1] = prefix[x] + mask[row + x]
+        for x in range(width):
+            start = x - radius
+            end = x + radius + 1
+            if start < 0:
+                start = 0
+            if end > width:
+                end = width
+            count = prefix[end] - prefix[start]
+            if erode:
+                if count == end - start:
+                    out[row + x] = 1
+            elif count:
+                out[row + x] = 1
+    return out
+
+
+def _filter_cols(mask: bytearray, width: int, height: int, radius: int, *, erode: bool) -> bytearray:
+    out = bytearray(width * height)
+    for x in range(width):
+        prefix = [0] * (height + 1)
+        for y in range(height):
+            prefix[y + 1] = prefix[y] + mask[y * width + x]
+        for y in range(height):
+            start = y - radius
+            end = y + radius + 1
+            if start < 0:
+                start = 0
+            if end > height:
+                end = height
+            count = prefix[end] - prefix[start]
+            index = y * width + x
+            if erode:
+                if count == end - start:
+                    out[index] = 1
+            elif count:
+                out[index] = 1
+    return out
+
+
+def _large_holes(
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+) -> list[tuple[bytearray, int]]:
+    """White regions the border cannot reach, largest acceptable holes first."""
+    outside = bytearray(width * height)
+    stack: deque[int] = deque()
+    for x in range(width):
+        for y in (0, height - 1):
+            index = y * width + x
+            if not mask[index] and not outside[index]:
+                outside[index] = 1
+                stack.append(index)
+    for y in range(height):
+        for x in (0, width - 1):
+            index = y * width + x
+            if not mask[index] and not outside[index]:
+                outside[index] = 1
+                stack.append(index)
+    while stack:
+        index = stack.pop()
+        y, x = divmod(index, width)
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                continue
+            neighbor = ny * width + nx
+            if mask[neighbor] or outside[neighbor]:
+                continue
+            outside[neighbor] = 1
+            stack.append(neighbor)
+    seen = bytearray(width * height)
+    holes: list[tuple[bytearray, int]] = []
+    minimum = max(MIN_INTERIOR, int(MIN_HOLE_FRACTION * width * height))
+    for start in range(width * height):
+        if mask[start] or outside[start] or seen[start]:
+            continue
+        component = _flood_component(seen, mask, outside, width, height, start)
+        if len(component) < minimum:
+            continue
+        if len(component) >= FRAME_HOLE_AREA * width * height:
+            continue
+        filled = bytearray(width * height)
+        for index in component:
+            filled[index] = 1
+        contour = _trace_outer(filled, width, height)
+        if len(contour) < 12:
+            continue
+        frame_hits = sum(
+            1 for point in contour if _vertex_on_frame(point[0], point[1], width, height, frame, tol=3.0)
+        )
+        if frame_hits / len(contour) > MAX_FRAME_BOUNDARY:
+            continue
+        holes.append((filled, len(component)))
+    holes.sort(key=lambda item: -item[1])
+    return holes
+
+
+def _dedup_figures(figures: list[ShoreFigure]) -> list[ShoreFigure]:
+    kept: list[ShoreFigure] = []
+    for figure in figures:
+        if any(_same_figure(figure, other) for other in kept):
+            continue
+        kept.append(figure)
+    kept.sort(key=lambda figure: -_ring_area(figure.ring))
+    return kept
+
+
+def _same_figure(left: ShoreFigure, right: ShoreFigure) -> bool:
+    if not left.ring or not right.ring:
+        return False
+    lx = sum(point[0] for point in left.ring) / len(left.ring)
+    ly = sum(point[1] for point in left.ring) / len(left.ring)
+    rx = sum(point[0] for point in right.ring) / len(right.ring)
+    ry = sum(point[1] for point in right.ring) / len(right.ring)
+    span = max(_ring_span(left.ring), _ring_span(right.ring), 1.0)
+    if math.hypot(lx - rx, ly - ry) > 0.08 * span:
+        return False
+    area_l = _ring_area(left.ring)
+    area_r = _ring_area(right.ring)
+    if area_l <= 0 or area_r <= 0:
+        return False
+    return min(area_l, area_r) >= 0.75 * max(area_l, area_r)
+
+
+def _ring_area(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
+    area = 0.0
+    count = len(ring)
+    for index, (x1, y1) in enumerate(ring):
+        x2, y2 = ring[(index + 1) % count]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2.0
+
+
+def _ring_span(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
+    xs = [point[0] for point in ring]
+    ys = [point[1] for point in ring]
+    return max(max(xs) - min(xs), max(ys) - min(ys))
