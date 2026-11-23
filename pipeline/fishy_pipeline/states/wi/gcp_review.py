@@ -56,8 +56,18 @@ PAGE_HTML = """<!doctype html>
     <canvas id="map" width="800" height="600"></canvas>
   </div>
   <table id="pairs"><thead><tr><th>#</th><th>pixel</th><th>map</th></tr></thead><tbody></tbody></table>
+<script type="application/json" id="lake-data">__LAKE_JSON__</script>
 <script>
-const lakes = JSON.parse(document.getElementById('lake-data').textContent);
+let lakes = [];
+try {
+  const lakeDataEl = document.getElementById('lake-data');
+  if (!lakeDataEl) throw new Error('lake-data element not found');
+  lakes = JSON.parse(lakeDataEl.textContent);
+} catch (err) {
+  const boot = document.getElementById('msg');
+  boot.textContent = 'Failed to load lake list: ' + err.message;
+  boot.style.color = '#c00';
+}
 let wbic = lakes[0]?.wbic;
 let sheet = document.getElementById('sheet');
 let map = document.getElementById('map');
@@ -81,14 +91,27 @@ function fillLakeSelect() {
 }
 
 async function loadLake() {
-  const res = await fetch('/api/lake/' + wbic);
-  meta = await res.json();
-  pairs = (meta.reviewed && meta.reviewed.gcps) ? meta.reviewed.gcps.map(g => ({pixel:[g.pixel,g.line], map:[g.easting,g.northing]})) : [];
-  sheetImg.onload = () => drawAll();
-  sheetImg.src = '/api/raster/' + wbic + '?' + Date.now();
-  drawMapFrame();
-  renderTable();
-  document.getElementById('msg').textContent = meta.iou_preview != null ? ('Preview IoU ' + meta.iou_preview.toFixed(3)) : '';
+  const msg = document.getElementById('msg');
+  if (!wbic) {
+    msg.textContent = 'No lake selected';
+    msg.style.color = '#c00';
+    return;
+  }
+  try {
+    const res = await fetch('/api/lake/' + wbic);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    meta = await res.json();
+    pairs = (meta.reviewed && meta.reviewed.gcps) ? meta.reviewed.gcps.map(g => ({pixel:[g.pixel,g.line], map:[g.easting,g.northing]})) : [];
+    sheetImg.onload = () => drawAll();
+    sheetImg.src = '/api/raster/' + wbic + '?' + Date.now();
+    drawMapFrame();
+    renderTable();
+    msg.style.color = '';
+    msg.textContent = meta.iou_preview != null ? ('Preview IoU ' + meta.iou_preview.toFixed(3)) : '';
+  } catch (err) {
+    msg.textContent = 'Failed to load lake: ' + err.message;
+    msg.style.color = '#c00';
+  }
 }
 
 function drawMapFrame() {
@@ -136,11 +159,13 @@ function drawAll() {
     sh.drawImage(sheetImg, 0, 0, w, h);
     meta.sheetScale = { sc, w, h };
   }
-  for (const p of pairs) {
-    const x = p.pixel[0] * meta.sheetScale.sc;
-    const y = p.pixel[1] * meta.sheetScale.sc;
-    sh.fillStyle = '#e11';
-    sh.beginPath(); sh.arc(x, y, 5, 0, Math.PI*2); sh.fill();
+  if (meta.sheetScale) {
+    for (const p of pairs) {
+      const x = p.pixel[0] * meta.sheetScale.sc;
+      const y = p.pixel[1] * meta.sheetScale.sc;
+      sh.fillStyle = '#e11';
+      sh.beginPath(); sh.arc(x, y, 5, 0, Math.PI*2); sh.fill();
+    }
   }
   mh.clearRect(0,0,map.width,map.height);
   mh.fillStyle = '#e8f0f8';
@@ -211,13 +236,27 @@ document.getElementById('save').onclick = async () => {
   document.getElementById('msg').textContent = 'Saved ' + body.path + (body.iou != null ? ' IoU '+body.iou.toFixed(3) : '');
 };
 
-fillLakeSelect();
-loadLake();
+if (lakes.length) {
+  fillLakeSelect();
+  loadLake();
+} else if (!document.getElementById('msg').textContent) {
+  document.getElementById('msg').textContent = 'No lakes in manifest';
+  document.getElementById('msg').style.color = '#c00';
+}
 </script>
-<script type="application/json" id="lake-data">__LAKE_JSON__</script>
 </body>
 </html>
 """
+
+
+def escape_json_for_script_tag(payload: str) -> str:
+    """Escape characters that could break out of an inline ``<script>`` tag."""
+    return payload.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def render_review_page(lake_rows: list[dict]) -> str:
+    lakes_json = escape_json_for_script_tag(json.dumps(lake_rows))
+    return PAGE_HTML.replace("__LAKE_JSON__", lakes_json)
 
 
 class ReviewContext:
@@ -307,7 +346,6 @@ def _loopback_host(host: str) -> bool:
 
 
 def serve(context: ReviewContext, *, host: str, port: int) -> None:
-    lakes_json = json.dumps(context.lake_rows())
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args) -> None:
@@ -327,7 +365,7 @@ def serve(context: ReviewContext, *, host: str, port: int) -> None:
                 self._send_json(200, {"lakes": context.lake_rows()})
                 return
             if parsed.path == "/" or parsed.path == "/index.html":
-                page = PAGE_HTML.replace("__LAKE_JSON__", lakes_json)
+                page = render_review_page(context.lake_rows())
                 payload = page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
