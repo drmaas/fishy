@@ -502,8 +502,18 @@ def _best_affine(
             best = candidate
             best_key = key
     if best is None:
-        return sweep[0]
+        # The sweep is already ranked by overlap. Skip a sheared pose instead of
+        # admitting sweep[0] after every refined candidate missed the cap.
+        return _sweep_fallback(sweep)
     return best
+
+
+def _sweep_fallback(sweep: list[Affine]) -> Affine:
+    """Highest-overlap sweep pose that stays within ``MAX_ANISOTROPY``."""
+    for affine in sweep:
+        if anisotropy(affine) <= MAX_ANISOTROPY:
+            return affine
+    raise ValueError("no pose within anisotropy cap")
 
 
 def _coarse_overlap(

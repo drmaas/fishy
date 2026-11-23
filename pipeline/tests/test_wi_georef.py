@@ -12,14 +12,17 @@ from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
+    MAX_ANISOTROPY,
     Affine,
     Registration,
     ThinPlateSpline,
+    anisotropy,
     fit_affine,
     fit_similarity,
     polygon_iou,
     register_shoreline,
 )
+from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
     extract_shoreline,
     extract_shoreline_candidates,
@@ -719,6 +722,95 @@ class ManifestIdentityTest(unittest.TestCase):
             queue = json.loads((work / "georef" / "review_queue.json").read_text(encoding="utf-8"))
             queued = next(row for row in queue["items"] if row["wbic"] == "0417300")
             self.assertIn("registration_error", queued["reasons"])
+
+
+def _sheet(iou: float, cut: float, name: str, ring: list[tuple[float, float]] | None = None) -> dict:
+    affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+    blank = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 0.0, 0.0),
+        northing_affine=(0.0, 0.0, 0.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=blank,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="affine",
+    )
+    sheet = {
+        "page": Path(name),
+        "cut_fraction": cut,
+        "registration": registration,
+        "ring": ring if ring is not None else [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+    }
+    return sheet
+
+
+class FailClosedGateTest(unittest.TestCase):
+    def test_cut_page_is_not_dropped_for_a_near_best_closed_ring(self):
+        closed = _sheet(0.86, 0.0, "a.png")
+        cut = _sheet(0.40, 0.20, "b.png")
+        pages = [Path("a.png"), Path("b.png"), Path("c.png")]
+        kept, missed = georef._select_lake_sheets([closed, cut], pages)
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png"})
+        self.assertEqual([page.name for page in missed], ["c.png"])
+
+    def test_closed_pages_collapse_to_the_best_sheet(self):
+        pages = [Path("a.png"), Path("b.png")]
+        kept, missed = georef._select_lake_sheets(
+            [_sheet(0.91, 0.0, "a.png"), _sheet(0.55, 0.0, "b.png")],
+            pages,
+        )
+        self.assertEqual([sheet["page"].name for sheet in kept], ["a.png"])
+        self.assertEqual(missed, [])
+
+    def test_several_passing_pages_are_queued_and_each_is_warped(self):
+        first = _sheet(0.92, 0.0, "north.png")
+        second = _sheet(0.90, 0.0, "south.png")
+        for sheet in (first, second):
+            sheet["gate_iou"] = sheet["registration"].iou
+        plan = georef._warp_plan_for([first, second], first, DEFAULT_IOU_THRESHOLD)
+        self.assertEqual([name for _sheet_row, name in plan], ["warped.tif", "warped-south.tif"])
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=False,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=True,
+        )
+        self.assertIn("multi_sheet", reasons)
+        self.assertNotIn("iou_below_threshold", reasons)
+
+    def test_partial_fragment_cannot_clear_the_gate_on_footprint_iou(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        fragment = [(0.0, 0.0), (20.0, 0.0), (20.0, 16.0), (0.0, 16.0)]
+        sheet = _sheet(0.95, 0.25, "cut.png", ring=fragment)
+        full = georef._full_hydro_iou(sheet, hydro)
+        gate = min(sheet["registration"].iou, full)
+        self.assertGreaterEqual(sheet["registration"].iou, DEFAULT_IOU_THRESHOLD)
+        self.assertLess(full, 0.5)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
+        covered = _sheet(0.90, 0.20, "whole.png", ring=list(hydro))
+        self.assertGreaterEqual(
+            min(covered["registration"].iou, georef._full_hydro_iou(covered, hydro)),
+            DEFAULT_IOU_THRESHOLD,
+        )
+
+    def test_sheared_sweep_fallback_is_rejected(self):
+        shear = Affine(a=5.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+        similar = Affine(a=2.0, b=0.0, tx=0.0, c=0.0, d=-2.0, ty=0.0)
+        self.assertGreater(anisotropy(shear), MAX_ANISOTROPY)
+        self.assertLessEqual(anisotropy(similar), MAX_ANISOTROPY)
+        self.assertIs(wi_register._sweep_fallback([shear, similar]), similar)
+        with self.assertRaises(ValueError):
+            wi_register._sweep_fallback([shear])
 
 
 class CliTest(unittest.TestCase):

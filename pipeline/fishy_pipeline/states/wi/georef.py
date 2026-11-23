@@ -38,7 +38,12 @@ from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD  # re-expor
 from fishy_pipeline.states.wi.hydro import FLOWAGE_HYDROTYPE, HydroWaterbody, load_hydro_polygons
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
-from fishy_pipeline.states.wi.register import DEFAULT_GCP_COUNT, register_shoreline, union_polygon_iou
+from fishy_pipeline.states.wi.register import (
+    DEFAULT_GCP_COUNT,
+    polygon_iou,
+    register_shoreline,
+    union_polygon_iou,
+)
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
 from fishy_pipeline.states.wi.raster import select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
@@ -442,17 +447,25 @@ def _georeference_entry(
             error=page_error,
         )
 
-    primary = max(sheets, key=lambda sheet: sheet["registration"].iou)
+    for sheet in sheets:
+        full_iou = _full_hydro_iou(sheet, list(water.ring))
+        sheet["full_iou"] = full_iou
+        # A page-edge fragment can score well inside its own footprint and still
+        # leave most of the lake uncovered. The gate uses the worse of the two.
+        if sheet["cut_fraction"] >= _PARTIAL_CUT:
+            sheet["gate_iou"] = min(sheet["registration"].iou, full_iou)
+        else:
+            sheet["gate_iou"] = sheet["registration"].iou
+    primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
     registration = primary["registration"]
     shoreline = primary["ring"]
     chosen_raster = primary["page"]
-    sheet_ious = [sheet["registration"].iou for sheet in sheets]
-    # One raster publishes at its own overlap. Several sheets publish only when
-    # the weakest sheet still clears the gate. A large page with no shoreline
-    # is a missed sheet and fails the lake.
-    gate_iou = min(sheet_ious) if len(sheets) > 1 else registration.iou
+    # Several sheets publish only when the weakest sheet still clears the gate.
+    # A large page with no shoreline is a missed sheet and fails the lake.
+    gate_iou = min(sheet["gate_iou"] for sheet in sheets)
     if missed_pages:
         gate_iou = 0.0
+    several_pages_passed = sum(1 for sheet in sheets if sheet["gate_iou"] >= iou_threshold) > 1
     affine_iou = round(registration.affine_iou, 6)
     tps_iou = round(registration.tps_iou, 6)
     iou = round(gate_iou, 6)
@@ -487,14 +500,25 @@ def _georeference_entry(
             },
         ),
     )
-    warp_status, warped_path, warp_error = _warp(
-        raster=chosen_raster,
-        out_dir=out_dir,
-        gcps=gcp_dicts,
-        gdal_available=gdal_available,
-        method=registration.method,
-        affine=registration.affine.as_dict(),
-    )
+    warp_plan = _warp_plan_for(sheets, primary, iou_threshold)
+    warp_rows = []
+    warp_status, warped_path, warp_error = "not_run", None, None
+    for sheet, tif_name in warp_plan:
+        reg = sheet["registration"]
+        status, path, error = _warp(
+            raster=sheet["page"],
+            out_dir=out_dir,
+            gcps=[gcp.as_dict() for gcp in reg.gcps],
+            gdal_available=gdal_available,
+            method=reg.method,
+            affine=reg.affine.as_dict(),
+            tif_name=tif_name,
+        )
+        warp_rows.append({"page": sheet["page"].name, "status": status, "path": str(path) if path else None})
+        if sheet is primary:
+            warp_status, warped_path, warp_error = status, path, error
+        elif status == "failed" and warp_status != "failed":
+            warp_status, warp_error = status, error
     reasons = _reasons(
         flowage=flowage,
         shared_sheet=shared_sheet,
@@ -503,6 +527,7 @@ def _georeference_entry(
         shoreline_found=True,
         registration_error=False,
         warp_failed=warp_status == "failed",
+        several_pages_passed=several_pages_passed,
     )
     public_sheets = [_public_sheet(sheet) for sheet in sheets]
     for page in missed_pages:
@@ -538,6 +563,7 @@ def _georeference_entry(
             "gcps": str(gcp_path),
             "shoreline": str(shore_path),
             "warped": str(warped_path) if warped_path else None,
+            "warps": warp_rows,
         },
         "warp": {
             "tool": "gdal_translate" if registration.method == "affine" else "gdalwarp",
@@ -742,22 +768,22 @@ def _select_lake_sheets(
     sheets: list[dict],
     page_rasters: list[Path],
 ) -> tuple[list[dict], list[Path]]:
-    """Keep every cut sheet, or the single best closed sheet when one covers the lake.
+    """Keep every page when any sheet is cut. Collapse only an all-closed set.
 
-    A closed shore is a full lake (or a second copy of it). Extra pages are
-    notes or another edition and are not required. A cut shore is one piece of
-    a multi-sheet lake, so every other large page must score too.
+    A closed shore on every page is one lake drawn more than once. The best of
+    those is enough. A cut or partial score on any page means the document does
+    not show one complete shore, so every other large page stays in the gate,
+    including a page that produced no shoreline.
     """
     if not sheets:
         return [], []
-    closed = [sheet for sheet in sheets if sheet["cut_fraction"] < _PARTIAL_CUT]
-    best_iou = max(sheet["registration"].iou for sheet in sheets)
-    if closed and max(sheet["registration"].iou for sheet in closed) >= best_iou - 0.02:
-        best = max(closed, key=lambda sheet: sheet["registration"].iou)
+    partial = [sheet for sheet in sheets if sheet["cut_fraction"] >= _PARTIAL_CUT]
+    if not partial:
+        best = max(sheets, key=lambda sheet: sheet["registration"].iou)
         return [best], []
     scored = {sheet["page"] for sheet in sheets}
     missed = [page for page in page_rasters if page not in scored]
-    return sheets, missed
+    return list(sheets), missed
 
 
 def _prefer_sheet(new: dict, old: dict) -> bool:
@@ -771,12 +797,37 @@ def _prefer_sheet(new: dict, old: dict) -> bool:
 
 def _public_sheet(sheet: dict) -> dict:
     registration = sheet["registration"]
-    return {
+    row = {
         "page": sheet["page"].name,
-        "iou": round(registration.iou, 6),
+        "iou": round(sheet.get("gate_iou", registration.iou), 6),
+        "footprint_iou": round(registration.iou, 6),
         "rotation_deg": round(registration.rotation_deg, 3),
         "cut_fraction": round(sheet["cut_fraction"], 4),
     }
+    if "full_iou" in sheet:
+        row["full_iou"] = round(sheet["full_iou"], 6)
+    return row
+
+
+def _full_hydro_iou(sheet: dict, hydro_ring: list[tuple[float, float]]) -> float:
+    """Overlap of the mapped ring with the whole hydro polygon, not the footprint."""
+    registration = sheet["registration"]
+    if sheet["cut_fraction"] < _PARTIAL_CUT:
+        return registration.iou
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, row) for col, row in sheet["ring"]]
+    return polygon_iou(mapped, list(hydro_ring))
+
+
+def _warp_plan_for(sheets: list[dict], primary: dict, threshold: float) -> list[tuple[dict, str]]:
+    """Warp the primary page and every other page whose gate IoU clears ``threshold``."""
+    plan = [(primary, "warped.tif")]
+    for sheet in sheets:
+        if sheet is primary:
+            continue
+        if sheet["gate_iou"] >= threshold:
+            plan.append((sheet, f"warped-{sheet['page'].stem}.tif"))
+    return plan
 
 
 def _fail_closed_multi_sheet(
@@ -891,6 +942,7 @@ def _reasons(
     shoreline_found: bool | None,
     registration_error: bool,
     warp_failed: bool,
+    several_pages_passed: bool = False,
 ) -> list[str]:
     found = []
     if flowage:
@@ -903,8 +955,11 @@ def _reasons(
         found.append("shoreline_not_found")
     elif shoreline_found and low_iou:
         found.append("iou_below_threshold")
-    # A multi-sheet lake is queued later, and only when one of its sheets misses
-    # the gate. The flag stays on the item so that pass can find the group.
+    # Catalog multi-sheet groups are queued later, and only when a sheet misses
+    # the gate. Several pages of this one document that each cleared the gate
+    # are queued here: contours trace a single warped raster.
+    if several_pages_passed:
+        found.append("multi_sheet")
     _ = multi_sheet
     if warp_failed:
         found.append("warp_failed")
@@ -939,13 +994,14 @@ def _warp(
     gdal_available: bool,
     method: str = "tps",
     affine: dict[str, float] | None = None,
+    tif_name: str = "warped.tif",
 ) -> tuple[str, Path | None, str | None]:
     if not gdal_available:
         return "unavailable", None, None
-    tif_path = out_dir / "warped.tif"
+    tif_path = out_dir / tif_name
     try:
         if method == "affine" and affine is not None:
-            staged = out_dir / "affine.tif"
+            staged = out_dir / f"{Path(tif_name).stem}-affine.tif"
             _run(gdal_translate_affine_args(str(raster), str(staged), affine))
             # -dstalpha matches the spline warp: black ink stays a color, not nodata.
             _run(
@@ -962,7 +1018,7 @@ def _warp(
                 ]
             )
         else:
-            vrt_path = out_dir / "gcps.vrt"
+            vrt_path = out_dir / f"{Path(tif_name).stem}.vrt"
             _run(gdal_translate_gcp_args(str(raster), str(vrt_path), gcps))
             _run(gdalwarp_tps_args(str(vrt_path), str(tif_path)))
     except RuntimeError as error:
