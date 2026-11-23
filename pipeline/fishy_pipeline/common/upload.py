@@ -7,10 +7,16 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from fishy_pipeline.common.commands import r2_put_command
-from fishy_pipeline.common.wi_r2 import WI_R2_PREFIX, assert_wi_object_uploadable
+from fishy_pipeline.common.wi_r2 import (
+    CURRENT_POINTER_KEY,
+    PACKAGE_MANIFEST_NAME,
+    build_current_pointer,
+    assert_wi_object_uploadable,
+)
 
 
 def upload_file(file_path: Path, key: str, *, dry_run: bool = False) -> None:
@@ -25,21 +31,70 @@ def upload_file(file_path: Path, key: str, *, dry_run: bool = False) -> None:
         raise SystemExit(completed.returncode)
 
 
-def upload_wi_artifacts(stage_dir: Path, *, dry_run: bool = False) -> list[str]:
-    """Upload every file under ``stage_dir/wi/v1`` using matching object keys."""
-    root = stage_dir / WI_R2_PREFIX
-    if not root.is_dir():
-        raise ValueError(f"staged artifacts not found: {root}")
+def upload_wi_artifacts(
+    stage_dir: Path,
+    *,
+    dry_run: bool = False,
+    put_object: Callable[[Path, str], None] | None = None,
+) -> dict:
+    """Upload only keys listed in ``package-manifest.json``; pointer is written last."""
+    manifest_path = stage_dir / PACKAGE_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise ValueError(f"package manifest not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    build_id = str(manifest.get("build_id") or "")
+    if not build_id:
+        raise ValueError("package manifest missing build_id")
+    uploads = manifest.get("uploads")
+    if not isinstance(uploads, list) or not uploads:
+        raise ValueError("package manifest has no upload entries")
+
+    def default_put(file_path: Path, key: str) -> None:
+        upload_file(file_path, key, dry_run=dry_run)
+
+    put = put_object or default_put
     uploaded: list[str] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        key = str(path.relative_to(stage_dir)).replace("\\", "/")
-        upload_file(path, key, dry_run=dry_run)
-        uploaded.append(key)
-    manifest = stage_dir / "upload-manifest.json"
-    manifest.write_text(json.dumps({"keys": uploaded}, indent=2) + "\n", encoding="utf-8")
-    return uploaded
+    pointer_path = stage_dir / CURRENT_POINTER_KEY
+    if pointer_path.is_file():
+        pointer_path.unlink()
+
+    lake_detail_keys: list[str] = []
+    lakes_index_key = ""
+    try:
+        for entry in uploads:
+            if not isinstance(entry, dict):
+                raise ValueError("invalid upload entry in package manifest")
+            rel = str(entry.get("local") or entry.get("key") or "")
+            key = str(entry.get("key") or rel)
+            if not rel or not key:
+                raise ValueError("upload entry missing local/key")
+            file_path = stage_dir / rel
+            if not file_path.is_file():
+                raise ValueError(f"staged file missing: {file_path}")
+            put(file_path, key)
+            uploaded.append(key)
+            if key.endswith("/lakes_index.json") or key.endswith("lakes_index.json"):
+                lakes_index_key = key
+            elif "/lakes/" in key and key.endswith(".json"):
+                lake_detail_keys.append(key)
+    except Exception:
+        if pointer_path.is_file():
+            pointer_path.unlink()
+        raise
+
+    pointer_body = build_current_pointer(
+        build_id,
+        lake_detail_keys=lake_detail_keys,
+        lakes_index_key=lakes_index_key,
+    )
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    pointer_path.write_text(json.dumps(pointer_body, indent=2) + "\n", encoding="utf-8")
+    put(pointer_path, CURRENT_POINTER_KEY)
+    uploaded.append(CURRENT_POINTER_KEY)
+
+    manifest["uploaded_keys"] = uploaded
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
 
 
 def main(argv: list[str] | None = None) -> None:

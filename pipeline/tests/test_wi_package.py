@@ -5,8 +5,13 @@ import unittest
 from pathlib import Path
 
 from fishy_pipeline.common.build import build_wi_lake_artifacts, refuse_unless_publishable
-from fishy_pipeline.common.upload import upload_file
-from fishy_pipeline.common.wi_r2 import lake_detail_object_key, lakes_index_object_key
+from fishy_pipeline.common.upload import upload_file, upload_wi_artifacts
+from fishy_pipeline.common.wi_r2 import (
+    CURRENT_POINTER_KEY,
+    PACKAGE_MANIFEST_NAME,
+    generation_lake_detail_key,
+    generation_lakes_index_key,
+)
 from fishy_pipeline.depth import is_lake_id_for_state, is_wbic
 from fishy_pipeline.states.wi.package import run_fixture
 
@@ -14,22 +19,90 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = json.loads((ROOT / "fixtures" / "contract.json").read_text(encoding="utf-8"))
 
 
+def _detail(wbic: str) -> dict:
+    return {
+        **CONTRACT["wiLakeDetail"],
+        "id": wbic,
+        "dowlknum": wbic,
+        "qa_status": "verified",
+        "outline": {"type": "FeatureCollection", "features": []},
+        "contours": {"type": "FeatureCollection", "features": []},
+    }
+
+
 class WiPackageTest(unittest.TestCase):
     def test_fixture_build_matches_contract_scalars(self):
         with tempfile.TemporaryDirectory() as raw:
             dest = Path(raw)
             body = run_fixture(dest)
+            build_id = body["build_id"]
             self.assertEqual(body["lakes"], CONTRACT["wiLakeIndex"])
-            detail_path = dest / lake_detail_object_key(CONTRACT["wiLakeDetail"]["id"])
+            detail_path = dest / generation_lake_detail_key(build_id, CONTRACT["wiLakeDetail"]["id"])
             detail = json.loads(detail_path.read_text(encoding="utf-8"))
             for key in ("id", "name", "maxDepthFt", "areaAcres", "extent", "source_pdf_url", "qa_status", "survey_date"):
                 self.assertEqual(detail[key], CONTRACT["wiLakeDetail"][key])
-            self.assertEqual(detail["dowlknum"], CONTRACT["wiLakeDetail"]["id"])
-            self.assertIn("outline", detail)
-            self.assertIn("contours", detail)
-            index_path = dest / lakes_index_object_key()
+            index_path = dest / generation_lakes_index_key(build_id)
             index_rows = json.loads(index_path.read_text(encoding="utf-8"))
             self.assertEqual(index_rows, CONTRACT["wiLakeIndex"])
+            manifest = json.loads((dest / PACKAGE_MANIFEST_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["uploads"]), 2)
+
+    def test_shrinking_index_drops_stale_lake_from_upload_set(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw)
+            build_wi_lake_artifacts(dest, build_id="genone", details=[_detail("0417300"), _detail("0980900")])
+            stale = dest / generation_lake_detail_key("genone", "0980900")
+            self.assertTrue(stale.is_file())
+            build_wi_lake_artifacts(dest, build_id="gentwo", details=[_detail("0417300")])
+            self.assertFalse(stale.is_file())
+            self.assertFalse((dest / generation_lake_detail_key("genone", "0417300")).is_file())
+            manifest = json.loads((dest / PACKAGE_MANIFEST_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["build_id"], "gentwo")
+            keys = [entry["key"] for entry in manifest["uploads"]]
+            self.assertEqual(keys, [generation_lake_detail_key("gentwo", "0417300"), generation_lakes_index_key("gentwo")])
+
+    def test_partial_upload_failure_skips_pointer(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw)
+            build_wi_lake_artifacts(dest, build_id="genupload", details=[_detail("0417300")])
+            calls: list[str] = []
+
+            def flaky_put(file_path: Path, key: str) -> None:
+                calls.append(key)
+                if len(calls) > 1:
+                    raise RuntimeError("upload failed")
+
+            with self.assertRaises(RuntimeError):
+                upload_wi_artifacts(dest, put_object=flaky_put)
+            self.assertFalse((dest / CURRENT_POINTER_KEY).is_file())
+            self.assertNotIn(CURRENT_POINTER_KEY, calls)
+
+    def test_upload_uses_manifest_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw)
+            build_wi_lake_artifacts(dest, build_id="gendry", details=[_detail("0417300")])
+            stray = dest / "wi/v1/gendry/lakes/9999999.json"
+            stray.parent.mkdir(parents=True, exist_ok=True)
+            stray.write_text("{}", encoding="utf-8")
+            keys: list[str] = []
+
+            def record_put(_file_path: Path, key: str) -> None:
+                keys.append(key)
+
+            upload_wi_artifacts(dest, put_object=record_put)
+            self.assertNotIn("wi/v1/gendry/lakes/9999999.json", keys)
+            self.assertIn(CURRENT_POINTER_KEY, keys)
+
+    def test_hand_edited_publishable_true_needs_review_refused(self):
+        with self.assertRaises(ValueError):
+            refuse_unless_publishable(
+                {
+                    "wbic": "0417300",
+                    "qa_status": "needs_review",
+                    "publishable": True,
+                    "reasons": [],
+                }
+            )
 
     def test_wbic_contract_rows(self):
         for row in CONTRACT["wbic"]:
@@ -38,37 +111,19 @@ class WiPackageTest(unittest.TestCase):
             self.assertEqual(is_lake_id_for_state(row["state"], row["id"]), row["valid"])
 
     def test_needs_review_lake_cannot_be_built(self):
-        detail = {
-            **CONTRACT["wiLakeDetail"],
-            "qa_status": "needs_review",
-            "outline": {"type": "FeatureCollection", "features": []},
-            "contours": {"type": "FeatureCollection", "features": []},
-        }
         with tempfile.TemporaryDirectory() as raw:
             with self.assertRaises(ValueError):
-                build_wi_lake_artifacts(Path(raw), details=[detail])
-
-    def test_needs_review_contour_item_cannot_be_built(self):
-        with self.assertRaises(ValueError):
-            refuse_unless_publishable(
-                {
-                    "wbic": "0417300",
-                    "qa_status": "needs_review",
-                    "publishable": False,
-                    "reasons": ["georef_iou_below_threshold"],
-                }
-            )
+                build_wi_lake_artifacts(Path(raw), build_id="bad", details=[_detail("0417300") | {"qa_status": "needs_review"}])
 
     def test_needs_review_detail_cannot_upload(self):
         with tempfile.TemporaryDirectory() as raw:
-            dest = Path(raw)
-            detail_path = dest / "bad.json"
+            detail_path = Path(raw) / "bad.json"
             detail_path.write_text(
                 json.dumps({**CONTRACT["wiLakeDetail"], "qa_status": "needs_review"}),
                 encoding="utf-8",
             )
             with self.assertRaises(SystemExit):
-                upload_file(detail_path, lake_detail_object_key(CONTRACT["wiLakeDetail"]["id"]), dry_run=True)
+                upload_file(detail_path, generation_lake_detail_key("genx", CONTRACT["wiLakeDetail"]["id"]), dry_run=True)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,10 +23,13 @@ from fishy_pipeline.common.commands import (
 )
 from fishy_pipeline.common.depth import normalize_properties
 from fishy_pipeline.common.wi_r2 import (
+    PACKAGE_MANIFEST_NAME,
     PUBLISHED_QA_STATUS,
     WI_R2_PREFIX,
-    lake_detail_object_key,
-    lakes_index_object_key,
+    generation_lake_detail_key,
+    generation_lakes_index_key,
+    generation_prefix,
+    new_build_id,
     refuse_unless_publishable,
 )
 from fishy_pipeline.states.wi.lake_json import build_lakes_index
@@ -168,15 +172,25 @@ def build_lake(source: Path, dest: Path) -> None:
         raster_pmtiles(hillshade, dest / "sample-pond-hillshade.pmtiles", work, "hillshade")
 
 
+def reset_wi_publish_staging(dest: Path) -> None:
+    """Remove prior ``wi/v1`` tree so shrinking builds cannot leave stale lake files."""
+    root = dest / WI_R2_PREFIX
+    if root.is_dir():
+        shutil.rmtree(root)
+
+
 def build_wi_lake_artifacts(
     dest: Path,
     *,
+    build_id: str | None = None,
     fixtures: bool = False,
     details: list[dict] | None = None,
     skipped: list[dict] | None = None,
 ) -> dict:
-    """Write ``wi/v1/lakes/*.json`` and ``wi/v1/lakes_index.json`` locally."""
+    """Write a fresh generation under ``wi/v1/<build-id>/`` and ``package-manifest.json``."""
     dest.mkdir(parents=True, exist_ok=True)
+    reset_wi_publish_staging(dest)
+    build_id = build_id or new_build_id()
     if fixtures:
         root = Path(__file__).resolve().parents[3]
         contract = json.loads((root / "fixtures" / "contract.json").read_text(encoding="utf-8"))
@@ -244,21 +258,32 @@ def build_wi_lake_artifacts(
         wbic = str(detail.get("id") or detail.get("dowlknum") or "")
         if detail.get("qa_status") != PUBLISHED_QA_STATUS:
             raise ValueError(f"lake {wbic} qa_status is not {PUBLISHED_QA_STATUS!r}")
-        lake_path = dest / lake_detail_object_key(wbic)
+        object_key = generation_lake_detail_key(build_id, wbic)
+        lake_path = dest / object_key
         lake_path.parent.mkdir(parents=True, exist_ok=True)
         lake_path.write_text(json.dumps(detail, indent=2) + "\n", encoding="utf-8")
     index_rows = build_lakes_index(details)
-    index_path = dest / lakes_index_object_key()
+    index_key = generation_lakes_index_key(build_id)
+    index_path = dest / index_key
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(index_rows, indent=2) + "\n", encoding="utf-8")
-    return {
+    uploads = [
+        {"local": generation_lake_detail_key(build_id, str(row["id"])), "key": generation_lake_detail_key(build_id, str(row["id"]))}
+        for row in index_rows
+    ]
+    uploads.append({"local": index_key, "key": index_key})
+    body = {
         "version": 1,
         "state": "wi",
-        "prefix": WI_R2_PREFIX,
+        "build_id": build_id,
+        "generation_prefix": generation_prefix(build_id),
         "lakes": index_rows,
         "skipped": skipped or [],
-        "files": [lake_detail_object_key(str(row["id"])) for row in index_rows] + [lakes_index_object_key()],
+        "uploads": uploads,
     }
+    manifest_path = dest / PACKAGE_MANIFEST_NAME
+    manifest_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return body
 
 
 def main(argv: list[str] | None = None) -> None:

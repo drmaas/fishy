@@ -48,6 +48,8 @@ PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi package --fixtures --de
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi package --hydro /path/to/24k-hydro.geojson --dry-run --upload
 ```
 
+Each `package` run wipes the local `wi/v1` staging tree, writes `wi/v1/<build-id>/lakes/<wbic>.json` and `lakes_index.json`, and records upload keys in `package-manifest.json`. R2 upload is atomic at the generation level: every object under the new prefix uploads first, then `wi/v1/current.json` points at that generation. Older `wi/v1/<build-id>/` prefixes may be deleted manually or in a later prune step.
+
 ## Wisconsin georef
 
 `georef` reads the ingest manifest and a 24K Hydro GeoJSON in EPSG:3071. Each row is one `(wbic, map_key)` pair. `map_key` is the document name and can be shared (the Chain O' Lakes sheet is one file and many WBICs). The fit uses that WBIC's own shoreline.

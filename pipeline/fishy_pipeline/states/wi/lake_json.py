@@ -147,28 +147,28 @@ def build_lake_detail_payload(
   outline: dict,
   contours: dict,
 ) -> dict:
-  qa_status = published_qa_status(publishable=publishable)
-  extent = bbox_from_geojson(outline) or bbox_from_geojson(contours)
-  if extent is None:
-    raise ValueError(f"could not derive extent for wbic {wbic}")
-  payload: dict = {
-    "id": wbic,
-    "dowlknum": wbic,
-    "name": name,
-    "maxDepthFt": max_depth_ft,
-    "areaAcres": area_acres,
-    "extent": extent,
-    "outline": outline,
-    "contours": contours,
-    "qa_status": qa_status,
-  }
-  if county:
-    payload["county"] = county
-  if source_pdf_url:
-    payload["source_pdf_url"] = source_pdf_url
-  if survey_date:
-    payload["survey_date"] = survey_date
-  return payload
+    qa_status = published_qa_status(publishable=publishable)
+    extent = bbox_from_geojson(outline) or bbox_from_geojson(contours)
+    if extent is None:
+        raise ValueError(f"could not derive extent for wbic {wbic}")
+    payload: dict = {
+        "id": wbic,
+        "dowlknum": wbic,
+        "name": name,
+        "maxDepthFt": max_depth_ft,
+        "areaAcres": area_acres,
+        "extent": extent,
+        "outline": outline,
+        "contours": contours,
+        "qa_status": qa_status,
+    }
+    if county:
+        payload["county"] = county
+    if source_pdf_url:
+        payload["source_pdf_url"] = source_pdf_url
+    if survey_date:
+        payload["survey_date"] = survey_date
+    return payload
 
 
 def manifest_entry_for_wbic(manifest: dict, wbic: str) -> dict | None:
