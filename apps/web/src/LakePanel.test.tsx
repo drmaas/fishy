@@ -24,6 +24,7 @@ describe("lake panel", () => {
     expect(html).toContain("42.5 acres");
     expect(html).toContain("99999900");
     expect(html).toContain("https://www.dnr.state.mn.us/lakefind/showreport.html?downum=99999900");
+    expect(html).toContain('rel="noopener noreferrer"');
     expect(html).toContain("Synthetic sample");
     expect(html).toContain("Hide");
     expect(html).not.toContain("Close");
@@ -51,9 +52,34 @@ describe("lake panel", () => {
     );
     expect(html).toContain("Traced from WI DNR map");
     expect(html).toContain("https://example.dnr.wi.gov/bathymetry/0417300.pdf");
+    expect(html).toContain('rel="noopener noreferrer"');
     expect(html).toContain("Source bathymetry map (PDF)");
     expect(html).toContain("Verified");
     expect(html).not.toContain("LakeFinder");
+  });
+
+  it("omits the PDF link when source_pdf_url is not https", () => {
+    const html = renderToStaticMarkup(
+      <LakePanel
+        lake={{
+          name: "Lake Wissota",
+          dowlknum: "0417300",
+          maxDepthFt: 72,
+          areaAcres: 6044,
+          synthetic: false,
+        }}
+        unit="ft"
+        stateId="wi"
+        wiFields={{
+          source_pdf_url: "javascript:alert(1)",
+          qa_status: "verified",
+        }}
+        onHide={() => {}}
+      />,
+    );
+    expect(html).toContain("Traced from WI DNR map");
+    expect(html).not.toContain("Source bathymetry map (PDF)");
+    expect(html).not.toContain("javascript:");
   });
 });
 
