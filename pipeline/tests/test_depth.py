@@ -9,6 +9,8 @@ from fishy_pipeline.depth import (
     depth_feet_from_dnr,
     feet_to_meters,
     is_dowlknum,
+    is_lake_id_for_state,
+    is_wbic,
     lake_finder_url,
     normalize_properties,
     pmtiles_protocol_url,
@@ -36,6 +38,10 @@ class ContractTest(unittest.TestCase):
         for row in CONTRACT["dowlknum"]:
             self.assertEqual(is_dowlknum(row["id"]), row["valid"])
             self.assertEqual(lake_finder_url(row["id"]), row.get("lakeFinder") if row["valid"] else None)
+        for row in CONTRACT["wbic"]:
+            self.assertEqual(is_wbic(row["id"]), row["valid"])
+        for row in CONTRACT["lakeRef"]:
+            self.assertEqual(is_lake_id_for_state(row["state"], row["id"]), row["valid"])
         for row in CONTRACT["pmtiles"]:
             self.assertEqual(pmtiles_protocol_url(row["input"]), row["url"])
         self.assertEqual(SAMPLE_VIEW, CONTRACT["sampleView"])

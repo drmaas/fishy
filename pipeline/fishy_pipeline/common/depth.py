@@ -43,6 +43,18 @@ def is_dowlknum(value: str) -> bool:
     return len(value) == 8 and all("0" <= char <= "9" for char in value)
 
 
+def is_wbic(value: str) -> bool:
+    return len(value) == 7 and value.isascii() and all("0" <= char <= "9" for char in value)
+
+
+def is_lake_id_for_state(state: str, lake_id: str) -> bool:
+    if state == "mn":
+        return is_dowlknum(lake_id)
+    if state == "wi":
+        return is_wbic(lake_id)
+    return False
+
+
 def lake_finder_url(dowlknum: str) -> str | None:
     if not is_dowlknum(dowlknum):
         return None

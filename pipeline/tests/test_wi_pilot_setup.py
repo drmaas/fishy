@@ -8,7 +8,12 @@ from unittest.mock import patch
 from fishy_pipeline.states.wi import gcp_review
 from fishy_pipeline.states.wi.hydro_fetch import pilot_hydro_complete
 from fishy_pipeline.states.wi.pilot_data import pilot_wbics
-from fishy_pipeline.states.wi.pilot_setup import PILOT_SETUP_CLI, check_system_deps, pilot_catalog_rows
+from fishy_pipeline.states.wi.pilot_setup import (
+    PILOT_SETUP_CLI,
+    arch_install_hint,
+    check_system_deps,
+    pilot_catalog_rows,
+)
 
 
 class PilotSetupTest(unittest.TestCase):
@@ -72,6 +77,16 @@ class PilotSetupTest(unittest.TestCase):
             )
             self.assertTrue(pilot_hydro_complete(path, wbics))
             self.assertFalse(pilot_hydro_complete(path, pilot_wbics()))
+
+    def test_arch_install_hint_documents_uv_venv(self):
+        hint = arch_install_hint()
+        self.assertIn("uv venv", hint)
+        self.assertIn("--system-site-packages", hint)
+        self.assertIn("uv pip install", hint)
+
+    def test_pilot_setup_cli_uses_venv_python(self):
+        self.assertIn(".venv/bin/python", PILOT_SETUP_CLI)
+        self.assertIn("PYTHONPATH=pipeline", PILOT_SETUP_CLI)
 
     def test_check_system_deps_with_gdal(self):
         with patch(

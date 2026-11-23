@@ -5,7 +5,7 @@ Fishy’s Python tooling turns lake bathymetry into PMTiles for the map. Layout 
 | State | Runtime path |
 | --- | --- |
 | Minnesota (`mn`) | **No pipeline.** The Worker queries the [MN DNR MapServer](https://enterprise.gisdata.mn.gov/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer) live. |
-| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours). Tiles upload to R2. `ingest`, `georef`, and `contours` are implemented. |
+| Wisconsin (`wi`) | **Batch pipeline** under `fishy_pipeline/states/wi/` (ingest → georef → contours → package). Per-lake JSON and `lakes_index.json` land on versioned R2 keys `wi/v1/…`. `ingest`, `georef`, `contours`, and `package` are implemented. |
 | Sample / dev | Shared **`fishy_pipeline/common/`** build on `fixtures/sample-pond` (synthetic DNR-shaped data). |
 
 ## Shared build (`common/`)
@@ -42,7 +42,13 @@ PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi georef --hydro /path/to
 # Wisconsin contours (synthetic fixture, or a work dir produced by georef)
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours --fixtures --work-dir pipeline/work/wi
 PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi contours --hydro /path/to/24k-hydro.geojson
+
+# Wisconsin package (per-lake JSON + lakes_index under wi/v1; --fixtures needs no work tree)
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi package --fixtures --dest pipeline/work/wi/publish
+PYTHONPATH=pipeline python3 -m fishy_pipeline --state wi package --hydro /path/to/24k-hydro.geojson --dry-run --upload
 ```
+
+Each `package` run wipes the local `wi/v1` staging tree, writes `wi/v1/<build-id>/lakes/<wbic>.json` and `lakes_index.json`, and records upload keys in `package-manifest.json`. R2 upload is atomic at the generation level: every object under the new prefix uploads first, then `wi/v1/current.json` points at that generation. Older `wi/v1/<build-id>/` prefixes may be deleted manually or in a later prune step.
 
 ## Wisconsin georef
 

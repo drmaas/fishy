@@ -12,9 +12,10 @@ from fishy_pipeline.states.wi import contours as wi_contours
 from fishy_pipeline.states.wi import gcp_review as wi_gcp_review
 from fishy_pipeline.states.wi import georef as wi_georef
 from fishy_pipeline.states.wi import ingest as wi_ingest
+from fishy_pipeline.states.wi import package as wi_package
 from fishy_pipeline.states.wi import pilot_setup as wi_pilot_setup
 
-WI_COMMANDS = frozenset({"ingest", "georef", "contours", "gcp-review", "pilot-setup"})
+WI_COMMANDS = frozenset({"ingest", "georef", "contours", "gcp-review", "pilot-setup", "package"})
 SHARED_COMMANDS = frozenset({"build", "upload"})
 
 
@@ -42,6 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "pilot-setup",
         help="(wi) Bootstrap git-ignored pilot work dir (hydro, PDFs, rasters, georef)",
+    )
+    sub.add_parser(
+        "package",
+        help="(wi) Build per-lake JSON and lakes_index.json for versioned R2 keys",
     )
     return parser
 
@@ -88,6 +93,9 @@ def dispatch(argv: list[str]) -> None:
         return
     if command == "pilot-setup":
         wi_pilot_setup.main(extra)
+        return
+    if command == "package":
+        wi_package.main(extra)
         return
 
 
