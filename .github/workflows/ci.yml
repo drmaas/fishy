@@ -54,7 +54,7 @@ jobs:
       - name: Install GDAL
         run: |
           sudo apt-get update -o Acquire::Retries=3
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gdal-bin
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gdal-bin python3-gdal
 
       - name: Test
         run: pnpm run pipeline:test

@@ -13,6 +13,10 @@ dependencies = []
 [project.optional-dependencies]
 # Wisconsin PDF pipeline: install only when developing WI ingest/georef/contours.
 # PyMuPDF (import name ``pymupdf``) is AGPL-3.0 or a commercial license from Artifex.
+# georef does not import this extra. It shells out to the GDAL CLI
+# (gdal_translate, gdalwarp -tps -dstalpha) when those binaries are on PATH.
+# GDAL is MIT/X licensed. CI installs Debian gdal-bin and python3-gdal.
+# OpenCV, rasterio, and scikit-image are for later contour tracing.
 wi = [
     "pymupdf>=1.24",
     "rasterio>=1.4",

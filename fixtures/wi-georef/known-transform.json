@@ -1,0 +1,132 @@
+{
+  "width": 160,
+  "height": 160,
+  "scale_m_per_px": 8.0,
+  "theta_deg": 15.0,
+  "origin_easting": 545200.0,
+  "origin_northing": 510800.0,
+  "border_inset": 2,
+  "grid_step": 20,
+  "legend": [136, 136, 18, 18],
+  "pixel_ring": [
+    [38, 48],
+    [96, 34],
+    [122, 62],
+    [104, 96],
+    [118, 124],
+    [58, 130],
+    [30, 96],
+    [46, 68]
+  ],
+  "mismatch_pixel_ring": [
+    [32, 40],
+    [128, 36],
+    [36, 136]
+  ],
+  "similar_dominant_ring": [
+    [52, 56],
+    [110, 42],
+    [136, 70],
+    [118, 104],
+    [132, 132],
+    [72, 138],
+    [44, 104],
+    [60, 76]
+  ],
+  "similar_secondary_ring": [
+    [226, 69],
+    [262, 60],
+    [278, 77],
+    [267, 99],
+    [276, 116],
+    [239, 120],
+    [221, 99],
+    [231, 81]
+  ],
+  "cases": [
+    {
+      "wbic": "0417300",
+      "map_key": "0417300a",
+      "role": "match",
+      "hydrotype": 706,
+      "name": "Known Lake"
+    },
+    {
+      "wbic": "0261100",
+      "map_key": "0261100a",
+      "role": "mismatch",
+      "hydrotype": 706,
+      "name": "Chain Lake"
+    },
+    {
+      "wbic": "1403200",
+      "map_key": "1403200a",
+      "role": "match",
+      "hydrotype": 707,
+      "name": "Known Flowage"
+    },
+    {
+      "wbic": "2271600",
+      "map_key": "2271600a",
+      "role": "match",
+      "hydrotype": 706,
+      "name": "Two Sheet Lake",
+      "multi_sheet": true
+    },
+    {
+      "wbic": "2271600",
+      "map_key": "2271600b",
+      "role": "match",
+      "hydrotype": 706,
+      "name": "Two Sheet Lake",
+      "multi_sheet": true
+    },
+    {
+      "wbic": "0850800",
+      "map_key": "0850800b",
+      "role": "skip",
+      "name": "Skipped Shapefile",
+      "source_media_type": "shapefile",
+      "skip_reason": "unsupported_media_type: shapefile"
+    },
+    {
+      "wbic": "3000001",
+      "map_key": "3000001a",
+      "role": "skip",
+      "name": "Skipped Unknown",
+      "source_media_type": "unknown",
+      "skip_reason": "unsupported_media_type: unknown"
+    },
+    {
+      "wbic": "1500000",
+      "map_key": "1500000a",
+      "role": "match",
+      "hydrotype": 706,
+      "name": "Big Similar Lake",
+      "width": 340,
+      "height": 200,
+      "legend": [4, 178, 16, 16],
+      "draw_ring": "similar_dominant_ring",
+      "hydro_ring": "similar_dominant_ring"
+    },
+    {
+      "wbic": "1500001",
+      "map_key": "1500000a",
+      "role": "match",
+      "hydrotype": 706,
+      "name": "Little Similar Lake",
+      "width": 340,
+      "height": 200,
+      "legend": [4, 178, 16, 16],
+      "draw_ring": "similar_secondary_ring",
+      "hydro_ring": "similar_secondary_ring"
+    },
+    {
+      "wbic": "1403299",
+      "map_key": "1403299a",
+      "role": "flowage_missing",
+      "hydrotype": 707,
+      "name": "Lost Flowage"
+    }
+  ]
+}
