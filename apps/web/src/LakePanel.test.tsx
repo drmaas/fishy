@@ -43,5 +43,7 @@ describe("app shell", () => {
     expect(html).not.toContain('id="credits-panel"');
     expect(html).toContain('aria-controls="fishy-chrome"');
     expect(html).toContain("Hide");
+    expect(html).toContain("chrome-theme-toggle");
+    expect(html).toContain('aria-label="Color scheme:');
   });
 });

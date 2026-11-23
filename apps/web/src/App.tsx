@@ -23,7 +23,7 @@ import {
 } from "./locationBanner.ts";
 import { locationHint } from "./locationHint.ts";
 import { STATES, stateById } from "./states.ts";
-import { ThemeSwitch } from "./ThemeSwitch.tsx";
+import { ThemeIconButton, ThemeSwitch } from "./ThemeSwitch.tsx";
 import {
   applyDocumentTheme,
   maptilerStyleUrl,
@@ -271,15 +271,22 @@ export function App() {
             <p className="mark">Fishy</p>
             <p className="tag">Lake depth maps</p>
           </div>
-          <button
-            type="button"
-            className="tap-target"
-            onClick={() => setChrome(false)}
-            aria-expanded="true"
-            aria-controls="fishy-chrome"
-          >
-            Hide
-          </button>
+          <div className="chrome-head-tools">
+            <ThemeIconButton
+              className="chrome-theme-toggle"
+              value={themePreference}
+              onChange={chooseTheme}
+            />
+            <button
+              type="button"
+              className="tap-target"
+              onClick={() => setChrome(false)}
+              aria-expanded="true"
+              aria-controls="fishy-chrome"
+            >
+              Hide
+            </button>
+          </div>
         </div>
         <div className="chrome-row">
           <label className="field">
