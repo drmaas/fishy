@@ -1,23 +1,49 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "./index";
+import { WI_CURRENT_POINTER_KEY } from "../lib/server/wi-r2";
 
 const KEY = "secret-key";
 const ENV = { MAPTILER_API_KEY: KEY };
 
-function call(path: string): Promise<Response> {
-  return worker.fetch(new Request(`https://fishy.example${path}`), ENV);
+const WI_BUILD_ID = "20261123T043000Z";
+const WI_PREFIX = `wi/v1/${WI_BUILD_ID}`;
+
+function mockR2Bucket(objects: Record<string, unknown>): R2Bucket {
+  return {
+    get: async (key: string) => {
+      if (!(key in objects)) return null;
+      const body = objects[key];
+      return {
+        json: async () => body,
+      } as R2ObjectBody;
+    },
+  };
+}
+
+function call(path: string, env: Env = ENV): Promise<Response> {
+  return worker.fetch(new Request(`https://fishy.example${path}`), env);
+}
+
+function wiEnv(objects: Record<string, unknown>): Env {
+  return {
+    MAPTILER_API_KEY: KEY,
+    FISHY_TILES: mockR2Bucket(objects),
+    FISHY_CONTOURS_URL: "/samples/sample-pond.pmtiles",
+    FISHY_TERRAIN_URL: "/samples/sample-pond-terrain.pmtiles",
+    FISHY_HILLSHADE_URL: "/samples/sample-pond-hillshade.pmtiles",
+  };
 }
 
 describe("lake worker routes", () => {
   it("rejects an unsupported state or bad lake id before the upstream request", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    expect((await call("/api/lakes?state=wi&q=waconia")).status).toBe(404);
+    expect((await call("/api/lakes?state=xx&q=waconia")).status).toBe(404);
     expect((await call("/api/lakes?state=mn&q=x")).status).toBe(404);
     expect((await call("/api/lakes/nearby?state=mn&west=-95&south=44&east=-93&north=45")).status).toBe(404);
     expect((await call("/api/lakes/270133?state=mn")).status).toBe(404);
     expect((await call("/api/lakes/0417300?state=mn")).status).toBe(404);
-    expect((await call("/api/lakes/0417300?state=wi")).status).toBe(404);
+    expect((await call("/api/lakes/0417300?state=wi")).status).toBe(502);
     expect((await call("/api/lakes/not-a-lake?state=mn")).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -49,6 +75,65 @@ describe("lake worker routes", () => {
     expect(await response.json()).toEqual({
       lakes: [{ dowlknum: "10005900", lake_name: "Waconia", cty_name: "Carver", acres: 3075.189 }],
     });
+  });
+
+  it("serves wisconsin lakes from a mocked R2 bucket", async () => {
+    const wiIndex = [
+      {
+        id: "0417300",
+        name: "Lake Wissota",
+        county: "Chippewa",
+        acres: 6044,
+        bbox: { west: -91.35, south: 44.9, east: -91.2, north: 45.05 },
+        qa_status: "verified",
+      },
+    ];
+    const wiDetail = {
+      id: "0417300",
+      dowlknum: "0417300",
+      name: "Lake Wissota",
+      maxDepthFt: 72,
+      areaAcres: 6044,
+      extent: { west: -91.35, south: 44.9, east: -91.2, north: 45.05 },
+      qa_status: "verified",
+      outline: { type: "FeatureCollection", features: [] },
+      contours: { type: "FeatureCollection", features: [] },
+    };
+    const pointer = {
+      version: 1,
+      generation: WI_BUILD_ID,
+      prefix: WI_PREFIX,
+      lakes_index_key: `${WI_PREFIX}/lakes_index.json`,
+      lake_detail_keys: [`${WI_PREFIX}/lakes/0417300.json`],
+    };
+    const bucket = {
+      [WI_CURRENT_POINTER_KEY]: pointer,
+      [`${WI_PREFIX}/lakes_index.json`]: wiIndex,
+      [`${WI_PREFIX}/lakes/0417300.json`]: wiDetail,
+    };
+    const env = wiEnv(bucket);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const search = await call("/api/lakes?state=wi&q=wissota", env);
+  expect(search.status).toBe(200);
+  expect(await search.json()).toEqual({
+    lakes: [{ dowlknum: "0417300", lake_name: "Lake Wissota", cty_name: "Chippewa", acres: 6044 }],
+  });
+  const nearby = await call("/api/lakes/nearby?state=wi&west=-91.4&south=44.95&east=-91.25&north=45.1", env);
+  expect(nearby.status).toBe(200);
+  const nearbyBody = (await nearby.json()) as { features: unknown[] };
+  expect(nearbyBody.features).toHaveLength(1);
+  const detail = await call("/api/lakes/0417300?state=wi", env);
+  expect(detail.status).toBe(200);
+  expect((await detail.json()) as { name: string }).toMatchObject({ name: "Lake Wissota", qa_status: "verified" });
+  expect(await call("/api/lakes/0417300?state=wi&_rev=v2", env).then((r) => r.status)).toBe(200);
+  expect(await call("/api/lakes/417300?state=wi", env).then((r) => r.status)).toBe(404);
+  expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the wisconsin pointer or lake object is missing", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    expect((await call("/api/lakes?state=wi&q=wissota", wiEnv({}))).status).toBe(404);
   });
 
   it("returns a smoothed lake detail from mocked DNR responses", async () => {

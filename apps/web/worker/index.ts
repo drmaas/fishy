@@ -30,7 +30,18 @@ import {
   shoreAreaQueryUrl,
   type GeoJsonFeatureCollection,
 } from "../lib/server/lakes";
-import { isLakeIdForState, lakeIdFromDetailPath } from "@fishy/core";
+import { isLakeIdForState, lakeIdFromDetailPath, type LakeIndexRow } from "@fishy/core";
+import {
+  nearbyWiIndex,
+  parseWiCurrentPointer,
+  parseWiLakesIndex,
+  searchWiIndex,
+  wiLakeDetailKey,
+  wiNearbyCollection,
+  wiSearchHits,
+  WI_CURRENT_POINTER_KEY,
+  WI_PUBLISHED_QA_STATUS,
+} from "../lib/server/wi-r2";
 
 const MAPTILER_STYLES = {
   light: "/maps/outdoor-v2/style.json",
@@ -51,7 +62,7 @@ export default {
       if (url.pathname === "/api/config") {
         return json(publicConfig(env), request.method);
       }
-      const lakeResponse = await handleLakes(request, url);
+      const lakeResponse = await handleLakes(request, url, env);
       if (lakeResponse) return lakeResponse;
       const key = maptilerKey(env);
       if (url.pathname === "/api/basemap/style.json") {
@@ -84,16 +95,16 @@ function json(body: unknown, method: string, cacheControl = "no-store"): Respons
   });
 }
 
-async function handleLakes(request: Request, url: URL): Promise<Response | null> {
+async function handleLakes(request: Request, url: URL, env: Env): Promise<Response | null> {
   if (url.pathname === "/api/lakes") {
-    return cachedLakeResponse(request, () => searchLakes(request, url));
+    return cachedLakeResponse(request, () => searchLakes(request, url, env));
   }
   if (url.pathname === "/api/lakes/nearby") {
-    return cachedLakeResponse(request, () => nearbyLakes(request, url));
+    return cachedLakeResponse(request, () => nearbyLakes(request, url, env));
   }
   const lakeId = lakeIdFromDetailPath(url.pathname);
   if (lakeId !== null) {
-    return cachedLakeResponse(request, () => lakeDetail(request, url, lakeId));
+    return cachedLakeResponse(request, () => lakeDetail(request, url, lakeId, env));
   }
   if (url.pathname.startsWith("/api/lakes/")) {
     return text("not found", 404);
@@ -123,11 +134,17 @@ async function cachedLakeResponse(request: Request, build: () => Promise<Respons
   return response;
 }
 
-async function searchLakes(request: Request, url: URL): Promise<Response> {
+async function searchLakes(request: Request, url: URL, env: Env): Promise<Response> {
   if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
   const state = url.searchParams.get("state");
   const query = sanitizeSearchQuery(url.searchParams.get("q"), state);
   if (!query) return text("not found", 404);
+  if (state === "wi") {
+    const index = await loadWiLakesIndex(env);
+    if (index.kind === "missing") return text("not found", 404);
+    if (index.kind === "error") return text("upstream failed", 502);
+    return json({ lakes: wiSearchHits(searchWiIndex(index.rows, query)) }, request.method, LAKE_CACHE_CONTROL);
+  }
   const upstream = await dnrFetch(searchQueryUrl(buildSearchWhere(query, state!)));
   if (!upstream.ok) return text("upstream failed", 502);
   const body = (await upstream.json()) as {
@@ -138,8 +155,9 @@ async function searchLakes(request: Request, url: URL): Promise<Response> {
   return json({ lakes: normalizeSearchHits(body.features ?? []) }, request.method, LAKE_CACHE_CONTROL);
 }
 
-async function nearbyLakes(request: Request, url: URL): Promise<Response> {
+async function nearbyLakes(request: Request, url: URL, env: Env): Promise<Response> {
   if (!isSupportedState(url.searchParams.get("state"))) return text("not found", 404);
+  const state = url.searchParams.get("state");
   const bbox = parseBbox(
     url.searchParams.get("west"),
     url.searchParams.get("south"),
@@ -147,6 +165,12 @@ async function nearbyLakes(request: Request, url: URL): Promise<Response> {
     url.searchParams.get("north"),
   );
   if (!bbox) return text("not found", 404);
+  if (state === "wi") {
+    const index = await loadWiLakesIndex(env);
+    if (index.kind === "missing") return text("not found", 404);
+    if (index.kind === "error") return text("upstream failed", 502);
+    return json(wiNearbyCollection(nearbyWiIndex(index.rows, bbox)), request.method, LAKE_CACHE_CONTROL);
+  }
   const upstream = await dnrFetch(nearbyQueryUrl(bbox));
   if (!upstream.ok) return text("upstream failed", 502);
   const collection = (await upstream.json()) as GeoJsonFeatureCollection;
@@ -156,10 +180,25 @@ async function nearbyLakes(request: Request, url: URL): Promise<Response> {
   return json(normalizeOutlineCollection(collection), request.method, LAKE_CACHE_CONTROL);
 }
 
-async function lakeDetail(request: Request, url: URL, lakeId: string): Promise<Response> {
+async function lakeDetail(request: Request, url: URL, lakeId: string, env: Env): Promise<Response> {
   const state = url.searchParams.get("state");
   if (!isSupportedState(state)) return text("not found", 404);
   if (!isLakeIdForState(state!, lakeId)) return text("not found", 404);
+  if (state === "wi") {
+    const pointer = await loadWiCurrentPointer(env);
+    if (pointer.kind === "missing") return text("not found", 404);
+    if (pointer.kind === "error") return text("upstream failed", 502);
+    const detailKey = wiLakeDetailKey(pointer.pointer.prefix, lakeId);
+    if (!detailKey) return text("not found", 404);
+    const object = await readR2Object(env, detailKey);
+    if (object.kind === "missing") return text("not found", 404);
+    if (object.kind === "error") return text("upstream failed", 502);
+    const detail = object.body;
+    if (!detail || typeof detail !== "object") return text("upstream failed", 502);
+    const record = detail as Record<string, unknown>;
+    if (record.qa_status !== WI_PUBLISHED_QA_STATUS) return text("not found", 404);
+    return json(detail, request.method, LAKE_CACHE_CONTROL);
+  }
 
   const [extentRes, outlineRes, contoursRes, maxDepthRes, shoreRes] = await Promise.all([
     dnrFetch(extentQueryUrl(lakeId)),
@@ -210,6 +249,55 @@ async function lakeDetail(request: Request, url: URL, lakeId: string): Promise<R
     request.method,
     LAKE_CACHE_CONTROL,
   );
+}
+
+type R2ReadResult =
+  | { kind: "ok"; body: unknown }
+  | { kind: "missing" }
+  | { kind: "error" };
+
+function wiBucket(env: Env): R2Bucket | null {
+  return env.FISHY_TILES ?? null;
+}
+
+async function readR2Object(env: Env, key: string): Promise<R2ReadResult> {
+  const bucket = wiBucket(env);
+  if (!bucket) return { kind: "error" };
+  try {
+    const object = await bucket.get(key);
+    if (!object) return { kind: "missing" };
+    return { kind: "ok", body: await object.json() };
+  } catch {
+    return { kind: "error" };
+  }
+}
+
+async function loadWiCurrentPointer(
+  env: Env,
+): Promise<
+  | { kind: "ok"; pointer: import("../lib/server/wi-r2").WiCurrentPointer }
+  | { kind: "missing" }
+  | { kind: "error" }
+> {
+  const raw = await readR2Object(env, WI_CURRENT_POINTER_KEY);
+  if (raw.kind === "missing") return { kind: "missing" };
+  if (raw.kind === "error") return { kind: "error" };
+  const pointer = parseWiCurrentPointer(raw.body);
+  if (!pointer) return { kind: "missing" };
+  return { kind: "ok", pointer };
+}
+
+async function loadWiLakesIndex(
+  env: Env,
+): Promise<{ kind: "ok"; rows: LakeIndexRow[] } | { kind: "missing" } | { kind: "error" }> {
+  const current = await loadWiCurrentPointer(env);
+  if (current.kind !== "ok") return current;
+  const raw = await readR2Object(env, current.pointer.lakes_index_key);
+  if (raw.kind === "missing") return { kind: "missing" };
+  if (raw.kind === "error") return { kind: "error" };
+  const rows = parseWiLakesIndex(raw.body);
+  if (!rows) return { kind: "error" };
+  return { kind: "ok", rows };
 }
 
 async function dnrFetch(target: string): Promise<Response> {

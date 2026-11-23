@@ -4,7 +4,7 @@ const DNR_HOST = "https://enterprise.gisdata.mn.gov";
 const CONTOURS_LAYER = `${DNR_HOST}/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/0`;
 const OUTLINES_LAYER = `${DNR_HOST}/aghost/rest/services/us_mn_state_dnr/water_lake_bathymetry/MapServer/1`;
 
-export const SUPPORTED_STATES = new Set(["mn"]);
+export const SUPPORTED_STATES = new Set(["mn", "wi"]);
 export const SEARCH_LIMIT = 12;
 export const MAX_BBOX_SPAN = 0.8;
 export const CONTOUR_OFFSET = 0.0005;
