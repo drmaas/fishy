@@ -21,6 +21,7 @@ from fishy_pipeline.states.wi.register import (
     fit_similarity,
     polygon_iou,
     register_shoreline,
+    union_polygon_iou,
 )
 from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
@@ -795,14 +796,129 @@ def _ring_centroid_distance(
     return math.hypot(cx - tx, cy - ty)
 
 
-class StitchedGateTest(unittest.TestCase):
-    def test_stitched_partial_pages_use_combined_iou(self):
-        sheets = [
-            _sheet(0.72, 0.0, "p0.png"),
-            _sheet(0.50, 0.12, "p1.png"),
+class PublishGateTest(unittest.TestCase):
+    def test_high_combined_iou_does_not_clear_gate_when_sheets_miss(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left = [(0.0, 0.0), (95.0, 0.0), (95.0, 100.0), (0.0, 100.0)]
+        right = [(105.0, 0.0), (200.0, 0.0), (200.0, 100.0), (105.0, 100.0)]
+        sheets = [_sheet(0.72, 0.0, "p0.png", ring=left), _sheet(0.50, 0.0, "p0.png", ring=right)]
+        for sheet in sheets:
+            sheet["gate_iou"] = sheet["registration"].iou
+        rings = [list(sheet["ring"]) for sheet in sheets]
+        combined = union_polygon_iou(rings, hydro)
+        gate = min(sheet["gate_iou"] for sheet in sheets)
+        self.assertGreaterEqual(combined, DEFAULT_IOU_THRESHOLD)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
+        low_iou = gate < DEFAULT_IOU_THRESHOLD
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=low_iou,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+        )
+        self.assertIn("iou_below_threshold", reasons)
+        self.assertNotEqual([], reasons)
+
+    def test_fail_closed_does_not_clear_weak_on_combined_iou(self):
+        hydro_ring = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left = [(0.0, 0.0), (95.0, 0.0), (95.0, 100.0), (0.0, 100.0)]
+        right = [(105.0, 0.0), (200.0, 0.0), (200.0, 100.0), (105.0, 100.0)]
+        items = [
+            {
+                "wbic": "2271600",
+                "qa_status": "auto",
+                "multi_sheet": False,
+                "iou": 0.91,
+                "sheets": [
+                    {"page": "p0.png", "iou": 0.72},
+                    {"page": "p0.png", "iou": 0.50},
+                ],
+                "reasons": [],
+                "_sheet_rings": [left, right],
+            }
         ]
-        combined = 0.91
-        self.assertTrue(georef._use_stitched_gate(sheets, [Path("p0.png"), Path("p1.png")], combined, 0.85))
+        polygons = {
+            "2271600": type("Water", (), {"ring": hydro_ring})(),
+        }
+        georef._fail_closed_multi_sheet(items, polygons, DEFAULT_IOU_THRESHOLD)
+        self.assertGreaterEqual(items[0]["combined_iou"], DEFAULT_IOU_THRESHOLD)
+        self.assertIn("multi_sheet", items[0]["reasons"])
+        self.assertEqual(items[0]["qa_status"], "needs_review")
+
+    def test_pick_page_basins_keeps_plausible_same_page_pair(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left_ring = [(5.0, 5.0), (90.0, 5.0), (90.0, 95.0), (5.0, 95.0)]
+        right_ring = [(110.0, 5.0), (195.0, 5.0), (195.0, 95.0), (110.0, 95.0)]
+        identity = Affine(1, 0, 0, 0, 1, 0)
+        blank = ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0))
+        left_iou = polygon_iou(left_ring, hydro)
+        right_iou = polygon_iou(right_ring, hydro)
+        reg_left = Registration(
+            affine=identity,
+            tps=blank,
+            gcps=(),
+            affine_iou=left_iou,
+            tps_iou=left_iou,
+            method="affine",
+        )
+        reg_right = Registration(
+            affine=identity,
+            tps=blank,
+            gcps=(),
+            affine_iou=right_iou,
+            tps_iou=right_iou,
+            method="affine",
+        )
+        candidates = [
+            {
+                "page": Path("page.png"),
+                "registration": reg_left,
+                "ring": left_ring,
+                "area": 1000.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+            {
+                "page": Path("page.png"),
+                "registration": reg_right,
+                "ring": right_ring,
+                "area": 900.0,
+                "cut_fraction": 0.0,
+                "ink": 0.18,
+            },
+        ]
+        picked = georef._pick_page_basins(candidates, hydro)
+        self.assertEqual(len(picked), 2)
+
+    def test_pick_page_basins_rejects_foreign_basin(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        lake = [(10.0, 15.0), (45.0, 12.0), (48.0, 55.0), (12.0, 58.0)]
+        foreign = [(300.0, 300.0), (360.0, 300.0), (360.0, 360.0), (300.0, 360.0)]
+        reg_lake = register_shoreline(lake, hydro)
+        reg_foreign = register_shoreline(foreign, [(280.0, 280.0), (380.0, 280.0), (380.0, 380.0), (280.0, 380.0)])
+        candidates = [
+            {
+                "page": Path("page.png"),
+                "registration": reg_lake,
+                "ring": lake,
+                "area": 1000.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+            {
+                "page": Path("page.png"),
+                "registration": reg_foreign,
+                "ring": foreign,
+                "area": 900.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+        ]
+        picked = georef._pick_page_basins(candidates, hydro)
+        self.assertEqual(len(picked), 1)
 
     def test_figure_quality_prefers_bathymetry_ink_on_near_ties(self):
         high_ink = {"registration": Registration(

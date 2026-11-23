@@ -18,10 +18,13 @@ nodata. The IoU score does not require GDAL.
 IoU under the default threshold (see ``constants.DEFAULT_IOU_THRESHOLD``), a map
 shared by more than one WBIC, a multi-sheet lake whose sheets do not all clear
 the gate, or a flowage (HYDROTYPE 707, or "flowage" in the name) is written to
-``georef/review_queue.json``. A multi-sheet lake publishes only when every
-sheet passes. A flowage is queued even when its hydro polygon is missing. One
-registration failure is queued for that lake and the rest of the batch still
-runs.
+``georef/review_queue.json``. The publish gate for a lake is
+``min(per-sheet gate_iou)``; partial sheets use ``min(registration IoU,
+full_hydro IoU)``. A stitched ``combined_iou`` may be recorded for diagnostics
+but never clears the gate or relaxes ``multi_sheet`` queueing. A multi-sheet lake
+publishes only when every sheet passes. A flowage is queued even when its hydro
+polygon is missing. One registration failure is queued for that lake and the
+rest of the batch still runs.
 """
 
 from __future__ import annotations
@@ -507,14 +510,6 @@ def _georeference_entry(
         combined_preview = union_polygon_iou(preview_rings, list(water.ring))
     if missed_pages:
         gate_iou = 0.0
-    elif (
-        combined_preview is not None
-        and len(sheets) > 1
-        and len({sheet["page"] for sheet in sheets}) == 1
-    ):
-        gate_iou = combined_preview
-    elif _use_stitched_gate(sheets, page_rasters, combined_preview, iou_threshold):
-        gate_iou = combined_preview if combined_preview is not None else min(sheet["gate_iou"] for sheet in sheets)
     else:
         gate_iou = min(sheet["gate_iou"] for sheet in sheets)
     several_pages_passed = sum(1 for sheet in sheets if sheet["gate_iou"] >= iou_threshold) > 1
@@ -839,8 +834,19 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
         dist = _centroid_distance(anchor_ring, mapped_rings([candidate])[0])
         if dist < 0.12 * span:
             continue
+        candidate_ring = mapped_rings([candidate])[0]
+        candidate_hydro = polygon_iou(candidate_ring, list(hydro_ring))
+        # A second basin must land on this WBIC's hydro footprint, not only
+        # nudge the union score upward.
+        if candidate_hydro < 0.30:
+            continue
         union = union_polygon_iou(mapped_rings([anchor, candidate]), list(hydro_ring))
-        if union >= anchor["registration"].iou + 0.05:
+        if union < candidate_hydro:
+            continue
+        anchor_iou = anchor["registration"].iou
+        gain = union >= anchor_iou + 0.05
+        completes = anchor_iou >= 0.84 and union >= anchor_iou
+        if gain or completes:
             kept.append(candidate)
             break
     return kept
@@ -919,25 +925,6 @@ def _pages_complement_sheets(sheets: list[dict]) -> bool:
         for index in range(len(centroids) - 1)
     ]
     return max(distances) >= 0.18 * span
-
-
-def _use_stitched_gate(
-    sheets: list[dict],
-    page_rasters: list[Path],
-    combined: float | None,
-    threshold: float,
-) -> bool:
-    """Use the union score when multiple pages make up one lake footprint."""
-    if combined is None or len(sheets) < 2:
-        return False
-    partial = any(sheet["cut_fraction"] >= _PARTIAL_CUT for sheet in sheets)
-    if partial:
-        return True
-    if len({sheet["page"] for sheet in sheets}) >= 2 and len(page_rasters) > 1:
-        if combined >= max(sheet["registration"].iou for sheet in sheets) + 0.015:
-            return True
-        return _pages_complement_sheets(sheets)
-    return False
 
 
 def _figure_quality(sheet: dict) -> float:
@@ -1033,15 +1020,6 @@ def _fail_closed_multi_sheet(
             combined = round(union_polygon_iou(rings, list(water.ring)), 6)
             for item in group:
                 item["combined_iou"] = combined
-        stitched = (
-            len(group) == 1
-            and len(sheet_rows) > 1
-            and combined is not None
-            and combined >= threshold
-            and {row.get("page") for row in sheet_rows if row.get("page")}
-        )
-        if stitched:
-            weak = False
         if not (weak or incomplete or short):
             continue
         for item in group:
