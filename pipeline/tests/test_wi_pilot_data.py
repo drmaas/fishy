@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.pilot_data import (
     REVIEWED_GCP_DIR,
     depths_match_recorded,
@@ -85,6 +86,23 @@ class PublishGateTest(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(status, "auto")
             self.assertEqual(reasons, [])
+            ok_at_gate, _, reasons_at_gate = publish_gate(
+                wbic="0417300",
+                iou=DEFAULT_IOU_THRESHOLD,
+                depths_ft=[5],
+                georef_qa_status="auto",
+                georef_reasons=[],
+            )
+            self.assertTrue(ok_at_gate, reasons_at_gate)
+            ok_below, _, reasons_below = publish_gate(
+                wbic="0417300",
+                iou=DEFAULT_IOU_THRESHOLD - 0.001,
+                depths_ft=[5],
+                georef_qa_status="auto",
+                georef_reasons=[],
+            )
+            self.assertFalse(ok_below)
+            self.assertIn("georef_iou_below_threshold", reasons_below)
         with patch("fishy_pipeline.states.wi.publish.load_recorded_labels", return_value=None):
             ok, status, reasons = publish_gate(
                 wbic="0417300",

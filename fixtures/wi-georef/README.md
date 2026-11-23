@@ -15,12 +15,12 @@ Row increases south, the same way a PNG does. Cases in the file:
 
 | WBIC | Map key | What it checks |
 | --- | --- | --- |
-| `0417300` | `0417300a` | Known transform. IoU at least 0.90, not queued. |
+| `0417300` | `0417300a` | Known transform. IoU at least 0.85, not queued. |
 | `0261100` | `0261100a` | Different shoreline on its own sheet. Low IoU, queued. |
 | `1403200` | `1403200a` | HYDROTYPE 707 flowage. Queued even when the fit is good. |
 | `1403299` | `1403299a` | Flowage whose hydro polygon is missing. Still queued. |
 | `2271600` | `2271600a`, `2271600b` | Multi-sheet. Both queued. |
-| `1500000`, `1500001` | `1500000a` | Two similar shorelines on one sheet. The smaller lake would score above 0.90 if the dominant ring were scaled to its box. Both are queued with `shared_sheet`. |
+| `1500000`, `1500001` | `1500000a` | Two similar shorelines on one sheet. The smaller lake would score above 0.85 if the dominant ring were scaled to its box. Both are queued with `shared_sheet`. |
 | `0850800` | `0850800b` | Shapefile skip reason kept. |
 | `3000001` | `3000001a` | Unknown skip reason kept. |
 

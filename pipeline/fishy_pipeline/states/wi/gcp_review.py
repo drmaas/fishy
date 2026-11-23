@@ -11,6 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pilot_data import (
@@ -77,6 +78,71 @@ let meta = null;
 let pairs = [];
 let pendingPixel = null;
 let sheetImg = new Image();
+let loadToken = 0;
+const IOU_GATE = __IOU_THRESHOLD__;
+
+function iouStatusText(value) {
+  if (value == null) return '';
+  const pass = value >= IOU_GATE;
+  return 'Preview IoU ' + value.toFixed(3) + ' (' + (pass ? 'meets' : 'below') + ' publish gate ' + IOU_GATE + ')';
+}
+
+function updateMetaBounds() {
+  if (!meta || !meta.hydro_ring || !meta.hydro_ring.length) {
+    meta.bounds = null;
+    return;
+  }
+  const xs = meta.hydro_ring.map(p => p[0]);
+  const ys = meta.hydro_ring.map(p => p[1]);
+  meta.bounds = { minx: Math.min(...xs), maxx: Math.max(...xs), miny: Math.min(...ys), maxy: Math.max(...ys) };
+}
+
+function drawMapLayer() {
+  if (!meta) return;
+  mh.clearRect(0,0,map.width,map.height);
+  mh.fillStyle = '#e8f0f8';
+  mh.fillRect(0,0,map.width,map.height);
+  if (meta.hydro_ring && meta.bounds) {
+    mh.strokeStyle = '#06c';
+    mh.lineWidth = 2;
+    mh.beginPath();
+    meta.hydro_ring.forEach((p, i) => {
+      const [x,y] = mapToScreen(p[0], p[1]);
+      if (i === 0) mh.moveTo(x,y); else mh.lineTo(x,y);
+    });
+    mh.closePath();
+    mh.stroke();
+  }
+  if (meta.bounds) {
+    for (const p of pairs) {
+      const [x,y] = mapToScreen(p.map[0], p.map[1]);
+      mh.fillStyle = '#e11';
+      mh.beginPath(); mh.arc(x, y, 5, 0, Math.PI*2); mh.fill();
+    }
+  }
+}
+
+function drawSheetLayer() {
+  if (!meta) return;
+  sh.clearRect(0,0,sheet.width,sheet.height);
+  if (sheetImg.complete && sheetImg.naturalWidth > 0) {
+    const sc = Math.min(sheet.width / sheetImg.width, sheet.height / sheetImg.height, 1);
+    const w = sheetImg.width * sc;
+    const h = sheetImg.height * sc;
+    sh.drawImage(sheetImg, 0, 0, w, h);
+    meta.sheetScale = { sc, w, h };
+  } else {
+    meta.sheetScale = null;
+  }
+  if (meta.sheetScale) {
+    for (const p of pairs) {
+      const x = p.pixel[0] * meta.sheetScale.sc;
+      const y = p.pixel[1] * meta.sheetScale.sc;
+      sh.fillStyle = '#e11';
+      sh.beginPath(); sh.arc(x, y, 5, 0, Math.PI*2); sh.fill();
+    }
+  }
+}
 
 function fillLakeSelect() {
   const sel = document.getElementById('lake');
@@ -97,29 +163,40 @@ async function loadLake() {
     msg.style.color = '#c00';
     return;
   }
+  const token = ++loadToken;
+  pendingPixel = null;
   try {
     const res = await fetch('/api/lake/' + wbic);
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    meta = await res.json();
+    const body = await res.json();
+    if (token !== loadToken) return;
+    meta = body;
+    meta.sheetScale = null;
     pairs = (meta.reviewed && meta.reviewed.gcps) ? meta.reviewed.gcps.map(g => ({pixel:[g.pixel,g.line], map:[g.easting,g.northing]})) : [];
-    sheetImg.onload = () => drawAll();
-    sheetImg.src = '/api/raster/' + wbic + '?' + Date.now();
-    drawMapFrame();
+    updateMetaBounds();
     renderTable();
+    drawMapLayer();
+    sh.clearRect(0,0,sheet.width,sheet.height);
+    const img = new Image();
+    img.onload = () => {
+      if (token !== loadToken) return;
+      sheetImg = img;
+      drawAll();
+    };
+    img.onerror = () => {
+      if (token !== loadToken) return;
+      msg.textContent = 'Failed to load sheet image for ' + wbic;
+      msg.style.color = '#c00';
+      drawMapLayer();
+    };
+    img.src = '/api/raster/' + wbic + '?' + Date.now();
     msg.style.color = '';
-    msg.textContent = meta.iou_preview != null ? ('Preview IoU ' + meta.iou_preview.toFixed(3)) : '';
+    msg.textContent = iouStatusText(meta.iou_preview);
   } catch (err) {
+    if (token !== loadToken) return;
     msg.textContent = 'Failed to load lake: ' + err.message;
     msg.style.color = '#c00';
   }
-}
-
-function drawMapFrame() {
-  if (!meta || !meta.hydro_ring) return;
-  const xs = meta.hydro_ring.map(p => p[0]);
-  const ys = meta.hydro_ring.map(p => p[1]);
-  meta.bounds = { minx: Math.min(...xs), maxx: Math.max(...xs), miny: Math.min(...ys), maxy: Math.max(...ys) };
-  drawAll();
 }
 
 function xyMap(e, canvas) {
@@ -151,41 +228,8 @@ function screenToMap(px, py) {
 
 function drawAll() {
   if (!meta) return;
-  sh.clearRect(0,0,sheet.width,sheet.height);
-  if (sheetImg.complete) {
-    const sc = Math.min(sheet.width / sheetImg.width, sheet.height / sheetImg.height, 1);
-    const w = sheetImg.width * sc;
-    const h = sheetImg.height * sc;
-    sh.drawImage(sheetImg, 0, 0, w, h);
-    meta.sheetScale = { sc, w, h };
-  }
-  if (meta.sheetScale) {
-    for (const p of pairs) {
-      const x = p.pixel[0] * meta.sheetScale.sc;
-      const y = p.pixel[1] * meta.sheetScale.sc;
-      sh.fillStyle = '#e11';
-      sh.beginPath(); sh.arc(x, y, 5, 0, Math.PI*2); sh.fill();
-    }
-  }
-  mh.clearRect(0,0,map.width,map.height);
-  mh.fillStyle = '#e8f0f8';
-  mh.fillRect(0,0,map.width,map.height);
-  if (meta.hydro_ring) {
-    mh.strokeStyle = '#06c';
-    mh.lineWidth = 2;
-    mh.beginPath();
-    meta.hydro_ring.forEach((p, i) => {
-      const [x,y] = mapToScreen(p[0], p[1]);
-      if (i === 0) mh.moveTo(x,y); else mh.lineTo(x,y);
-    });
-    mh.closePath();
-    mh.stroke();
-  }
-  for (const p of pairs) {
-    const [x,y] = mapToScreen(p.map[0], p.map[1]);
-    mh.fillStyle = '#e11';
-    mh.beginPath(); mh.arc(x, y, 5, 0, Math.PI*2); mh.fill();
-  }
+  drawSheetLayer();
+  drawMapLayer();
 }
 
 sheet.addEventListener('click', (e) => {
@@ -212,7 +256,7 @@ async function previewIou() {
   if (pairs.length < 4) return;
   const res = await fetch('/api/preview/' + wbic, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ gcps: pairs.map(p => ({ pixel: p.pixel[0], line: p.pixel[1], easting: p.map[0], northing: p.map[1] })) })});
   const body = await res.json();
-  document.getElementById('msg').textContent = 'Preview IoU ' + (body.iou != null ? body.iou.toFixed(3) : 'n/a');
+  document.getElementById('msg').textContent = body.iou != null ? iouStatusText(body.iou) : 'Preview IoU n/a';
 }
 
 function renderTable() {
@@ -233,7 +277,8 @@ document.getElementById('save').onclick = async () => {
     gcps: pairs.map(p => ({ pixel: p.pixel[0], line: p.pixel[1], easting: p.map[0], northing: p.map[1] }))
   })});
   const body = await res.json();
-  document.getElementById('msg').textContent = 'Saved ' + body.path + (body.iou != null ? ' IoU '+body.iou.toFixed(3) : '');
+  const iouPart = body.iou != null ? ' ' + iouStatusText(body.iou) : '';
+  document.getElementById('msg').textContent = 'Saved ' + body.path + iouPart;
 };
 
 if (lakes.length) {
@@ -256,7 +301,8 @@ def escape_json_for_script_tag(payload: str) -> str:
 
 def render_review_page(lake_rows: list[dict]) -> str:
     lakes_json = escape_json_for_script_tag(json.dumps(lake_rows))
-    return PAGE_HTML.replace("__LAKE_JSON__", lakes_json)
+    page = PAGE_HTML.replace("__LAKE_JSON__", lakes_json)
+    return page.replace("__IOU_THRESHOLD__", str(DEFAULT_IOU_THRESHOLD))
 
 
 class ReviewContext:

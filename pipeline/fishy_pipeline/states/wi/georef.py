@@ -13,7 +13,8 @@ applied with ``gdalwarp -tps -dstalpha`` in EPSG:3071. Bathymetry ink is black
 (value 0). An alpha band marks the valid sheet so a later clip does not treat
 that ink as nodata. The IoU score does not require GDAL.
 
-IoU under 0.90, a map shared by more than one WBIC, a multi-sheet lake, or a
+IoU under the default threshold (see ``constants.DEFAULT_IOU_THRESHOLD``), a map
+shared by more than one WBIC, a multi-sheet lake, or a
 flowage (HYDROTYPE 707, or "flowage" in the name) is written to
 ``georef/review_queue.json``. A flowage is queued even when its hydro polygon
 is missing. One registration failure is queued for that lake and the rest of
@@ -30,6 +31,7 @@ import sys
 from pathlib import Path
 
 from fishy_pipeline.states.wi import synthetic
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD  # re-exported for CLI defaults
 from fishy_pipeline.states.wi.hydro import FLOWAGE_HYDROTYPE, HydroWaterbody, load_hydro_polygons
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
@@ -43,7 +45,6 @@ from fishy_pipeline.states.wi.wbic import normalize_wbic
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_WORK = REPO_ROOT / "pipeline" / "work" / "wi"
 WI_CRS = "EPSG:3071"
-DEFAULT_IOU_THRESHOLD = 0.90
 _REASON_ORDER = (
     "flowage",
     "shared_sheet",

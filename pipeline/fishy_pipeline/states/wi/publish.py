@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from fishy_pipeline.states.wi.georef import DEFAULT_IOU_THRESHOLD
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.pilot_data import depths_match_recorded, load_recorded_labels
 
-# Reviewed GCPs may drop only this georef queue reason when IoU clears 0.90.
+# Reviewed GCPs may drop only this georef queue reason when IoU clears the gate.
 _IOU_GEOREF_REASON = "iou_below_threshold"
 
 
