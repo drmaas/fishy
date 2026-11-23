@@ -16,13 +16,15 @@ dependencies = []
 # georef does not import this extra. It shells out to the GDAL CLI
 # (gdal_translate, gdalwarp -tps -dstalpha) when those binaries are on PATH.
 # GDAL is MIT/X licensed. CI installs Debian gdal-bin and python3-gdal.
-# OpenCV, rasterio, and scikit-image are for later contour tracing.
+# Contour tracing imports OpenCV, scikit-image, and EasyOCR only for a real sheet.
+# rasterio and pytesseract are unused by the current commands.
 wi = [
     "pymupdf>=1.24",
     "rasterio>=1.4",
     "opencv-python-headless>=4.10",
     "scikit-image>=0.24",
     "pytesseract>=0.3.13",
+    "easyocr>=1.7",
 ]
 
 [tool.setuptools.packages.find]

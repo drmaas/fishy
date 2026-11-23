@@ -5,7 +5,7 @@ Rules for `pipeline/`. Also follow the repository [AGENTS.md](../AGENTS.md).
 ## Layout
 
 - Shared logic: `fishy_pipeline/common/` (`depth.py`, `commands.py`, `build.py`, `upload.py`).
-- Wisconsin batch stages: `fishy_pipeline/states/wi/` (`ingest.py` and `georef.py` implemented; `contours.py` stub).
+- Wisconsin batch stages: `fishy_pipeline/states/wi/` (`ingest`, `georef`, `contours`, `pilot-setup`, `gcp-review` for localhost GCP review).
 - Top-level `fishy_pipeline/depth.py` and `commands.py` re-export `common` for tests and docs.
 - CLI: `python3 -m fishy_pipeline` with optional `--state wi`. Module entries `fishy_pipeline.build` and `fishy_pipeline.upload` remain for pnpm scripts.
 
@@ -15,7 +15,7 @@ Rules for `pipeline/`. Also follow the repository [AGENTS.md](../AGENTS.md).
 - `common/build.py` may shell out to `ogr2ogr`, `gdal_translate`, `gdaldem`, `tippecanoe`, and `pmtiles`. It reads a local directory. It does not download the statewide DNR archive.
 - `common/upload.py` refuses to run unless `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `R2_BUCKET` are set. Those values must not appear in the argument list.
 - New DNR field handling goes through `normalize_properties`. Positive depth on the tiles is `depth_ft`.
-- Wisconsin-only Python deps belong in `pyproject.toml` optional extra `wi`, not in default CI. `ingest` unit tests use stdlib only; PDF rendering in production uses PyMuPDF from the `wi` extra. `georef` registration and IoU are stdlib. The GeoTIFF warp shells out to system `gdal_translate` and `gdalwarp -tps -dstalpha` (GDAL is MIT/X) when those binaries are on `PATH`. CI installs `gdal-bin` and `python3-gdal` (the clip test uses the bindings). OpenCV, rasterio, and scikit-image stay unused until contour tracing.
+- Wisconsin-only Python deps belong in `pyproject.toml` optional extra `wi`, not in default CI. `ingest` unit tests use stdlib only; PDF rendering in production uses PyMuPDF from the `wi` extra. `georef` registration and IoU are stdlib. The GeoTIFF warp shells out to system `gdal_translate` and `gdalwarp -tps -dstalpha` (GDAL is MIT/X) when those binaries are on `PATH`. CI installs `gdal-bin` and `python3-gdal`. `contours` uses committed depth labels in `pipeline/data/wi/labels/`; EasyOCR is optional (`--ocr-fallback`). OpenCV, scikit-image, and EasyOCR are imported only while tracing a real sheet. Rasterio stays unused. Committed pilot GCPs: `pipeline/data/wi/gcps/`.
 - WI download caches: `pipeline/.cache/wi/`. WI work output: `pipeline/work/wi/`. Do not commit catalog pages, hydro extracts, PDFs, or rasters.
 - Tests run with the standard library only: `pnpm run pipeline:test`.
 

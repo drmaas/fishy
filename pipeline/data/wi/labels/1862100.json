@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "wbic": "1862100",
+  "map_key": "1862100a",
+  "page": "1862100a-p0.png",
+  "unit": "m",
+  "labels": [
+    {"pixel": [1280, 920], "value": 1, "unit": "m", "confidence": 0.95},
+    {"pixel": [1350, 880], "value": 2, "unit": "m", "confidence": 0.95},
+    {"pixel": [1420, 850], "value": 3, "unit": "m", "confidence": 0.95},
+    {"pixel": [1510, 830], "value": 3.5, "unit": "m", "confidence": 0.95},
+    {"pixel": [2180, 1680], "value": 4, "unit": "m", "confidence": 0.95},
+    {"pixel": [2240, 1620], "value": 5, "unit": "m", "confidence": 0.95},
+    {"pixel": [2290, 1560], "value": 6, "unit": "m", "confidence": 0.95},
+    {"pixel": [2330, 1500], "value": 7, "unit": "m", "confidence": 0.95},
+    {"pixel": [2360, 1440], "value": 8, "unit": "m", "confidence": 0.95},
+    {"pixel": [2380, 1380], "value": 9, "unit": "m", "confidence": 0.95},
+    {"pixel": [2395, 1320], "value": 10, "unit": "m", "confidence": 0.95},
+    {"pixel": [2410, 1260], "value": 10.3, "unit": "m", "confidence": 0.95}
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "wbic": "2331600",
+  "map_key": "2331600a",
+  "page": "2331600a-p3.png",
+  "unit": "ft",
+  "labels": [
+    {
+      "pixel": [
+        2453.5,
+        329.5
+      ],
+      "value": 5,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2543.5,
+        1079.5
+      ],
+      "value": 10,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2161.5,
+        1177.5
+      ],
+      "value": 15,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2497.5,
+        1323.5
+      ],
+      "value": 20,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        2043.5,
+        2151.5
+      ],
+      "value": 30,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1637.5,
+        1719.5
+      ],
+      "value": 40,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1491.5,
+        547.5
+      ],
+      "value": 50,
+      "confidence": 0.9
+    },
+    {
+      "pixel": [
+        1937.5,
+        577.5
+      ],
+      "value": 90,
+      "confidence": 0.9
+    }
+  ]
+}

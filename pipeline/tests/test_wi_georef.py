@@ -18,7 +18,7 @@ from fishy_pipeline.states.wi.register import (
     polygon_iou,
     register_shoreline,
 )
-from fishy_pipeline.states.wi.shoreline import extract_shoreline
+from fishy_pipeline.states.wi.shoreline import extract_shoreline, extract_shoreline_candidates
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "fixtures" / "wi-georef" / "known-transform.json"
@@ -60,7 +60,8 @@ class RegisterMathTest(unittest.TestCase):
         hydro = [expected.apply(x, y) for x, y in pixels]
         registration = register_shoreline(pixels, hydro, gcp_count=8)
         self.assertGreaterEqual(registration.iou, 0.90)
-        self.assertEqual(registration.iou, min(registration.affine_iou, registration.tps_iou))
+        chosen = registration.affine_iou if registration.method == "affine" else registration.tps_iou
+        self.assertEqual(registration.iou, chosen)
         scale = float(spec["scale_m_per_px"])
         for col, row in pixels:
             easting, northing = expected.apply(col, row)
@@ -69,24 +70,32 @@ class RegisterMathTest(unittest.TestCase):
 
 
 class IouGateTest(unittest.TestCase):
-    def test_iou_is_min_of_affine_and_tps(self):
-        registration = Registration(
+    def test_reported_iou_follows_the_warp_that_is_applied(self):
+        blank = ThinPlateSpline(
+            sources=[],
+            easting_weights=[],
+            northing_weights=[],
+            easting_affine=(0, 0, 0),
+            northing_affine=(0, 0, 0),
+        )
+        affine = Registration(
             affine=Affine(a=1, b=0, tx=0, c=0, d=1, ty=0),
-            tps=ThinPlateSpline(
-                sources=[],
-                easting_weights=[],
-                northing_weights=[],
-                easting_affine=(0, 0, 0),
-                northing_affine=(0, 0, 0),
-            ),
+            tps=blank,
             gcps=(),
             affine_iou=0.95,
             tps_iou=0.80,
+            method="affine",
         )
-        self.assertEqual(registration.iou, min(registration.affine_iou, registration.tps_iou))
-        self.assertGreater(registration.affine_iou, 0.90)
-        self.assertLess(registration.tps_iou, 0.90)
-        self.assertEqual(registration.iou, 0.80)
+        self.assertEqual(affine.iou, 0.95)
+        spline = Registration(
+            affine=Affine(a=1, b=0, tx=0, c=0, d=1, ty=0),
+            tps=blank,
+            gcps=(),
+            affine_iou=0.91,
+            tps_iou=0.94,
+            method="tps",
+        )
+        self.assertEqual(spline.iou, 0.94)
 
 
 class ShorelineTest(unittest.TestCase):
@@ -109,6 +118,50 @@ class ShorelineTest(unittest.TestCase):
     def test_blank_image_has_no_shoreline(self):
         image = RasterImage(width=32, height=32, rgb=bytes([255]) * (32 * 32 * 3))
         self.assertIsNone(extract_shoreline(image))
+
+    def test_outer_shore_beats_an_inner_contour(self):
+        width, height = 120, 120
+        rgb = bytearray([255]) * (width * height * 3)
+        def ink(x0, y0, x1, y1):
+            for x in range(x0, x1 + 1):
+                for y in (y0, y1):
+                    rgb[(y * width + x) * 3 : (y * width + x) * 3 + 3] = b"\x00\x00\x00"
+            for y in range(y0, y1 + 1):
+                for x in (x0, x1):
+                    rgb[(y * width + x) * 3 : (y * width + x) * 3 + 3] = b"\x00\x00\x00"
+        ink(20, 20, 99, 99)
+        ink(45, 45, 74, 74)
+        contour = extract_shoreline(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertIsNotNone(contour)
+        assert contour is not None
+        xs = [point[0] for point in contour]
+        self.assertLess(min(xs), 30)
+        self.assertGreater(max(xs), 90)
+
+    def test_symbol_and_inner_contour_are_not_candidates(self):
+        width, height = 200, 200
+        rgb = bytearray([255]) * (width * height * 3)
+
+        def ink(x0, y0, x1, y1):
+            for x in range(x0, x1 + 1):
+                for y in (y0, y1):
+                    rgb[(y * width + x) * 3 : (y * width + x) * 3 + 3] = b"\x00\x00\x00"
+            for y in range(y0, y1 + 1):
+                for x in (x0, x1):
+                    rgb[(y * width + x) * 3 : (y * width + x) * 3 + 3] = b"\x00\x00\x00"
+
+        ink(8, 8, 18, 18)
+        speck = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        self.assertEqual(extract_shoreline_candidates(speck), [])
+
+        ink(36, 36, 150, 150)
+        ink(80, 80, 110, 110)
+        rings = extract_shoreline_candidates(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertGreaterEqual(len(rings), 1)
+        for ring in rings:
+            xs = [point[0] for point in ring]
+            self.assertLess(min(xs), 45)
+            self.assertGreater(max(xs), 140)
 
 
 class HydroPolygonTest(unittest.TestCase):
@@ -175,6 +228,15 @@ class GdalCommandTest(unittest.TestCase):
         self.assertIn("-dstalpha", warp)
         self.assertNotIn("-dstnodata", warp)
         self.assertEqual(warp[warp.index("-t_srs") + 1], "EPSG:3071")
+        affine = georef.gdal_translate_affine_args(
+            "in.png",
+            "warped.tif",
+            {"a": 2.0, "b": 0.0, "tx": 500000.0, "c": 0.0, "d": -2.0, "ty": 300000.0},
+        )
+        self.assertEqual(affine[0], "gdal_translate")
+        self.assertIn("-a_gt", affine)
+        self.assertIn("EPSG:3071", affine)
+        self.assertNotIn("-tps", affine)
 
 
 class FixtureGeorefTest(unittest.TestCase):
@@ -210,7 +272,10 @@ class FixtureGeorefTest(unittest.TestCase):
         item = self.by_pair[("0417300", "0417300a")]
         self.assertEqual(item["qa_status"], "auto")
         self.assertGreaterEqual(item["iou"], 0.90)
-        self.assertEqual(item["iou"], min(item["affine_iou"], item["tps_iou"]))
+        self.assertEqual(
+            item["iou"],
+            item["affine_iou"] if item["warp"]["method"] == "affine" else item["tps_iou"],
+        )
         self.assertEqual(item["reasons"], [])
         self.assertNotIn(("0417300", "0417300a"), {(row["wbic"], row["map_key"]) for row in self.queue["items"]})
         scale = spec["scale_m_per_px"]
@@ -404,8 +469,10 @@ class ManifestIdentityTest(unittest.TestCase):
             calls = {"n": 0}
 
             def wrapped(pixel_ring, hydro_ring, gcp_count=8):
+                # The first sheet has two lake-scale figures. Both fail, and the
+                # batch still registers the later lakes.
                 calls["n"] += 1
-                if calls["n"] == 1:
+                if calls["n"] <= 2:
                     raise ValueError("singular linear system")
                 return real(pixel_ring, hydro_ring, gcp_count=gcp_count)
 
