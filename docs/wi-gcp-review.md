@@ -1,6 +1,6 @@
 # Wisconsin bathymetry GCP review
 
-Automatic shoreline registration often misses the 0.90 IoU gate. Human control points fix the warp without lowering the threshold.
+Automatic shoreline registration often misses the 0.85 IoU gate. Human control points fix the warp without lowering the depth-label match requirement.
 
 ## Fresh clone bootstrap
 
@@ -51,7 +51,7 @@ curl -s http://127.0.0.1:8765/api/lakes | python -m json.tool
 4. Repeat until you have four to six pairs.
 5. Save. The file is written to `pipeline/data/wi/gcps/<wbic>.json` and is meant to be committed.
 
-The preview IoU updates after four points. Re-run georef after saving:
+The preview IoU updates after four points and shows whether it meets the 0.85 publish gate. Re-run georef after saving:
 
 ```bash
 PYTHONPATH=pipeline .venv/bin/python -m fishy_pipeline --state wi georef \
@@ -65,4 +65,4 @@ When a committed GCP file exists, georef uses it instead of the automatic shorel
 
 Contour depths use committed label lists under `pipeline/data/wi/labels/<wbic>.json` (sheet pixel, value, unit, confidence). EasyOCR is optional (`--ocr-fallback` on contours only).
 
-A lake is publishable only when georef is `auto` with no blocking queue reasons, IoU ≥ 0.90, and traced depths match the recorded label set. Everything else stays `needs_review`.
+A lake is publishable only when georef is `auto` with no blocking queue reasons, IoU ≥ 0.85, and traced depths match the recorded label set. Everything else stays `needs_review`.

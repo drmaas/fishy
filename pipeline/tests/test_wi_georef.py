@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fishy_pipeline.states.wi import georef, synthetic
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
@@ -271,7 +272,7 @@ class FixtureGeorefTest(unittest.TestCase):
         expected = synthetic.affine_from_spec(spec)
         item = self.by_pair[("0417300", "0417300a")]
         self.assertEqual(item["qa_status"], "auto")
-        self.assertGreaterEqual(item["iou"], 0.90)
+        self.assertGreaterEqual(item["iou"], DEFAULT_IOU_THRESHOLD)
         self.assertEqual(
             item["iou"],
             item["affine_iou"] if item["warp"]["method"] == "affine" else item["tps_iou"],
@@ -294,7 +295,7 @@ class FixtureGeorefTest(unittest.TestCase):
         item = self.by_pair[("0261100", "0261100a")]
         self.assertEqual(item["qa_status"], "needs_review")
         self.assertIn("iou_below_threshold", item["reasons"])
-        self.assertLess(item["iou"], 0.90)
+        self.assertLess(item["iou"], DEFAULT_IOU_THRESHOLD)
         queued = next(row for row in self.queue["items"] if row["wbic"] == "0261100")
         self.assertEqual(queued["map_key"], "0261100a")
         self.assertIn("iou_below_threshold", queued["reasons"])

@@ -8,7 +8,8 @@ Each warped sheet is clipped to that polygon. Depth labels come from committed
 ``--ocr-fallback``. Label ink is inpainted, strokes are skeletonized and traced.
 Depths snap to labels and step inward from the 0 shoreline by ``interval_ft``,
 staying inside ``max_depth_ft``. A lake publishes only when shoreline IoU is at
-least 0.90 and traced depths match the recorded labels; everything else is
+IoU at least ``constants.DEFAULT_IOU_THRESHOLD`` and traced depths match the recorded
+labels; everything else is
 ``needs_review`` and is not published.
 
 Per-lake GeoJSON is written under ``contours/lakes/<wbic>/<map_key>/contours.geojson``.
