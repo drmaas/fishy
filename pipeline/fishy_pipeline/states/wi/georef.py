@@ -1217,14 +1217,6 @@ def _affine_overlap(sheet: dict) -> float:
     return float(sheet["registration"].affine_iou)
 
 
-def _spline_overlap(sheet: dict) -> float:
-    """The score ``Registration.iou`` publishes when the method is the spline."""
-    registration = sheet["registration"]
-    if registration.method == "affine":
-        return float(registration.affine_iou)
-    return float(registration.tps_iou)
-
-
 def _published_overlap(sheet: dict) -> float:
     """The score the lake gate reads: ``Registration.iou``."""
     return float(sheet["registration"].iou)
@@ -1252,9 +1244,7 @@ def _closed_sheets_to_keep(unique: list[dict]) -> list[dict]:
             return [*cleared, *siblings]
         return cleared
     published = [sheet for sheet in unique if _published_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
-    if len(published) >= 2:
-        return published
-    if len(published) == 1:
+    if published:
         return published
     return [max(unique, key=_affine_overlap)]
 
@@ -1269,7 +1259,8 @@ def _select_lake_sheets(
     complete shore, so every other large page stays in the gate, including a
     page that produced no shoreline. Closed sheets are ranked by affine overlap.
     Every closed sheet whose affine overlap clears 0.75 stays, and a sibling
-    whose spline also clears stays with it so the multi-sheet queue can run.
+    whose published score also clears stays with it so the multi-sheet queue
+    can run. When no affine clears, every published score at or above 0.75 stays.
     """
     if not sheets:
         return [], []
