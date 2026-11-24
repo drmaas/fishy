@@ -56,6 +56,8 @@ from fishy_pipeline.states.wi.raster import select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
 from fishy_pipeline.states.wi.shoreline import (
     MIN_FIGURE_SPAN,
+    NEATLINE_FRAME_BOUNDARY,
+    NEATLINE_SPAN,
     extract_shoreline,
     extract_shoreline_figures,
     interior_ink_fraction,
@@ -763,6 +765,14 @@ def _georeference_reviewed(
 
 # A shore with at least this much of its boundary on the page edge is a partial sheet.
 _PARTIAL_CUT = 0.08
+# Figures below this interior ink share are not bathymetry enclosures (roads, neatline boxes).
+MIN_BASIN_INK = 0.008
+# After registration, mapped footprint span versus hydro span must stay in this band.
+MIN_HYDRO_SPAN_RATIO = 0.38
+MAX_HYDRO_SPAN_RATIO = 1.85
+# Sheet-filling enclosures with modest ink are often roads plus neatline, not the lake.
+LARGE_RING_SPAN = 0.72
+LARGE_RING_MIN_INK = 0.38
 
 
 def _score_sheet_pages(
@@ -783,9 +793,13 @@ def _score_sheet_pages(
                 continue
             if _span_fraction(figure.ring, image.width, image.height) < max(MIN_FIGURE_SPAN, 0.18):
                 continue
+            cut_fraction = _flag_fraction(figure.on_frame)
+            if _false_shore_ring(figure.ring, image.width, image.height, cut_fraction):
+                continue
             area = abs(_polygon_area(figure.ring))
             if area < 0.03 * image_area or area > 0.72 * image_area:
                 continue
+            ink = interior_ink_fraction(image, figure.ring)
             try:
                 registration = register_shoreline(
                     list(figure.ring),
@@ -796,14 +810,25 @@ def _score_sheet_pages(
             except Exception as error:
                 page_error = str(error)[:500]
                 continue
+            if ink < MIN_BASIN_INK and registration.iou < NEAR_GATE_IOU:
+                continue
+            if not _hydro_footprint_matches(registration, list(figure.ring), hydro_ring):
+                continue
+            span = _span_fraction(list(figure.ring), image.width, image.height)
+            if (
+                span > LARGE_RING_SPAN
+                and ink < LARGE_RING_MIN_INK
+                and registration.iou < NEAR_GATE_IOU
+            ):
+                continue
             candidates.append(
                 {
                     "page": page_raster,
                     "registration": registration,
                     "ring": list(figure.ring),
                     "area": area,
-                    "cut_fraction": _flag_fraction(figure.on_frame),
-                    "ink": interior_ink_fraction(image, figure.ring),
+                    "cut_fraction": cut_fraction,
+                    "ink": ink,
                     "image": image,
                 }
             )
@@ -817,7 +842,7 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
     """Keep one or more disjoint basin figures when their union helps overlap."""
     if not candidates:
         return []
-    ranked = sorted(candidates, key=lambda row: (-row["registration"].iou, -row.get("ink", 0.0)))
+    ranked = sorted(candidates, key=lambda row: (-_figure_quality(row), -row["registration"].iou))
     anchor = ranked[0]
     kept = [anchor]
     if len(ranked) < 2:
@@ -833,6 +858,7 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
 
     anchor_ring = mapped_rings([anchor])[0]
     span = _centroid_span(anchor_ring)
+    anchor_iou = anchor["registration"].iou
     for candidate in ranked[1:5]:
         dist = _centroid_distance(anchor_ring, mapped_rings([candidate])[0])
         if dist < 0.12 * span:
@@ -843,10 +869,11 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
         # nudge the union score upward.
         if candidate_hydro < 0.30:
             continue
+        if candidate["registration"].iou < max(0.35, anchor_iou - 0.25):
+            continue
         union = union_polygon_iou(mapped_rings([anchor, candidate]), list(hydro_ring))
         if union < candidate_hydro:
             continue
-        anchor_iou = anchor["registration"].iou
         gain = union >= anchor_iou + 0.05
         completes = anchor_iou >= NEAR_GATE_IOU and union >= anchor_iou
         if gain or completes:
@@ -935,6 +962,31 @@ def _figure_quality(sheet: dict) -> float:
     iou = sheet["registration"].iou
     ink = float(sheet.get("ink", 0.0))
     return iou * (0.22 + min(ink, 0.28))
+
+
+def _false_shore_ring(
+    ring: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+    width: int,
+    height: int,
+    cut_fraction: float,
+) -> bool:
+    span = _span_fraction(list(ring), width, height)
+    return span >= NEATLINE_SPAN and cut_fraction >= NEATLINE_FRAME_BOUNDARY
+
+
+def _hydro_footprint_matches(
+    registration,
+    pixel_ring: list[tuple[float, float]],
+    hydro_ring: list[tuple[float, float]],
+) -> bool:
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, row) for col, row in pixel_ring]
+    hydro_span = _centroid_span(list(hydro_ring))
+    mapped_span = _centroid_span(mapped)
+    if hydro_span <= 0:
+        return True
+    ratio = mapped_span / hydro_span
+    return MIN_HYDRO_SPAN_RATIO <= ratio <= MAX_HYDRO_SPAN_RATIO
 
 
 def _prefer_sheet(new: dict, old: dict) -> bool:

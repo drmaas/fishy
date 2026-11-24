@@ -45,6 +45,9 @@ MAX_FRAME_BOUNDARY = 0.62
 # A long, nearly straight boundary with almost no enclosed depth ink is a road or grid.
 MAX_ROAD_STRAIGHTNESS = 0.48
 MIN_LAKE_INK = 0.012
+# A sheet-spanning ring with this much boundary on the neatline or page edge is not the lake.
+NEATLINE_SPAN = 0.88
+NEATLINE_FRAME_BOUNDARY = 0.12
 
 
 def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
@@ -68,18 +71,19 @@ def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, f
     if width < 8 or height < 8:
         return []
     mask = _dark_mask(image)
-    _clear_span_lines(mask, width, height, SPAN_RATIO)
-    small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_MAX_SIDE)
-    holes = _ranked_hole_contours(small, small_w, small_h)
+    small, small_w, small_h, factor, frame = _trace_work_mask(mask, width, height, SHORE_MAX_SIDE)
+    holes = _ranked_hole_contours(small, small_w, small_h, frame)
     rings: list[list[tuple[float, float]]] = []
     for _area, contour in holes[:4]:
         scaled = _scale_ring(contour, factor)
         span = _span_fraction(scaled, width, height)
         if len(scaled) >= 8 and span >= MIN_FIGURE_SPAN:
+            if _neatline_enclosure(scaled, width, height, frame, factor):
+                continue
             if span >= 0.35 and _road_like_ring(scaled, mask, image.width, image.height):
                 continue
             rings.append(scaled)
-    fallback = _component_shoreline(small, small_w, small_h)
+    fallback = _component_shoreline(small, small_w, small_h, frame)
     if fallback is not None:
         outline = _scale_ring(fallback, factor)
         outline_span = _span_fraction(outline, width, height)
@@ -98,8 +102,66 @@ def _span_fraction(ring: list[tuple[float, float]], width: int, height: int) -> 
     return max(max(xs) - min(xs), max(ys) - min(ys)) / long_side
 
 
+def _trace_work_mask(
+    mask: bytearray, width: int, height: int, max_side: int
+) -> tuple[bytearray, int, int, int, tuple[int, int, int, int] | None]:
+    """Downsampled ink mask with neatline and long straight runs suppressed."""
+    work = bytearray(mask)
+    _clear_span_lines(work, width, height, SPAN_RATIO)
+    small, small_w, small_h, factor = _shrink_mask(work, width, height, max_side)
+    frame = _detect_frame(small, small_w, small_h)
+    if max(width, height) >= 400:
+        _clear_long_runs(
+            small,
+            small_w,
+            small_h,
+            max(8, int(0.14 * max(small_w, small_h))),
+            keep=frame,
+        )
+    return small, small_w, small_h, factor, frame
+
+
+def _neatline_enclosure(
+    ring: list[tuple[float, float]],
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+    factor: int,
+) -> bool:
+    span = _span_fraction(ring, width, height)
+    if span < NEATLINE_SPAN:
+        return False
+    work_w = max(1, math.ceil(width / factor))
+    work_h = max(1, math.ceil(height / factor))
+    tol = 3.0 * factor
+    hits = 0
+    for point in ring:
+        on_edge = (
+            point[0] <= tol
+            or point[1] <= tol
+            or point[0] >= width - 1 - tol
+            or point[1] >= height - 1 - tol
+        )
+        on_neatline = False
+        if frame is not None:
+            on_neatline = _vertex_on_frame(
+                point[0] / factor,
+                point[1] / factor,
+                work_w,
+                work_h,
+                frame,
+                tol=3.0,
+            )
+        if on_edge or on_neatline:
+            hits += 1
+    return hits / max(len(ring), 1) >= NEATLINE_FRAME_BOUNDARY
+
+
 def _component_shoreline(
-    mask: bytearray, width: int, height: int
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None = None,
 ) -> list[tuple[float, float]] | None:
     """Older path: the dark stroke that encloses the most water."""
     best_fill, best_area = _best_enclosed(mask, width, height)
@@ -231,7 +293,9 @@ def _ring_straightness(ring: tuple[tuple[float, float], ...] | list[tuple[float,
             straight += run
         perimeter += seg_len
         index += 1
-    return straight / max(perimeter, 1e-6)
+    if perimeter < 1e-6:
+        return 0.0
+    return min(1.0, straight / perimeter)
 
 
 def _road_like_ring(
@@ -252,11 +316,16 @@ def _road_like_ring(
 
 
 def _ranked_hole_contours(
-    mask: bytearray, width: int, height: int
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None = None,
 ) -> list[tuple[int, list[tuple[float, float]]]]:
     raw = _hole_contours(mask, width, height)
     scored: list[tuple[float, int, list[tuple[float, float]]]] = []
     for area, contour in raw:
+        if _contour_on_frame(contour, width, height, frame, tol=3.0):
+            continue
         ink = _interior_ink_in_hole(mask, width, height, contour)
         straight = _ring_straightness(contour)
         if straight >= MAX_ROAD_STRAIGHTNESS and ink < MIN_LAKE_INK:
@@ -265,6 +334,31 @@ def _ranked_hole_contours(
         scored.append((score, area, contour))
     scored.sort(key=lambda item: -item[0])
     return [(area, contour) for _score, area, contour in scored]
+
+
+def _contour_on_frame(
+    contour: list[tuple[float, float]],
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+    *,
+    tol: float,
+) -> bool:
+    if not contour:
+        return False
+    long_side = max(width, height)
+    if long_side <= 0:
+        return False
+    span = max(
+        max(point[0] for point in contour) - min(point[0] for point in contour),
+        max(point[1] for point in contour) - min(point[1] for point in contour),
+    )
+    if span / long_side < NEATLINE_SPAN:
+        return False
+    hits = sum(
+        1 for point in contour if _vertex_on_frame(point[0], point[1], width, height, frame, tol=tol)
+    )
+    return hits / len(contour) >= NEATLINE_FRAME_BOUNDARY
 
 
 def _interior_ink_in_hole(

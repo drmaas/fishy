@@ -366,6 +366,41 @@ class ShorelineTest(unittest.TestCase):
         self.assertGreaterEqual(len(rings), 1)
         self.assertLess(_ring_centroid_distance(rings[0], lake), 35.0)
 
+    def test_neatline_touching_lake_skips_map_frame_enclosure(self):
+        width, height = 260, 210
+        rgb = bytearray([255]) * (width * height * 3)
+        inset = 10
+        neatline = [
+            (inset, inset),
+            (width - 1 - inset, inset),
+            (width - 1 - inset, height - 1 - inset),
+            (inset, height - 1 - inset),
+        ]
+        lake = [(70, 70), (155, 62), (175, 118), (125, 148), (68, 130), (62, 92)]
+        _ink_polyline(rgb, width, neatline, close=True)
+        _ink_polyline(rgb, width, lake, close=True)
+        for cx, cy in ((95, 88), (120, 105), (100, 118)):
+            index = (cy * width + cx) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        rings = extract_shoreline_candidates(image)
+        self.assertGreaterEqual(len(rings), 1)
+        long_side = max(width, height)
+        lake_x = sum(point[0] for point in lake) / len(lake)
+        lake_y = sum(point[1] for point in lake) / len(lake)
+        best = min(
+            rings,
+            key=lambda ring: math.hypot(
+                sum(point[0] for point in ring) / len(ring) - lake_x,
+                sum(point[1] for point in ring) / len(ring) - lake_y,
+            ),
+        )
+        xs = [point[0] for point in best]
+        ys = [point[1] for point in best]
+        span = max(max(xs) - min(xs), max(ys) - min(ys)) / long_side
+        self.assertLess(span, 0.72)
+        self.assertLess(span, 0.85)
+
     def test_dual_disconnected_basins_both_surface_as_figures(self):
         width, height = 200, 120
         rgb = bytearray([255]) * (width * height * 3)
@@ -981,6 +1016,13 @@ class PublishGateTest(unittest.TestCase):
             method="affine",
         ), "ink": 0.22, "area": 10}
         self.assertTrue(georef._prefer_sheet(strong, weak))
+
+    def test_false_shore_ring_flags_neatline_touching_boxes(self):
+        ring = [(2.0, 2.0), (318.0, 2.0), (318.0, 408.0), (2.0, 408.0)]
+        flags = (True, True, True, True)
+        self.assertTrue(georef._false_shore_ring(ring, 320, 410, georef._flag_fraction(flags)))
+        lake = [(40.0, 50.0), (120.0, 45.0), (130.0, 95.0), (70.0, 110.0)]
+        self.assertFalse(georef._false_shore_ring(lake, 320, 410, 0.0))
 
 
 class FailClosedGateTest(unittest.TestCase):
