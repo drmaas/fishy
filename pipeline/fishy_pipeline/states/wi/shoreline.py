@@ -42,6 +42,9 @@ SHORE_WORK_SIDE = 720
 MIN_HOLE_FRACTION = 0.025
 # Land inside the neatline has most of its boundary on the frame. A cut lake does not.
 MAX_FRAME_BOUNDARY = 0.62
+# A long, nearly straight boundary with almost no enclosed depth ink is a road or grid.
+MAX_ROAD_STRAIGHTNESS = 0.48
+MIN_LAKE_INK = 0.012
 
 
 def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
@@ -67,12 +70,15 @@ def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, f
     mask = _dark_mask(image)
     _clear_span_lines(mask, width, height, SPAN_RATIO)
     small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_MAX_SIDE)
-    holes = _hole_contours(small, small_w, small_h)
+    holes = _ranked_hole_contours(small, small_w, small_h)
     rings: list[list[tuple[float, float]]] = []
-    if holes:
-        largest = _scale_ring(holes[0][1], factor)
-        if len(largest) >= 8 and _span_fraction(largest, width, height) >= MIN_FIGURE_SPAN:
-            rings.append(largest)
+    for _area, contour in holes[:4]:
+        scaled = _scale_ring(contour, factor)
+        span = _span_fraction(scaled, width, height)
+        if len(scaled) >= 8 and span >= MIN_FIGURE_SPAN:
+            if span >= 0.35 and _road_like_ring(scaled, mask, image.width, image.height):
+                continue
+            rings.append(scaled)
     fallback = _component_shoreline(small, small_w, small_h)
     if fallback is not None:
         outline = _scale_ring(fallback, factor)
@@ -126,6 +132,152 @@ def _shrink_mask(
             if mask[row + x]:
                 out[out_row + (x // factor)] = 1
     return out, small_w, small_h, factor
+
+
+def interior_ink_fraction(
+    image: RasterImage,
+    ring: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+) -> float:
+    """Share of pixels inside ``ring`` that are bathymetry ink (dark strokes)."""
+    width = image.width
+    height = image.height
+    mask = _dark_mask(image)
+    small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_WORK_SIDE)
+    indices = _ring_pixel_indices(ring, small_w, small_h, factor, width, height)
+    if not indices:
+        return 0.0
+    ink = sum(small[index] for index in indices)
+    return ink / len(indices)
+
+
+def _ring_pixel_indices(
+    ring: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+    work_w: int,
+    work_h: int,
+    factor: int,
+    source_w: int,
+    source_h: int,
+) -> list[int]:
+    xs = [point[0] for point in ring]
+    ys = [point[1] for point in ring]
+    min_x = max(0, int(min(xs) / factor))
+    max_x = min(work_w - 1, int(max(xs) / factor))
+    min_y = max(0, int(min(ys) / factor))
+    max_y = min(work_h - 1, int(max(ys) / factor))
+    if max_x < min_x or max_y < min_y:
+        return []
+    points = list(ring)
+    picked: list[int] = []
+
+    def inside(x: float, y: float) -> bool:
+        inside_flag = False
+        previous = points[-1]
+        for current in points:
+            y1, y2 = previous[1], current[1]
+            if (y1 > y) != (y2 > y):
+                x_cross = (current[0] - previous[0]) * (y - y1) / (y2 - y1 + 1e-12) + previous[0]
+                if x < x_cross:
+                    inside_flag = not inside_flag
+            previous = current
+        return inside_flag
+
+    step = 2 if (max_x - min_x + 1) * (max_y - min_y + 1) > 8000 else 1
+    for y in range(min_y, max_y + 1, step):
+        row = y * work_w
+        for x in range(min_x, max_x + 1, step):
+            if inside((x + 0.5) * factor, (y + 0.5) * factor):
+                picked.append(row + x)
+    return picked
+
+
+def _ring_straightness(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
+    """Fraction of perimeter that lies on long, nearly straight runs."""
+    points = list(ring)
+    count = len(points)
+    if count < 8:
+        return 0.0
+    min_run = max(16.0, 0.05 * _ring_span(ring))
+    straight = 0.0
+    perimeter = 0.0
+    index = 0
+    while index < count:
+        start = index
+        j = (index + 1) % count
+        dx = points[j][0] - points[index][0]
+        dy = points[j][1] - points[index][1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            index += 1
+            continue
+        ux, uy = dx / seg_len, dy / seg_len
+        run = seg_len
+        step = j
+        while run < min_run:
+            nxt = (step + 1) % count
+            if nxt == start:
+                break
+            edx = points[nxt][0] - points[step][0]
+            edy = points[nxt][1] - points[step][1]
+            elen = math.hypot(edx, edy)
+            if elen < 1e-6:
+                step = nxt
+                continue
+            cross = abs(ux * (edy / elen) - uy * (edx / elen))
+            if cross > 0.1:
+                break
+            run += elen
+            step = nxt
+        if run >= min_run:
+            straight += run
+        perimeter += seg_len
+        index += 1
+    return straight / max(perimeter, 1e-6)
+
+
+def _road_like_ring(
+    ring: list[tuple[float, float]],
+    mask: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    straight = _ring_straightness(ring)
+    if straight < MAX_ROAD_STRAIGHTNESS:
+        return False
+    work_mask, work_w, work_h, factor = _shrink_mask(mask, width, height, SHORE_WORK_SIDE)
+    indices = _ring_pixel_indices(ring, work_w, work_h, factor, width, height)
+    if not indices:
+        return False
+    ink = sum(work_mask[index] for index in indices) / len(indices)
+    return ink < MIN_LAKE_INK
+
+
+def _ranked_hole_contours(
+    mask: bytearray, width: int, height: int
+) -> list[tuple[int, list[tuple[float, float]]]]:
+    raw = _hole_contours(mask, width, height)
+    scored: list[tuple[float, int, list[tuple[float, float]]]] = []
+    for area, contour in raw:
+        ink = _interior_ink_in_hole(mask, width, height, contour)
+        straight = _ring_straightness(contour)
+        if straight >= MAX_ROAD_STRAIGHTNESS and ink < MIN_LAKE_INK:
+            continue
+        score = float(area) * (0.015 + ink) / (1.0 + max(0.0, straight - 0.2) * 2.5)
+        scored.append((score, area, contour))
+    scored.sort(key=lambda item: -item[0])
+    return [(area, contour) for _score, area, contour in scored]
+
+
+def _interior_ink_in_hole(
+    mask: bytearray,
+    width: int,
+    height: int,
+    ring: list[tuple[float, float]],
+) -> float:
+    indices = _ring_pixel_indices(ring, width, height, 1, width, height)
+    if not indices:
+        return 0.0
+    ink = sum(mask[index] for index in indices)
+    return ink / len(indices)
 
 
 def _hole_contours(
@@ -235,7 +387,13 @@ def _dark_mask(image: RasterImage) -> bytearray:
     rgb = image.rgb
     for index in range(image.width * image.height):
         offset = index * 3
-        if (rgb[offset] + rgb[offset + 1] + rgb[offset + 2]) // 3 < DARK_THRESHOLD:
+        red = rgb[offset]
+        green = rgb[offset + 1]
+        blue = rgb[offset + 2]
+        luminance = (red + green + blue) // 3
+        dark = luminance < DARK_THRESHOLD
+        blue_ink = blue > 80 and blue > red + 30 and blue > green + 10 and luminance < 220
+        if dark or blue_ink:
             mask[index] = 1
     return mask
 

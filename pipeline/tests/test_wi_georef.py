@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fishy_pipeline.states.wi import georef, synthetic
-from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD, NEAR_GATE_IOU
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
@@ -21,6 +21,7 @@ from fishy_pipeline.states.wi.register import (
     fit_similarity,
     polygon_iou,
     register_shoreline,
+    union_polygon_iou,
 )
 from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
@@ -350,6 +351,40 @@ class ShorelineTest(unittest.TestCase):
         self.assertLess(min(ys), 40)
         self.assertGreater(max(ys), 95)
 
+    def test_long_road_enclosure_is_not_the_outer_shore_candidate(self):
+        width, height = 220, 180
+        rgb = bytearray([255]) * (width * height * 3)
+        road = [(20, 70), (200, 70), (200, 82), (20, 82), (20, 70)]
+        lake = [(70, 50), (150, 44), (165, 100), (120, 125), (60, 110), (55, 75)]
+        _ink_polyline(rgb, width, road, close=True)
+        _ink_polyline(rgb, width, lake, close=True)
+        for cx, cy in ((95, 70), (115, 88), (90, 98)):
+            index = (cy * width + cx) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        rings = extract_shoreline_candidates(image)
+        self.assertGreaterEqual(len(rings), 1)
+        self.assertLess(_ring_centroid_distance(rings[0], lake), 35.0)
+
+    def test_dual_disconnected_basins_both_surface_as_figures(self):
+        width, height = 200, 120
+        rgb = bytearray([255]) * (width * height * 3)
+        left = [(25, 30), (70, 25), (80, 70), (30, 75)]
+        right = [(115, 35), (165, 32), (170, 78), (120, 82)]
+        _ink_polyline(rgb, width, left, close=True)
+        _ink_polyline(rgb, width, right, close=True)
+        figures = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        centroids = [
+            (
+                sum(point[0] for point in figure.ring) / len(figure.ring),
+                sum(point[1] for point in figure.ring) / len(figure.ring),
+            )
+            for figure in figures
+        ]
+        self.assertGreaterEqual(len(centroids), 2)
+        gap = abs(centroids[0][0] - centroids[1][0])
+        self.assertGreater(gap, 35.0)
+
     def test_shore_that_hits_the_page_edge_is_marked(self):
         width, height = 120, 100
         rgb = bytearray([255]) * (width * height * 3)
@@ -464,6 +499,18 @@ class FixtureGeorefTest(unittest.TestCase):
         shared = [item for item in self.results["items"] if item["map_key"] == "1500000a"]
         self.assertEqual({item["wbic"] for item in shared}, {"1500000", "1500001"})
         self.assertEqual(len(self.results["items"]), 10)
+
+    def test_single_sheet_auto_lake_uses_min_gate_iou(self):
+        """Regression pin for the single-sheet min(per-sheet gate_iou) publish path."""
+        item = self.by_pair[("0417300", "0417300a")]
+        self.assertFalse(item.get("multi_sheet"))
+        self.assertEqual(len(item["sheets"]), 1)
+        sheet = item["sheets"][0]
+        self.assertEqual(item["iou"], sheet["iou"])
+        self.assertEqual(item["qa_status"], "auto")
+        self.assertEqual(item["reasons"], [])
+        self.assertAlmostEqual(item["iou"], 0.946772, places=6)
+        self.assertAlmostEqual(item["rotation_deg"], 13.862, places=3)
 
     def test_known_raster_recovers_transform_above_threshold(self):
         spec = synthetic.load_spec(SPEC_PATH)
@@ -748,6 +795,192 @@ def _sheet(iou: float, cut: float, name: str, ring: list[tuple[float, float]] | 
         "ring": ring if ring is not None else [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
     }
     return sheet
+
+
+def _ring_centroid_distance(
+    ring: list[tuple[float, float]],
+    target: list[tuple[int, int]],
+) -> float:
+    cx = sum(point[0] for point in ring) / len(ring)
+    cy = sum(point[1] for point in ring) / len(ring)
+    tx = sum(point[0] for point in target) / len(target)
+    ty = sum(point[1] for point in target) / len(target)
+    return math.hypot(cx - tx, cy - ty)
+
+
+class NearGateIouTest(unittest.TestCase):
+    def test_near_gate_is_derived_and_not_publish_threshold(self):
+        self.assertEqual(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD - 0.01)
+        self.assertAlmostEqual(NEAR_GATE_IOU, 0.84)
+        self.assertLess(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD)
+
+    def test_prefer_sheet_uses_near_gate_for_iou_tie_break(self):
+        at_band = _sheet(NEAR_GATE_IOU, 0.0, "a.png")
+        below_band = _sheet(NEAR_GATE_IOU - 0.02, 0.0, "b.png")
+        below_band["ink"] = 0.5
+        at_band["ink"] = 0.01
+        self.assertTrue(georef._prefer_sheet(at_band, below_band))
+
+
+class PublishGateTest(unittest.TestCase):
+    def test_high_combined_iou_does_not_clear_gate_when_sheets_miss(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left = [(0.0, 0.0), (95.0, 0.0), (95.0, 100.0), (0.0, 100.0)]
+        right = [(105.0, 0.0), (200.0, 0.0), (200.0, 100.0), (105.0, 100.0)]
+        sheets = [_sheet(0.72, 0.0, "p0.png", ring=left), _sheet(0.50, 0.0, "p0.png", ring=right)]
+        for sheet in sheets:
+            sheet["gate_iou"] = sheet["registration"].iou
+        rings = [list(sheet["ring"]) for sheet in sheets]
+        combined = union_polygon_iou(rings, hydro)
+        gate = min(sheet["gate_iou"] for sheet in sheets)
+        self.assertGreaterEqual(combined, DEFAULT_IOU_THRESHOLD)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
+        low_iou = gate < DEFAULT_IOU_THRESHOLD
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=low_iou,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+        )
+        self.assertIn("iou_below_threshold", reasons)
+        self.assertNotEqual([], reasons)
+
+    def test_fail_closed_does_not_clear_weak_on_combined_iou(self):
+        hydro_ring = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left = [(0.0, 0.0), (95.0, 0.0), (95.0, 100.0), (0.0, 100.0)]
+        right = [(105.0, 0.0), (200.0, 0.0), (200.0, 100.0), (105.0, 100.0)]
+        items = [
+            {
+                "wbic": "2271600",
+                "qa_status": "auto",
+                "multi_sheet": False,
+                "iou": 0.91,
+                "sheets": [
+                    {"page": "p0.png", "iou": 0.72},
+                    {"page": "p0.png", "iou": 0.50},
+                ],
+                "reasons": [],
+                "_sheet_rings": [left, right],
+            }
+        ]
+        polygons = {
+            "2271600": type("Water", (), {"ring": hydro_ring})(),
+        }
+        georef._fail_closed_multi_sheet(items, polygons, DEFAULT_IOU_THRESHOLD)
+        self.assertGreaterEqual(items[0]["combined_iou"], DEFAULT_IOU_THRESHOLD)
+        self.assertIn("multi_sheet", items[0]["reasons"])
+        self.assertEqual(items[0]["qa_status"], "needs_review")
+
+    def test_pick_page_basins_keeps_plausible_same_page_pair(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left_ring = [(5.0, 5.0), (90.0, 5.0), (90.0, 95.0), (5.0, 95.0)]
+        right_ring = [(110.0, 5.0), (195.0, 5.0), (195.0, 95.0), (110.0, 95.0)]
+        identity = Affine(1, 0, 0, 0, 1, 0)
+        blank = ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0))
+        left_iou = polygon_iou(left_ring, hydro)
+        right_iou = polygon_iou(right_ring, hydro)
+        reg_left = Registration(
+            affine=identity,
+            tps=blank,
+            gcps=(),
+            affine_iou=left_iou,
+            tps_iou=left_iou,
+            method="affine",
+        )
+        reg_right = Registration(
+            affine=identity,
+            tps=blank,
+            gcps=(),
+            affine_iou=right_iou,
+            tps_iou=right_iou,
+            method="affine",
+        )
+        candidates = [
+            {
+                "page": Path("page.png"),
+                "registration": reg_left,
+                "ring": left_ring,
+                "area": 1000.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+            {
+                "page": Path("page.png"),
+                "registration": reg_right,
+                "ring": right_ring,
+                "area": 900.0,
+                "cut_fraction": 0.0,
+                "ink": 0.18,
+            },
+        ]
+        picked = georef._pick_page_basins(candidates, hydro)
+        self.assertEqual(len(picked), 2)
+
+    def test_pick_page_basins_rejects_foreign_basin(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        lake = [(10.0, 15.0), (45.0, 12.0), (48.0, 55.0), (12.0, 58.0)]
+        foreign = [(300.0, 300.0), (360.0, 300.0), (360.0, 360.0), (300.0, 360.0)]
+        reg_lake = register_shoreline(lake, hydro)
+        reg_foreign = register_shoreline(foreign, [(280.0, 280.0), (380.0, 280.0), (380.0, 380.0), (280.0, 380.0)])
+        candidates = [
+            {
+                "page": Path("page.png"),
+                "registration": reg_lake,
+                "ring": lake,
+                "area": 1000.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+            {
+                "page": Path("page.png"),
+                "registration": reg_foreign,
+                "ring": foreign,
+                "area": 900.0,
+                "cut_fraction": 0.0,
+                "ink": 0.2,
+            },
+        ]
+        picked = georef._pick_page_basins(candidates, hydro)
+        self.assertEqual(len(picked), 1)
+
+    def test_figure_quality_prefers_bathymetry_ink_on_near_ties(self):
+        high_ink = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.58,
+            tps_iou=0.58,
+            method="affine",
+        ), "ink": 0.18, "area": 10}
+        low_ink = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.62,
+            tps_iou=0.62,
+            method="affine",
+        ), "ink": 0.004, "area": 10}
+        self.assertTrue(georef._prefer_sheet(high_ink, low_ink))
+        strong = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.91,
+            tps_iou=0.91,
+            method="affine",
+        ), "ink": 0.004, "area": 10}
+        weak = {"registration": Registration(
+            affine=Affine(1, 0, 0, 0, 1, 0),
+            tps=ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0)),
+            gcps=(),
+            affine_iou=0.62,
+            tps_iou=0.62,
+            method="affine",
+        ), "ink": 0.22, "area": 10}
+        self.assertTrue(georef._prefer_sheet(strong, weak))
 
 
 class FailClosedGateTest(unittest.TestCase):
