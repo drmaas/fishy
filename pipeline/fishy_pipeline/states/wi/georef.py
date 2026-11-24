@@ -38,7 +38,10 @@ import sys
 from pathlib import Path
 
 from fishy_pipeline.states.wi import synthetic
-from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD  # re-exported for CLI defaults
+from fishy_pipeline.states.wi.constants import (  # re-exported for CLI defaults
+    DEFAULT_IOU_THRESHOLD,
+    NEAR_GATE_IOU,
+)
 from fishy_pipeline.states.wi.hydro import FLOWAGE_HYDROTYPE, HydroWaterbody, load_hydro_polygons
 from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
@@ -845,7 +848,7 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
             continue
         anchor_iou = anchor["registration"].iou
         gain = union >= anchor_iou + 0.05
-        completes = anchor_iou >= 0.84 and union >= anchor_iou
+        completes = anchor_iou >= NEAR_GATE_IOU and union >= anchor_iou
         if gain or completes:
             kept.append(candidate)
             break
@@ -938,7 +941,7 @@ def _prefer_sheet(new: dict, old: dict) -> bool:
     """Overlap counts most. Ink density only reranks sub-threshold candidates."""
     new_iou = new["registration"].iou
     old_iou = old["registration"].iou
-    if new_iou >= 0.84 or old_iou >= 0.84:
+    if new_iou >= NEAR_GATE_IOU or old_iou >= NEAR_GATE_IOU:
         if abs(new_iou - old_iou) > 0.01:
             return new_iou > old_iou
         return new.get("ink", 0.0) >= old.get("ink", 0.0)

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fishy_pipeline.states.wi import georef, synthetic
-from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD
+from fishy_pipeline.states.wi.constants import DEFAULT_IOU_THRESHOLD, NEAR_GATE_IOU
 from fishy_pipeline.states.wi.hydro import load_hydro_polygons
 from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
@@ -500,6 +500,18 @@ class FixtureGeorefTest(unittest.TestCase):
         self.assertEqual({item["wbic"] for item in shared}, {"1500000", "1500001"})
         self.assertEqual(len(self.results["items"]), 10)
 
+    def test_single_sheet_auto_lake_uses_min_gate_iou(self):
+        """Regression pin for the single-sheet min(per-sheet gate_iou) publish path."""
+        item = self.by_pair[("0417300", "0417300a")]
+        self.assertFalse(item.get("multi_sheet"))
+        self.assertEqual(len(item["sheets"]), 1)
+        sheet = item["sheets"][0]
+        self.assertEqual(item["iou"], sheet["iou"])
+        self.assertEqual(item["qa_status"], "auto")
+        self.assertEqual(item["reasons"], [])
+        self.assertAlmostEqual(item["iou"], 0.946772, places=6)
+        self.assertAlmostEqual(item["rotation_deg"], 13.862, places=3)
+
     def test_known_raster_recovers_transform_above_threshold(self):
         spec = synthetic.load_spec(SPEC_PATH)
         expected = synthetic.affine_from_spec(spec)
@@ -794,6 +806,20 @@ def _ring_centroid_distance(
     tx = sum(point[0] for point in target) / len(target)
     ty = sum(point[1] for point in target) / len(target)
     return math.hypot(cx - tx, cy - ty)
+
+
+class NearGateIouTest(unittest.TestCase):
+    def test_near_gate_is_derived_and_not_publish_threshold(self):
+        self.assertEqual(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD - 0.01)
+        self.assertAlmostEqual(NEAR_GATE_IOU, 0.84)
+        self.assertLess(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD)
+
+    def test_prefer_sheet_uses_near_gate_for_iou_tie_break(self):
+        at_band = _sheet(NEAR_GATE_IOU, 0.0, "a.png")
+        below_band = _sheet(NEAR_GATE_IOU - 0.02, 0.0, "b.png")
+        below_band["ink"] = 0.5
+        at_band["ink"] = 0.01
+        self.assertTrue(georef._prefer_sheet(at_band, below_band))
 
 
 class PublishGateTest(unittest.TestCase):
