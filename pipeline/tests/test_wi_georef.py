@@ -1209,6 +1209,20 @@ class FailClosedGateTest(unittest.TestCase):
         )
         self.assertEqual(reasons, ["multi_sheet"])
 
+    def test_headline_comes_from_the_minimum_sheet(self):
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        strong = _tps_sheet(0.90, 0.88, "strong.png", ring)
+        weak = _tps_sheet(0.77, 0.70, "weak.png", ring)
+        strong["gate_iou"] = strong["registration"].iou
+        weak["gate_iou"] = weak["registration"].iou
+        chosen = georef._headline_sheet([strong, weak])
+        self.assertIs(chosen, weak)
+        public = georef._public_sheet(chosen)
+        self.assertEqual(public["affine_iou"], 0.7)
+        self.assertEqual(public["tps_iou"], 0.77)
+        self.assertEqual(public["method"], "tps")
+        self.assertEqual(public["iou"], 0.77)
+
     def test_several_passing_pages_are_queued_and_each_is_warped(self):
         first = _sheet(0.92, 0.0, "north.png")
         second = _sheet(0.90, 0.0, "south.png")

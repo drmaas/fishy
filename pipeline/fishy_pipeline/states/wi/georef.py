@@ -506,7 +506,8 @@ def _georeference_entry(
             sheet["gate_iou"] = sheet["registration"].iou
     # A low-resolution page stays in the minimum. DPI is not a duplicate test,
     # and dropping the scan is what used to lift a letter page across the gate.
-    primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
+    # The headline fit is the sheet that set that minimum.
+    primary = _headline_sheet(sheets)
     registration = primary["registration"]
     shoreline = primary["ring"]
     chosen_raster = primary["page"]
@@ -1377,12 +1378,20 @@ def _prefer_sheet(new: dict, old: dict) -> bool:
     return _figure_quality(new) > _figure_quality(old)
 
 
+def _headline_sheet(sheets: list[dict]) -> dict:
+    """The sheet whose gate is the lake minimum. Its fit is the headline."""
+    return min(sheets, key=lambda sheet: float(sheet["gate_iou"]))
+
+
 def _public_sheet(sheet: dict) -> dict:
     registration = sheet["registration"]
     row = {
         "page": sheet["page"].name,
         "iou": round(sheet.get("gate_iou", registration.iou), 6),
         "footprint_iou": round(registration.iou, 6),
+        "affine_iou": round(registration.affine_iou, 6),
+        "tps_iou": round(registration.tps_iou, 6),
+        "method": registration.method,
         "rotation_deg": round(registration.rotation_deg, 3),
         "cut_fraction": round(sheet["cut_fraction"], 4),
     }
