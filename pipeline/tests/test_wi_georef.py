@@ -1347,6 +1347,38 @@ class HydroFootprintMatchesTest(unittest.TestCase):
             )
         )
 
+    def test_nine_percent_ring_does_not_skip_the_span_check(self):
+        hydro = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+        ring = [(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        sheet = _sheet(0.86, 0.0, "nine.png", ring=ring)
+        self.assertGreaterEqual(sheet["registration"].iou, 0.68)
+        self.assertFalse(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+                area_fraction=0.09,
+                ink=0.012,
+            )
+        )
+
+    def test_ink_just_over_legend_cap_does_not_skip_the_span_check(self):
+        hydro = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+        ring = [(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        sheet = _sheet(0.88, 0.0, "cap.png", ring=ring)
+        self.assertGreater(0.031, georef._LEGEND_MAX_INK)
+        self.assertFalse(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+                area_fraction=0.06,
+                ink=0.031,
+            )
+        )
+
 
 def _registration(iou: float) -> Registration:
     blank = ThinPlateSpline([], [], [], (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
@@ -1670,6 +1702,92 @@ class AnchorAndLegendTest(unittest.TestCase):
         self.assertGreater(arrow["ink"], georef.MIN_BASIN_INK)
         self.assertLess(arrow["ink"], georef._LEGEND_MAX_INK)
         self.assertIs(georef._choose_anchor([arrow, basin], hydro), basin)
+
+    def test_nine_percent_ring_does_not_win_on_overlap(self):
+        # Area is past the 8% legend cap, so the drop leaves the ring in play.
+        # Both scores are in the near-gate band. Ink and area pick the basin.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        small = {
+            "registration": _registration(0.86),
+            "ink": 0.012,
+            "cut_fraction": 0.0,
+            "ring": [(0.0, 0.0), (30.0, 0.0), (30.0, 24.0), (0.0, 24.0)],
+            "area": 0.09 * width * height,
+            "image": image,
+            "page": Path("nine.png"),
+        }
+        basin = {
+            "registration": _registration(0.76),
+            "ink": 0.22,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.37 * width * height,
+            "image": image,
+            "page": Path("nine.png"),
+        }
+        self.assertGreaterEqual(small["area"] / (width * height), georef._LEGEND_MAX_AREA)
+        self.assertLess(small["area"] / (width * height), georef._SMALL_RING_AREA)
+        self.assertIs(georef._choose_anchor([small, basin], hydro), basin)
+
+    def test_ink_just_over_the_legend_cap_does_not_win_on_overlap(self):
+        # Six percent of the page with ink 0.031 is outside the low-ink drop.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        small = {
+            "registration": _registration(0.88),
+            "ink": 0.031,
+            "cut_fraction": 0.0,
+            "ring": [(0.0, 0.0), (24.0, 0.0), (24.0, 20.0), (0.0, 20.0)],
+            "area": 0.06 * width * height,
+            "image": image,
+            "page": Path("cap.png"),
+        }
+        basin = {
+            "registration": _registration(0.75),
+            "ink": 0.18,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.30 * width * height,
+            "image": image,
+            "page": Path("cap.png"),
+        }
+        self.assertGreater(small["ink"], georef._LEGEND_MAX_INK)
+        self.assertLess(small["area"] / (width * height), georef._LEGEND_MAX_AREA)
+        self.assertIs(georef._choose_anchor([small, basin], hydro), basin)
+
+    def test_small_real_lake_stays_when_its_overlap_beats_the_basin(self):
+        # The drop used to remove this ring because a larger basin exists.
+        # Its overlap is in the near-gate band and the basin's is not.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)]
+        lake = {
+            "registration": _registration(0.86),
+            "ink": 0.015,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.05 * width * height,
+            "image": image,
+            "page": Path("pond.png"),
+        }
+        basin = {
+            "registration": _registration(0.42),
+            "ink": 0.24,
+            "cut_fraction": 0.0,
+            "ring": [(0.0, 0.0), (80.0, 0.0), (80.0, 70.0), (0.0, 70.0)],
+            "area": 0.40 * width * height,
+            "image": image,
+            "page": Path("pond.png"),
+        }
+        self.assertLess(lake["ink"], georef._LEGEND_MAX_INK)
+        self.assertGreater(lake["ink"], georef.MIN_BASIN_INK)
+        self.assertGreaterEqual(lake["registration"].iou, NEAR_GATE_IOU)
+        self.assertLess(basin["registration"].iou, NEAR_GATE_IOU)
+        self.assertGreater(basin["area"], lake["area"] * georef._BASIN_AREA_MULTIPLE)
+        self.assertIs(georef._choose_anchor([basin, lake], hydro), lake)
 
     def test_traced_margin_cell_loses_to_the_basin_and_a_lone_oval_stays(self):
         width, height = 400, 320

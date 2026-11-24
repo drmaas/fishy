@@ -795,6 +795,10 @@ _CITATION_DARK_FRACTION = 0.012
 _LEGEND_MAX_INK = 0.03
 _LEGEND_MAX_AREA = 0.08
 _LEGEND_MIN_BOXINESS = 0.90
+# A ring under this share of the page still takes the hydro span check.
+# Nine percent of the page, and six percent with ink just over the legend cap,
+# used to skip that check once overlap reached 0.68.
+_SMALL_RING_AREA = 0.12
 
 
 def _score_sheet_pages(
@@ -906,31 +910,46 @@ def _row_area_fraction(row: dict) -> float | None:
 
 
 def _drop_margin_enclosures(candidates: list[dict]) -> list[dict]:
-    """Drop a small blank outline when a much larger inked basin is on the page."""
-    basins: list[float] = []
+    """Drop a small low-ink outline when a much larger inked basin is on the page.
+
+    A blank cell is dropped even when its overlap is higher. A small ring whose
+    overlap reaches the near-gate band stays when the larger basin does not:
+    that ring is the lake. Overlap below the band does not save the outline.
+    """
+    basins: list[dict] = []
     fractions: list[float | None] = []
     for row in candidates:
         fraction = _row_area_fraction(row)
         fractions.append(fraction)
         ink = float(row.get("ink") or 0.0)
         if fraction is not None and fraction >= _LEGEND_MAX_AREA and ink >= MIN_BASIN_INK:
-            basins.append(fraction)
+            basins.append(row)
     if not basins:
         return list(candidates)
+    basin_fractions = [float(_row_area_fraction(row) or 0.0) for row in basins]
+    basin_overlap = max(float(row["registration"].iou) for row in basins)
     kept: list[dict] = []
     for row, fraction in zip(candidates, fractions, strict=True):
         ink = float(row.get("ink") or 0.0)
-        # Ink under the legend cap is still low next to a contoured basin.
-        # Trout's north-arrow enclosure is 3.5% of the page with ink 0.021,
-        # above the blank-cell floor and still far below the basin.
-        small_low_ink = (
-            fraction is not None
-            and fraction < _LEGEND_MAX_AREA
-            and ink < _LEGEND_MAX_INK
+        if fraction is None:
+            kept.append(row)
+            continue
+        larger = any(
+            basin >= max(_LEGEND_MAX_AREA, fraction * _BASIN_AREA_MULTIPLE) for basin in basin_fractions
         )
-        if small_low_ink and any(
-            basin >= max(_LEGEND_MAX_AREA, fraction * _BASIN_AREA_MULTIPLE) for basin in basins
-        ):
+        if not larger:
+            kept.append(row)
+            continue
+        if _margin_enclosure(fraction, ink):
+            continue
+        # Trout's north-arrow enclosure is 3.5% of the page with ink 0.021.
+        # It is above the blank-cell floor and still not the basin.
+        small_low_ink = fraction < _LEGEND_MAX_AREA and ink < _LEGEND_MAX_INK
+        if small_low_ink:
+            overlap = float(row["registration"].iou)
+            if overlap >= NEAR_GATE_IOU and basin_overlap < NEAR_GATE_IOU:
+                kept.append(row)
+                continue
             continue
         kept.append(row)
     return kept or list(candidates)
@@ -1102,13 +1121,27 @@ def _publish_gate(row: dict, hydro_ring: list[tuple[float, float]]) -> float:
     return min(iou, float(cached))
 
 
+def _anchor_ink_area(row: dict) -> tuple[float, float]:
+    """Near-gate rank: interior ink, then how much of the page the ring covers."""
+    ink = float(row.get("ink") or 0.0)
+    fraction = _row_area_fraction(row)
+    if fraction is None:
+        return ink, 0.0
+    return ink, float(fraction)
+
+
 def _choose_anchor(candidates: list[dict], hydro_ring: list[tuple[float, float]]) -> dict:
-    """Prefer a clearly better overlap. A blank cell does not beat an inked basin."""
+    """In the near-gate band, ink and area pick the shore. Overlap does not.
+
+    A 9% ring or a 6% ring with ink just over the legend cap can outscore the
+    basin on overlap and still be the wrong figure. Those candidates are ranked
+    by ink, then area. Below the band, a wide overlap gap still wins.
+    """
     candidates = _drop_margin_enclosures(candidates)
     scored = [(_publish_gate(row, hydro_ring), row) for row in candidates]
     above = [pair for pair in scored if pair[0] >= NEAR_GATE_IOU]
     if above:
-        return max(above, key=lambda pair: (pair[0], float(pair[1].get("ink") or 0.0)))[1]
+        return max(above, key=lambda pair: _anchor_ink_area(pair[1]))[1]
     best_gate = max(pair[0] for pair in scored)
     band = [pair for pair in scored if best_gate - pair[0] < _ANCHOR_IOU_BAND]
     return max(band, key=lambda pair: (_figure_quality(pair[1]), pair[0]))[1]
@@ -1266,14 +1299,16 @@ def _hydro_footprint_matches(
     area_fraction: float | None = None,
     ink: float | None = None,
 ) -> bool:
-    # A blank cell can be stretched onto the lake and clear 0.68. That overlap
-    # does not skip the span check. Callers that omit ink keep the old shortcut.
+    # A blank cell, a 9% ring, or a 6% ring with ink just over the legend cap
+    # can be stretched onto the lake and clear 0.68. That overlap does not skip
+    # the span check. Callers that omit the area keep the old shortcut.
     margin = (
         area_fraction is not None
         and ink is not None
         and _margin_enclosure(area_fraction, ink)
     )
-    if registration.iou >= 0.68 and not margin:
+    small = area_fraction is not None and area_fraction < _SMALL_RING_AREA
+    if registration.iou >= 0.68 and not margin and not small:
         return True
     project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
     mapped = [project(col, row) for col, row in pixel_ring]
