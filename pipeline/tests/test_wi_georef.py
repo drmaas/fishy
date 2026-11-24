@@ -1642,6 +1642,35 @@ class AnchorAndLegendTest(unittest.TestCase):
         self.assertGreater(basin["area"] / (width * height), margin["area"] / (width * height) * 3)
         self.assertIs(georef._choose_anchor([margin, basin], hydro), basin)
 
+    def test_north_arrow_enclosure_does_not_outrank_the_basin(self):
+        # Trout sheet 1: a 3.5% enclosure scores 0.721 with ink 0.021.
+        # That is above the blank-cell floor and below the legend ink cap.
+        # The basins on the same page score 0.434 and 0.577.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (80.0, 0.0), (80.0, 60.0), (0.0, 60.0)]
+        arrow = {
+            "registration": _registration(0.721),
+            "ink": 0.021,
+            "cut_fraction": 0.0,
+            "ring": [(0.0, 0.0), (16.0, 0.0), (16.0, 12.0), (0.0, 12.0)],
+            "area": 0.035 * width * height,
+            "image": image,
+            "page": Path("2331600a-p0.png"),
+        }
+        basin = {
+            "registration": _registration(0.577),
+            "ink": 0.138,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.199 * width * height,
+            "image": image,
+            "page": Path("2331600a-p0.png"),
+        }
+        self.assertGreater(arrow["ink"], georef.MIN_BASIN_INK)
+        self.assertLess(arrow["ink"], georef._LEGEND_MAX_INK)
+        self.assertIs(georef._choose_anchor([arrow, basin], hydro), basin)
+
     def test_traced_margin_cell_loses_to_the_basin_and_a_lone_oval_stays(self):
         width, height = 400, 320
         rgb = bytearray([255]) * (width * height * 3)

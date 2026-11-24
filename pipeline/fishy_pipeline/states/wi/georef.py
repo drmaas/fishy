@@ -920,10 +920,16 @@ def _drop_margin_enclosures(candidates: list[dict]) -> list[dict]:
     kept: list[dict] = []
     for row, fraction in zip(candidates, fractions, strict=True):
         ink = float(row.get("ink") or 0.0)
-        if (
+        # Ink under the legend cap is still low next to a contoured basin.
+        # Trout's north-arrow enclosure is 3.5% of the page with ink 0.021,
+        # above the blank-cell floor and still far below the basin.
+        small_low_ink = (
             fraction is not None
-            and _margin_enclosure(fraction, ink)
-            and any(basin >= max(_LEGEND_MAX_AREA, fraction * _BASIN_AREA_MULTIPLE) for basin in basins)
+            and fraction < _LEGEND_MAX_AREA
+            and ink < _LEGEND_MAX_INK
+        )
+        if small_low_ink and any(
+            basin >= max(_LEGEND_MAX_AREA, fraction * _BASIN_AREA_MULTIPLE) for basin in basins
         ):
             continue
         kept.append(row)
