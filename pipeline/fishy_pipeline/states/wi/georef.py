@@ -52,7 +52,7 @@ from fishy_pipeline.states.wi.register import (
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
-from fishy_pipeline.states.wi.raster import MIN_DPI, select_sheet_pages
+from fishy_pipeline.states.wi.raster import LETTER_LONG_INCHES, select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
 from fishy_pipeline.states.wi.shoreline import (
     MAX_ROAD_STRAIGHTNESS,
@@ -504,7 +504,8 @@ def _georeference_entry(
             sheet["gate_iou"] = min(sheet["registration"].iou, full_iou)
         else:
             sheet["gate_iou"] = sheet["registration"].iou
-    sheets = _drop_embed_preview_sheets(sheets, _page_dpi_map(entry))
+    # A low-resolution page stays in the minimum. DPI is not a duplicate test,
+    # and dropping the scan is what used to lift a letter page across the gate.
     primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
     registration = primary["registration"]
     shoreline = primary["ring"]
@@ -783,12 +784,15 @@ LARGE_RING_MIN_INK = 0.12
 # different ring (shore versus road enclosure), so overlap wins.
 _ANCHOR_IOU_BAND = 0.10
 # Doclink PDFs append a letter citation page. Rendered at the request DPI it
-# looks sharp, but it is a few lines of type, not a map sheet.
+# looks sharp, but it is a few lines of type, not a map sheet. A large sheet
+# can be this light and still be the map.
 _CITATION_DARK_FRACTION = 0.012
-# A legend, scale, or north arrow is a near-rectangle with almost no depth ink.
-# Stretching that box onto the hydro polygon can clear the gate. It is not the shore.
+# A legend, scale, or north arrow is a small near-rectangle with almost no
+# depth ink. An oval and a dammed basin are less rectangular, and a basin that
+# covers more of the sheet is not a legend even when one side is a straight dam.
 _LEGEND_MAX_INK = 0.03
-_LEGEND_MIN_BOXINESS = 0.78
+_LEGEND_MAX_AREA = 0.08
+_LEGEND_MIN_BOXINESS = 0.90
 
 
 def _score_sheet_pages(
@@ -842,18 +846,20 @@ def _legend_box(
 ) -> bool:
     """A map legend or north arrow, not a shoreline.
 
-    Those boxes are fairly rectangular, small on the sheet, and hold almost
-    no bathymetry ink. An affine fit can still stretch one onto the hydro
-    polygon, so a high IoU does not make the box the shore.
+    Every branch requires a small footprint and a near-rectangular outline.
+    An oval pond and a basin closed by one straight dam stay eligible. An
+    affine fit can still stretch a real legend onto the hydro polygon, so a
+    high IoU does not make the box the shore.
     """
-    if ink >= _LEGEND_MAX_INK:
+    if area_fraction >= _LEGEND_MAX_AREA or ink >= _LEGEND_MAX_INK:
         return False
-    boxy = _ring_boxiness(ring)
+    if _ring_boxiness(ring) < _LEGEND_MIN_BOXINESS:
+        return False
     if straight >= 0.80 and ink < 0.012:
         return True
-    if straight >= 0.40 and ink < _LEGEND_MAX_INK and boxy >= _LEGEND_MIN_BOXINESS:
+    if straight >= 0.40 and ink < _LEGEND_MAX_INK:
         return True
-    return ink < 0.012 and boxy >= 0.65 and area_fraction < 0.08
+    return ink < 0.012
 
 
 def _score_ring(
@@ -864,6 +870,7 @@ def _score_ring(
     hydro_ring: list[tuple[float, float]],
     gcp_count: int,
     page: Path,
+    _allow_spur_cleanup: bool = True,
 ) -> dict | None:
     """One figure that is allowed to compete, or None when it is not a shore."""
     if len(ring) < 12:
@@ -896,7 +903,32 @@ def _score_ring(
     ):
         return None
     span = _span_fraction(list(ring), image.width, image.height)
-    if straight >= MAX_ROAD_STRAIGHTNESS and ink < 0.02 and registration.iou < NEAR_GATE_IOU:
+    # Spur cleanup runs before this rejection. Otherwise a shore with an
+    # out-and-back road is dropped, and the cleanup never sees it.
+    road_rejection = (
+        straight >= MAX_ROAD_STRAIGHTNESS and ink < 0.02 and registration.iou < NEAR_GATE_IOU
+    )
+    if road_rejection and _allow_spur_cleanup and cut_fraction < _PARTIAL_CUT:
+        best: dict | None = None
+        for cleaned in cleanup_shore_ring(list(ring)):
+            try:
+                alt = _score_ring(
+                    image,
+                    cleaned,
+                    None,
+                    hydro_ring=hydro_ring,
+                    gcp_count=gcp_count,
+                    page=page,
+                    _allow_spur_cleanup=False,
+                )
+            except Exception:
+                continue
+            if alt is None:
+                continue
+            if best is None or alt["registration"].iou > best["registration"].iou:
+                best = alt
+        return best
+    if road_rejection:
         return None
     if span > LARGE_RING_SPAN and ink < LARGE_RING_MIN_INK and registration.iou < NEAR_GATE_IOU:
         return None
@@ -919,33 +951,32 @@ def _spur_cleaned_candidates(
     gcp_count: int,
     page: Path,
 ) -> list[dict]:
-    """Re-score the best closed ring after thin road spurs are opened off.
+    """Re-score every closed ring after thin road spurs are opened off.
 
-    Only that ring is cleaned. A lower-overlap road enclosure is not given a
-    second chance to outscore the shore. A cleaned ring replaces it only when
-    overlap rises by at least 0.02, so a same-score box is not substituted.
+    Cleanup is not reserved for the current overlap winner. A spurred shore
+    that lost to another ring still gets the spur removed. A cleaned ring is
+    kept only when its overlap rises by at least 0.02, so a same-score box is
+    not substituted.
     """
     closed = [row for row in candidates if row["cut_fraction"] < _PARTIAL_CUT]
-    if not closed:
-        return []
-    seed = max(closed, key=lambda row: row["registration"].iou)
-    base_iou = seed["registration"].iou
     cleaned: list[dict] = []
-    for ring in cleanup_shore_ring(seed["ring"]):
-        try:
-            row = _score_ring(
-                image,
-                ring,
-                None,
-                hydro_ring=hydro_ring,
-                gcp_count=gcp_count,
-                page=page,
-            )
-        except Exception:
-            continue
-        if row is None or row["registration"].iou < base_iou + 0.02:
-            continue
-        cleaned.append(row)
+    for seed in closed:
+        base_iou = seed["registration"].iou
+        for ring in cleanup_shore_ring(seed["ring"]):
+            try:
+                row = _score_ring(
+                    image,
+                    ring,
+                    None,
+                    hydro_ring=hydro_ring,
+                    gcp_count=gcp_count,
+                    page=page,
+                )
+            except Exception:
+                continue
+            if row is None or row["registration"].iou < base_iou + 0.02:
+                continue
+            cleaned.append(row)
     return cleaned
 
 
@@ -1322,51 +1353,10 @@ def _reasons(
     return sorted(found, key=lambda name: order[name])
 
 
-def _page_dpi_map(entry: dict) -> dict[Path, float]:
-    result: dict[Path, float] = {}
-    for item in entry.get("raster_pages") or []:
-        if not isinstance(item, dict) or not item.get("path"):
-            continue
-        result[Path(str(item["path"]))] = float(item.get("dpi") or 0.0)
-    return result
-
-
-def _drop_embed_preview_sheets(sheets: list[dict], dpi_map: dict[Path, float]) -> list[dict]:
-    """Low-dpi embed previews should not drag down a sharp map page on the same PDF."""
-    if len(sheets) < 2:
-        return sheets
-    sharp_scores = [
-        sheet["gate_iou"]
-        for sheet in sheets
-        if dpi_map.get(sheet["page"], 0.0) >= MIN_DPI
-    ]
-    if not sharp_scores:
-        return sheets
-    anchor = max(sharp_scores)
-    if anchor < 0.55:
-        return sheets
-    kept = [
-        sheet
-        for sheet in sheets
-        if dpi_map.get(sheet["page"], 0.0) >= MIN_DPI or sheet["gate_iou"] >= anchor - 0.04
-    ]
-    return kept if kept else sheets
-
-
-def _is_citation_raster(path: Path) -> bool:
-    """True when a page is a doclink citation, not a bathymetry sheet.
-
-    Those pages are vector type on letter paper. They render at the requested
-    DPI, so a low-resolution map scan makes them look like the sharp sheet.
-    They are not a second map and not a low-resolution preview of one.
-    """
-    try:
-        image = read_png(path)
-    except (OSError, ValueError):
-        return False
+def _sampled_dark_fraction(image) -> float:
     total = image.width * image.height
-    if total < 64:
-        return False
+    if total <= 0:
+        return 1.0
     rgb = image.rgb
     dark = 0
     seen = 0
@@ -1376,28 +1366,76 @@ def _is_citation_raster(path: Path) -> bool:
             dark += 1
         seen += 1
     if seen == 0:
+        return 1.0
+    return dark / seen
+
+
+def _is_citation_raster(path: Path, *, long_inches: float | None = None) -> bool:
+    """True when a page is a doclink citation, not a bathymetry sheet.
+
+    A citation is letter-size type. A large sheet stays even when the ink is
+    light, and a light page that still holds a lake-scale figure stays too.
+    Low ink by itself is not enough: Sparkling's map is a light sheet, and a
+    sparser sheet in the rest of the catalog can fall under the darkness cutoff.
+    """
+    try:
+        image = read_png(path)
+    except (OSError, ValueError):
         return False
-    return dark / seen < _CITATION_DARK_FRACTION
+    if image.width * image.height < 64:
+        return False
+    if _sampled_dark_fraction(image) >= _CITATION_DARK_FRACTION:
+        return False
+    if long_inches is not None and long_inches > LETTER_LONG_INCHES:
+        return False
+    if extract_shoreline_figures(image):
+        return False
+    if long_inches is None:
+        return True
+    return long_inches <= LETTER_LONG_INCHES
+
+
+def _page_long_inches(page: dict) -> float | None:
+    pixels = page.get("pixels")
+    dpi = page.get("dpi")
+    if not isinstance(pixels, (list, tuple)) or len(pixels) < 2 or not dpi:
+        return None
+    try:
+        dpi_value = float(dpi)
+    except (TypeError, ValueError):
+        return None
+    if dpi_value <= 0:
+        return None
+    return max(float(pixels[0]), float(pixels[1])) / dpi_value
 
 
 def _page_rasters(entry: dict, raster: Path) -> list[Path]:
     """Map-sheet pages for this row. A single raster stays a one-item list."""
     raw_pages = entry.get("raster_pages")
-    pages: list[Path] = []
+    described: list[tuple[Path, float | None]] = []
     if isinstance(raw_pages, list):
-        described = [item for item in raw_pages if isinstance(item, dict)]
+        items = [item for item in raw_pages if isinstance(item, dict)]
         bare = [item for item in raw_pages if not isinstance(item, dict)]
-        for item in select_sheet_pages(described):
+        for item in select_sheet_pages(items):
             path = item.get("path")
             if path and Path(str(path)).is_file():
-                pages.append(Path(str(path)))
+                described.append((Path(str(path)), _page_long_inches(item)))
         for item in bare:
             if item and Path(str(item)).is_file():
-                pages.append(Path(str(item)))
-    if not pages:
-        pages = [raster]
-    maps = [page for page in pages if not _is_citation_raster(page)]
-    return maps or pages
+                described.append((Path(str(item)), None))
+    if not described:
+        described = [(raster, None)]
+    large = [path for path, long_inches in described if long_inches is not None and long_inches > LETTER_LONG_INCHES]
+    maps: list[Path] = []
+    for path, long_inches in described:
+        # The only large sheet is the map, even when its ink is sparse.
+        if len(large) == 1 and path in large:
+            maps.append(path)
+            continue
+        if _is_citation_raster(path, long_inches=long_inches):
+            continue
+        maps.append(path)
+    return maps or [path for path, _long_inches in described]
 
 
 def _warp(

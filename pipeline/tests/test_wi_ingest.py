@@ -208,13 +208,13 @@ class RasterTest(unittest.TestCase):
         chosen = raster.select_sheet_pages(pages)
         self.assertEqual([page["path"] for page in chosen], ["map"])
 
-    def test_low_dpi_large_embed_includes_sharp_letter_page(self):
+    def test_low_dpi_large_sheet_does_not_pull_a_sharp_letter_page_back(self):
         pages = [
             {"path": "preview", "page": 0, "pixels": [2784, 2464], "dpi": 72},
             {"path": "map", "page": 1, "pixels": [2550, 3300], "dpi": 350},
         ]
         chosen = raster.select_sheet_pages(pages)
-        self.assertEqual({page["path"] for page in chosen}, {"preview", "map"})
+        self.assertEqual([page["path"] for page in chosen], ["preview"])
 
     def test_letter_only_scan_keeps_every_page(self):
         pages = [

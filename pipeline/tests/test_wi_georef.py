@@ -25,12 +25,17 @@ from fishy_pipeline.states.wi.register import (
 )
 from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
+    MAX_ROAD_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
     extract_shoreline,
     extract_shoreline_candidates,
     extract_shoreline_figures,
+    _has_reversal,
+    _hole_shore_pixels,
+    _ring_boxiness,
     _ring_straightness,
+    _road_like_ring,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -452,6 +457,90 @@ class ShorelineTest(unittest.TestCase):
         marked = [figure for figure in figures if any(figure.on_frame)]
         self.assertGreaterEqual(len(marked), 1)
         self.assertLess(sum(1 for flag in marked[0].on_frame if flag) / len(marked[0].on_frame), 0.62)
+
+    def test_span_wide_rectangle_stays_a_figure(self):
+        # The top and bottom edges cover 87% of the width, over the 80% span
+        # clear. Those pixels seal the basin, so the rectangle is still traced.
+        width, height = 200, 80
+        rgb = bytearray([255]) * (width * height * 3)
+        left, right = 13, 186
+        top, bottom = 20, 50
+        self.assertGreaterEqual((right - left + 1) / width, 0.87)
+        _ink_polyline(
+            rgb,
+            width,
+            [(left, top), (right, top), (right, bottom), (left, bottom)],
+            close=True,
+        )
+        for x in range(left + 8, right - 8, 7):
+            for y in range(top + 6, bottom - 4, 8):
+                index = (y * width + x) * 3
+                rgb[index : index + 3] = b"\x00\x00\x00"
+        figures = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertTrue(figures)
+        spans = []
+        for figure in figures:
+            xs = [point[0] for point in figure.ring]
+            spans.append((max(xs) - min(xs)) / width)
+        self.assertTrue(any(span >= 0.80 for span in spans))
+
+    def test_seal_keeps_only_the_hole_that_opens(self):
+        width, height = 120, 90
+        mask = bytearray(width * height)
+
+        def ink_box(x0: int, y0: int, x1: int, y1: int) -> None:
+            for x in range(x0, x1 + 1):
+                mask[y0 * width + x] = 1
+                mask[y1 * width + x] = 1
+            for y in range(y0, y1 + 1):
+                mask[y * width + x0] = 1
+                mask[y * width + x1] = 1
+
+        ink_box(12, 18, 70, 58)
+        for x in range(40, 115):
+            mask[17 * width + x] = 1
+        ink_box(78, 64, 116, 86)
+        protect = _hole_shore_pixels(mask, width, height, 36)
+        lake_seal = sum(protect[58 * width + x] for x in range(22, 60))
+        self.assertGreater(lake_seal, 10)
+        self.assertEqual(sum(protect[17 * width + x] for x in range(40, 115)), 0)
+        other = sum(protect[64 * width + x] for x in range(86, 110))
+        other += sum(protect[y * width + 116] for y in range(70, 82))
+        self.assertEqual(other, 0)
+
+    def test_reversed_spur_is_not_only_a_road(self):
+        # A collinear out-and-back is road-straight and empty, and it reverses.
+        # The candidate filter keeps that ring so spur cleanup can run.
+        points: list[tuple[float, float]] = []
+        x = 20.0
+        while x < 160.0:
+            points.append((x, 30.0))
+            x += 4.0
+        y = 30.0
+        while y < 100.0:
+            points.append((160.0, y))
+            y += 4.0
+        x = 160.0
+        while x > 90.0:
+            points.append((x, 100.0))
+            x -= 4.0
+        points.append((90.0, 100.0))
+        points.append((90.0, 110.0))
+        points.append((90.0, 100.0))
+        x = 86.0
+        while x > 20.0:
+            points.append((x, 100.0))
+            x -= 4.0
+        y = 100.0
+        while y > 30.0:
+            points.append((20.0, y))
+            y -= 4.0
+        width, height = 200, 140
+        mask = bytearray(width * height)
+        self.assertTrue(_has_reversal(points))
+        self.assertGreater(_ring_straightness(points), MAX_ROAD_STRAIGHTNESS)
+        self.assertTrue(_road_like_ring(points, mask, width, height))
+        self.assertFalse(_road_like_ring(points, mask, width, height) and not _has_reversal(points))
 
 
 class HydroPolygonTest(unittest.TestCase):
@@ -1164,18 +1253,19 @@ class NeatlineSpanEdgeTest(unittest.TestCase):
         self.assertTrue(georef._false_shore_ring(ring, width, height, 0.55))
 
 
-class EmbedPreviewSheetTest(unittest.TestCase):
-    def test_drop_embed_sheets_when_sharp_page_scores(self):
-        sharp = _sheet(0.82, 0.0, "sharp.png")
+class DistinctLowDpiSheetTest(unittest.TestCase):
+    def test_distinct_low_dpi_bathymetry_stays_in_the_minimum(self):
+        low = _sheet(0.35, 0.0, "scan.png")
+        low["gate_iou"] = low["registration"].iou
+        sharp = _sheet(0.82, 0.0, "letter.png")
         sharp["gate_iou"] = sharp["registration"].iou
-        embed = _sheet(0.35, 0.0, "embed.png")
-        embed["gate_iou"] = embed["registration"].iou
-        dpi_map = {
-            sharp["page"]: 350.0,
-            embed["page"]: 72.0,
-        }
-        kept = georef._drop_embed_preview_sheets([sharp, embed], dpi_map)
-        self.assertEqual([row["page"] for row in kept], [sharp["page"]])
+        # The pages are different drawings. A dpi gap does not remove the scan,
+        # so the lake minimum stays on the low side of the gate.
+        sheets = [low, sharp]
+        gate = min(sheet["gate_iou"] for sheet in sheets)
+        self.assertEqual({sheet["page"].name for sheet in sheets}, {"scan.png", "letter.png"})
+        self.assertAlmostEqual(gate, 0.35)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
 
 
 class HydroFootprintMatchesTest(unittest.TestCase):
@@ -1224,6 +1314,72 @@ def _registration(iou: float) -> Registration:
         tps_iou=iou,
         method="affine",
     )
+
+
+def _oval_ring(width: int, height: int) -> list[tuple[int, int]]:
+    cx, cy = width / 2, height / 2
+    rx, ry = width * 0.16, height * 0.11
+    ring: list[tuple[int, int]] = []
+    for index in range(96):
+        angle = index / 96 * 2 * math.pi
+        ring.append((int(round(cx + rx * math.cos(angle))), int(round(cy + ry * math.sin(angle)))))
+    return ring
+
+
+def _dam_ring() -> list[tuple[int, int]]:
+    """A large basin closed by one straight dam and a shallow bow.
+
+    The outline is near a rectangle, so only the area cap keeps it out of the
+    legend test. A smaller oval covers the boxiness cap.
+    """
+    chord = 120.0
+    body = 50.0
+    bow = 6.0
+    x0, y0 = 30.0, 40.0
+    points: list[tuple[int, int]] = []
+    steps = 40
+    for step in range(steps + 1):
+        fraction = step / steps
+        x = x0 + chord * fraction
+        # Circular-ish bow above the rectangle's top edge.
+        arch = math.sin(math.pi * fraction)
+        y = y0 - bow * arch
+        points.append((int(round(x)), int(round(y))))
+    points.append((int(round(x0 + chord)), int(round(y0 + body))))
+    points.append((int(round(x0)), int(round(y0 + body))))
+    return points
+
+
+def _traced_outline(
+    ring: list[tuple[int, int]], width: int, height: int
+) -> tuple[RasterImage, list[tuple[float, float]]]:
+    rgb = bytearray([255]) * (width * height * 3)
+    _ink_polyline(rgb, width, ring, close=True)
+    image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+    figures = extract_shoreline_figures(image)
+    if not figures:
+        raise AssertionError("traced outline produced no figure")
+    target_x = sum(point[0] for point in ring) / len(ring)
+    target_y = sum(point[1] for point in ring) / len(ring)
+    best = min(
+        figures,
+        key=lambda figure: math.hypot(
+            sum(point[0] for point in figure.ring) / len(figure.ring) - target_x,
+            sum(point[1] for point in figure.ring) / len(figure.ring) - target_y,
+        ),
+    )
+    return image, list(best.ring)
+
+
+def _outline_metrics(image: RasterImage, ring: list[tuple[float, float]]) -> dict[str, float]:
+    area = abs(georef._polygon_area(ring))
+    image_area = float(image.width * image.height)
+    return {
+        "area": area / image_area if image_area else 0.0,
+        "box": _ring_boxiness(ring),
+        "straight": _ring_straightness(ring),
+        "ink": georef.interior_ink_fraction(image, ring),
+    }
 
 
 def _dense_rectangle(x0: float, y0: float, x1: float, y1: float, step: float = 4.0) -> list[tuple[float, float]]:
@@ -1285,6 +1441,102 @@ class ShorelineStraightnessTest(unittest.TestCase):
         self.assertTrue(cleaned)
         self.assertTrue(any(max(point[0] for point in variant) < 120.0 for variant in cleaned))
 
+    def test_out_and_back_reversal_is_a_corner(self):
+        # Each spur leg is 10 px. The straight-run minimum on this ring is 16.
+        # Counting the reversal as one run would make the whole perimeter straight.
+        points: list[tuple[float, float]] = []
+        x = 0.0
+        while x < 200.0:
+            points.append((x, 0.0))
+            x += 4.0
+        y = 0.0
+        while y < 80.0:
+            points.append((200.0, y))
+            y += 4.0
+        x = 200.0
+        while x > 100.0:
+            points.append((x, 80.0))
+            x -= 4.0
+        points.append((100.0, 80.0))
+        points.append((100.0, 90.0))
+        points.append((100.0, 80.0))
+        x = 96.0
+        while x > 0.0:
+            points.append((x, 80.0))
+            x -= 4.0
+        y = 80.0
+        while y > 0.0:
+            points.append((0.0, y))
+            y -= 4.0
+        self.assertTrue(_has_reversal(points))
+        straight = _ring_straightness(points)
+        self.assertGreater(straight, 0.90)
+        self.assertLess(straight, 0.99)
+        self.assertGreater(straight, MAX_ROAD_STRAIGHTNESS)
+
+    def test_spur_cleanup_is_not_limited_to_the_iou_winner(self):
+        # The thin spur scores under a plain rectangle. Cleanup has to see
+        # that ring even though another closed candidate currently leads.
+        width, height = 180, 120
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        outline = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 39.6),
+            (150.0, 39.6),
+            (150.0, 40.2),
+            (100.0, 40.2),
+            (100.0, 80.0),
+            (0.0, 80.0),
+        ]
+        dense: list[tuple[float, float]] = []
+        for start, end in zip(outline, outline[1:] + outline[:1], strict=True):
+            dense.append(start)
+            for step in range(1, 8):
+                fraction = step / 8
+                dense.append(
+                    (
+                        start[0] + (end[0] - start[0]) * fraction,
+                        start[1] + (end[1] - start[1]) * fraction,
+                    )
+                )
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        spur = georef._score_ring(
+            image,
+            dense,
+            None,
+            hydro_ring=hydro,
+            gcp_count=8,
+            page=Path("spur.png"),
+            _allow_spur_cleanup=False,
+        )
+        self.assertIsNotNone(spur)
+        assert spur is not None
+        self.assertGreater(_ring_straightness(dense), MAX_ROAD_STRAIGHTNESS)
+        winner = {
+            "registration": _registration(spur["registration"].iou + 0.04),
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "ink": 0.2,
+            "page": Path("winner.png"),
+            "area": 8000.0,
+            "image": image,
+        }
+        cleaned = georef._spur_cleaned_candidates(
+            [winner, spur],
+            image=image,
+            hydro_ring=hydro,
+            gcp_count=8,
+            page=Path("spur.png"),
+        )
+        self.assertTrue(
+            any(
+                row["registration"].iou >= spur["registration"].iou + 0.02
+                and max(point[0] for point in row["ring"]) < 120.0
+                for row in cleaned
+            )
+        )
+
 
 class AnchorAndLegendTest(unittest.TestCase):
     def test_near_gate_shore_beats_an_inkier_road(self):
@@ -1323,12 +1575,61 @@ class AnchorAndLegendTest(unittest.TestCase):
         self.assertTrue(georef._legend_box(ring, 0.004, straight, area_fraction=0.05))
         self.assertFalse(georef._legend_box(ring, 0.2, straight, area_fraction=0.05))
 
-    def test_small_low_ink_box_is_a_legend_even_when_not_perfectly_straight(self):
+    def test_small_rectangle_is_a_legend_and_a_large_one_is_not(self):
         ring = _dense_rectangle(10.0, 10.0, 90.0, 70.0, step=6.0)
-        # A legend outline with a few ticks is only moderately straight.
-        straight = min(_ring_straightness(ring), 0.34)
+        straight = _ring_straightness(ring)
+        self.assertGreater(_ring_boxiness(ring), 0.90)
         self.assertTrue(georef._legend_box(ring, 0.005, straight, area_fraction=0.05))
         self.assertFalse(georef._legend_box(ring, 0.005, straight, area_fraction=0.20))
+
+    def test_traced_oval_and_dammed_basin_stay_candidates(self):
+        oval_image, oval = _traced_outline(_oval_ring(200, 200), 200, 200)
+        oval_metrics = _outline_metrics(oval_image, oval)
+        self.assertLess(oval_metrics["area"], 0.08)
+        self.assertGreater(oval_metrics["box"], 0.70)
+        self.assertLess(oval_metrics["box"], 0.90)
+        self.assertLess(oval_metrics["ink"], 0.012)
+        self.assertFalse(
+            georef._legend_box(
+                oval,
+                oval_metrics["ink"],
+                oval_metrics["straight"],
+                area_fraction=oval_metrics["area"],
+            )
+        )
+        oval_row = georef._score_ring(
+            oval_image,
+            oval,
+            [False] * len(oval),
+            hydro_ring=oval,
+            gcp_count=8,
+            page=Path("oval.png"),
+        )
+        self.assertIsNotNone(oval_row)
+
+        dam_image, dam = _traced_outline(_dam_ring(), 220, 160)
+        dam_metrics = _outline_metrics(dam_image, dam)
+        self.assertGreater(dam_metrics["area"], 0.08)
+        self.assertGreaterEqual(dam_metrics["straight"], 0.40)
+        self.assertGreaterEqual(dam_metrics["box"], 0.90)
+        self.assertLess(dam_metrics["ink"], georef._LEGEND_MAX_INK)
+        self.assertFalse(
+            georef._legend_box(
+                dam,
+                dam_metrics["ink"],
+                dam_metrics["straight"],
+                area_fraction=dam_metrics["area"],
+            )
+        )
+        dam_row = georef._score_ring(
+            dam_image,
+            dam,
+            [False] * len(dam),
+            hydro_ring=dam,
+            gcp_count=8,
+            page=Path("dam.png"),
+        )
+        self.assertIsNotNone(dam_row)
 
 
 class CitationPageTest(unittest.TestCase):
@@ -1346,7 +1647,49 @@ class CitationPageTest(unittest.TestCase):
             drawn = root / "map.png"
             write_png(drawn, RasterImage(80, 100, bytes(ink)))
             self.assertTrue(georef._is_citation_raster(blank))
+            self.assertTrue(georef._is_citation_raster(blank, long_inches=11.0))
             self.assertFalse(georef._is_citation_raster(drawn))
+            self.assertFalse(georef._is_citation_raster(blank, long_inches=36.0))
+
+    def test_light_map_sheet_is_not_a_citation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            width, height = 360, 280
+            rgb = bytearray([255]) * (width * height * 3)
+            _ink_polyline(rgb, width, _oval_ring(width, height), close=True)
+            light = root / "light-map.png"
+            write_png(light, RasterImage(width=width, height=height, rgb=bytes(rgb)))
+            self.assertLess(georef._sampled_dark_fraction(read_png(light)), georef._CITATION_DARK_FRACTION)
+            self.assertFalse(georef._is_citation_raster(light))
+            self.assertFalse(georef._is_citation_raster(light, long_inches=42.0))
+
+            blank = root / "blank-large.png"
+            write_png(blank, RasterImage(width=width, height=height, rgb=bytes([250]) * (width * height * 3)))
+            darker = root / "darker.png"
+            dark_rgb = bytearray([255]) * (width * height * 3)
+            for index in range(0, width * height, 4):
+                offset = index * 3
+                dark_rgb[offset : offset + 3] = b"\x10\x10\x10"
+            write_png(darker, RasterImage(width=width, height=height, rgb=bytes(dark_rgb)))
+            entry = {
+                "raster_pages": [
+                    {"path": str(light), "page": 0, "pixels": [width, height], "dpi": 8},
+                    {"path": str(darker), "page": 1, "pixels": [width, height], "dpi": 8},
+                ]
+            }
+            kept = georef._page_rasters(entry, light)
+            self.assertIn(light, kept)
+
+            letter = root / "cite.png"
+            write_png(letter, RasterImage(width=80, height=100, rgb=bytes([250]) * (80 * 100 * 3)))
+            letter_entry = {
+                "raster_pages": [
+                    {"path": str(light), "page": 0, "pixels": [width, height], "dpi": 8},
+                    {"path": str(letter), "page": 1, "pixels": [110, 85], "dpi": 10},
+                ]
+            }
+            maps = georef._page_rasters(letter_entry, light)
+            self.assertEqual(maps, [light])
 
 
 class CliTest(unittest.TestCase):

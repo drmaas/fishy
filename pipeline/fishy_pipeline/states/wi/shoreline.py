@@ -15,10 +15,11 @@ shore. The georeferencer keeps whichever figure overlaps the hydro polygon
 more.
 
 A long straight run is usually a section line or a road, and those pixels are
-cleared before tracing. A shore can be straight for a long stretch too. If
-that stretch is the seal of a large enclosed water body, clearing it opens the
-water to the page border and the lake disappears from the candidate list.
-Ink that borders such a hole is kept.
+cleared before tracing. A shore can be straight for a long stretch too, and a
+span-wide shore is the same kind of line. The seal test runs before either
+clear. Only the pixels whose deletion would open that basin are kept, and only
+for the basin that opens. A line that merely touches the water, and the border
+of a separate rectangle, are still removed.
 """
 
 from __future__ import annotations
@@ -88,7 +89,13 @@ def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, f
         if len(scaled) >= 8 and span >= MIN_FIGURE_SPAN:
             if _neatline_enclosure(scaled, width, height, frame, factor):
                 continue
-            if span >= 0.22 and _road_like_ring(scaled, mask, image.width, image.height):
+            # An out-and-back spur is a reversal, not a road. Dropping it here
+            # means the spur cleanup never sees the shore it is meant to repair.
+            if (
+                span >= 0.22
+                and _road_like_ring(scaled, mask, image.width, image.height)
+                and not _has_reversal(scaled)
+            ):
                 continue
             rings.append(scaled)
     fallback = _component_shoreline(small, small_w, small_h, frame)
@@ -305,7 +312,11 @@ def _ring_straightness(ring: tuple[tuple[float, float], ...] | list[tuple[float,
                 step += 1
                 continue
             vx, vy = directions[edge]
-            if step > 0 and abs(ux * vy - uy * vx) > 0.12:
+            # A 180-degree reversal has no cross product. It is a corner: an
+            # out-and-back road spur must not extend the straight run.
+            if step > 0 and (
+                abs(ux * vy - uy * vx) > 0.12 or ux * vx + uy * vy < 0.0
+            ):
                 break
             run += lengths[edge]
             step += 1
@@ -315,6 +326,26 @@ def _ring_straightness(ring: tuple[tuple[float, float], ...] | list[tuple[float,
         else:
             index += 1
     return min(1.0, straight / perimeter)
+
+
+def _has_reversal(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> bool:
+    """True when the ring doubles back. That turn is a spur, not a straight edge."""
+    points = list(ring)
+    count = len(points)
+    if count < 4:
+        return False
+    previous: tuple[float, float] | None = None
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < 1e-6:
+            continue
+        direction = ((x2 - x1) / length, (y2 - y1) / length)
+        if previous is not None and previous[0] * direction[0] + previous[1] * direction[1] < 0.0:
+            return True
+        previous = direction
+    return False
 
 
 def _ring_boxiness(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
@@ -451,7 +482,7 @@ def _ranked_hole_contours(
             continue
         ink = _interior_ink_in_hole(mask, width, height, contour)
         straight = _ring_straightness(contour)
-        if straight >= MAX_ROAD_STRAIGHTNESS and ink < MIN_LAKE_INK:
+        if straight >= MAX_ROAD_STRAIGHTNESS and ink < MIN_LAKE_INK and not _has_reversal(contour):
             continue
         score = float(area) * (0.015 + ink) / (1.0 + max(0.0, straight - 0.2) * 2.5)
         scored.append((score, area, contour))
@@ -618,13 +649,19 @@ def _dark_mask(image: RasterImage) -> bytearray:
 
 
 def _clear_span_lines(mask: bytearray, width: int, height: int, ratio: float) -> None:
-    """Drop neatline and PLSS ink, but keep pixels where a shore crosses them."""
+    """Drop neatline and PLSS ink, but keep a span line that seals a basin.
+
+    The seal test runs before any span pixel is deleted. A shore across 87
+    percent of the page is still a shore when removing it would open the water.
+    """
     row_need = ratio * width
     col_need = ratio * height
     span_rows = [y for y in range(height) if sum(mask[y * width : (y + 1) * width]) >= row_need]
     span_cols = [
         x for x in range(width) if sum(mask[y * width + x] for y in range(height)) >= col_need
     ]
+    if not span_rows and not span_cols:
+        return
     span_row_set = set(span_rows)
     span_col_set = set(span_cols)
     keep = bytearray(width * height)
@@ -642,16 +679,22 @@ def _clear_span_lines(mask: bytearray, width: int, height: int, ratio: float) ->
                 mask, width, height, x, y, span_col_set, axis="col"
             ):
                 keep[index] = 1
+    doomed = bytearray(width * height)
     for y in span_rows:
         start = y * width
         for x in range(width):
-            if not keep[start + x]:
-                mask[start + x] = 0
+            index = start + x
+            if mask[index] and not keep[index]:
+                doomed[index] = 1
     for x in span_cols:
         for y in range(height):
             index = y * width + x
-            if not keep[index]:
-                mask[index] = 0
+            if mask[index] and not keep[index]:
+                doomed[index] = 1
+    seal = _basin_seal_pixels(mask, width, height, doomed)
+    for index, flag in enumerate(doomed):
+        if flag and not seal[index]:
+            mask[index] = 0
 
 
 def _off_line_neighbor(
@@ -1044,46 +1087,169 @@ def _hole_shore_pixels(
     min_len: int,
     keep: tuple[int, int, int, int] | None = None,
 ) -> bytearray:
-    """Ink that seals a large hole, when deleting it would open that hole.
+    """Pixels whose deletion would open one large hole.
 
     ``_clear_long_runs`` deletes section lines. The same test matches a long
     straight piece of shoreline. On Trout sheet 1 and Fence sheet 2 that piece
     is the only seal: removing a few dozen pixels opens the water to the page
-    border. Lakes whose shore already survives the clear are left alone, so a
-    passing trace is not redrawn.
-
-    Holes are largest-first. Four percent of the mask is large enough to be a
-    basin and small enough to ignore lettering.
+    border. Only those pixels are kept, and only for the hole that opens. A
+    section line that merely touches the basin, and the border of a separate
+    rectangle, are not kept. Lakes whose largest hole already survives the
+    clear are left alone, so a passing trace is not redrawn.
     """
     protect = bytearray(width * height)
     if width < 8 or height < 8:
         return protect
-    holes = _hole_contours(mask, width, height)
-    minimum = 0.04 * width * height
-    if not holes or holes[0][0] < minimum:
-        return protect
     trial = bytearray(mask)
     _clear_long_runs(trial, width, height, min_len, keep=keep)
-    opened = _hole_contours(trial, width, height)
-    opened_area = opened[0][0] if opened else 0
-    if opened_area >= 0.85 * holes[0][0]:
+    doomed = bytearray(width * height)
+    for index, value in enumerate(mask):
+        if value and not trial[index]:
+            doomed[index] = 1
+    if not any(doomed):
         return protect
-    for area, contour in holes:
-        if area < minimum:
-            break
-        for point in contour:
-            x = int(point[0])
-            y = int(point[1])
-            for dy in (-1, 0, 1):
-                ny = y + dy
-                if ny < 0 or ny >= height:
-                    continue
-                row = ny * width
-                for dx in (-1, 0, 1):
-                    nx = x + dx
-                    if 0 <= nx < width and mask[row + nx]:
-                        protect[row + nx] = 1
+    return _basin_seal_pixels(mask, width, height, doomed)
+
+
+def _basin_seal_pixels(
+    mask: bytearray,
+    width: int,
+    height: int,
+    doomed: bytearray,
+) -> bytearray:
+    """Doomed pixels that form the inner seal of the large hole that opens.
+
+    A pixel counts only when it touches that hole and a path through doomed
+    pixels reaches the outside from it. The border of a different hole is not
+    on that path. A section line that only touches the basin is not the inner
+    seal, so it is not marked.
+    """
+    protect = bytearray(width * height)
+    if width < 8 or height < 8 or not any(doomed):
+        return protect
+    outside = _outside_mask(mask, width, height)
+    holes = _contained_holes(mask, width, height, outside)
+    if not holes:
+        return protect
+    largest = holes[0]
+    opened = _outside_mask(mask, width, height, also_passable=doomed)
+    if not any(opened[index] for index in largest):
+        return protect
+    hole = bytearray(width * height)
+    for index in largest:
+        hole[index] = 1
+    candidates: list[int] = []
+    for index, flag in enumerate(doomed):
+        if not flag:
+            continue
+        y, x = divmod(index, width)
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < width and 0 <= ny < height and hole[ny * width + nx]:
+                candidates.append(index)
+                break
+    if not candidates:
+        return protect
+    reachable = _doomed_reaching_outside(doomed, width, height, outside)
+    for index in candidates:
+        if reachable[index]:
+            protect[index] = 1
     return protect
+
+
+def _outside_mask(
+    mask: bytearray,
+    width: int,
+    height: int,
+    *,
+    also_passable: bytearray | None = None,
+) -> bytearray:
+    """White pixels connected to the border. ``also_passable`` pixels are open too."""
+    outside = bytearray(width * height)
+    stack: deque[int] = deque()
+
+    def push(index: int) -> None:
+        if outside[index]:
+            return
+        if mask[index] and not (also_passable is not None and also_passable[index]):
+            return
+        outside[index] = 1
+        stack.append(index)
+
+    for x in range(width):
+        push(x)
+        push((height - 1) * width + x)
+    for y in range(height):
+        push(y * width)
+        push(y * width + width - 1)
+    while stack:
+        index = stack.pop()
+        y, x = divmod(index, width)
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                continue
+            push(ny * width + nx)
+    return outside
+
+
+def _contained_holes(
+    mask: bytearray,
+    width: int,
+    height: int,
+    outside: bytearray,
+) -> list[list[int]]:
+    """White components the border cannot reach, largest acceptable hole first."""
+    seen = bytearray(width * height)
+    holes: list[list[int]] = []
+    minimum = max(MIN_INTERIOR, int(0.04 * width * height))
+    frame_limit = FRAME_HOLE_AREA * width * height
+    for start in range(width * height):
+        if mask[start] or outside[start] or seen[start]:
+            continue
+        component = _flood_component(seen, mask, outside, width, height, start)
+        if len(component) < minimum or len(component) >= frame_limit:
+            continue
+        if _component_covers_frame(component, width, height, MAX_FRAME_FRACTION):
+            continue
+        holes.append(component)
+    holes.sort(key=len, reverse=True)
+    return holes
+
+
+def _doomed_reaching_outside(
+    doomed: bytearray,
+    width: int,
+    height: int,
+    outside: bytearray,
+) -> bytearray:
+    """Doomed pixels that can reach the outside by walking other doomed pixels."""
+    reached = bytearray(width * height)
+    stack: deque[int] = deque()
+    for index, flag in enumerate(doomed):
+        if not flag:
+            continue
+        y, x = divmod(index, width)
+        on_border = x == 0 or y == 0 or x == width - 1 or y == height - 1
+        touches_outside = on_border
+        if not touches_outside:
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if 0 <= nx < width and 0 <= ny < height and outside[ny * width + nx]:
+                    touches_outside = True
+                    break
+        if touches_outside:
+            reached[index] = 1
+            stack.append(index)
+    while stack:
+        index = stack.pop()
+        y, x = divmod(index, width)
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                continue
+            neighbor = ny * width + nx
+            if not doomed[neighbor] or reached[neighbor]:
+                continue
+            reached[neighbor] = 1
+            stack.append(neighbor)
+    return reached
 
 
 def _clear_long_runs(
