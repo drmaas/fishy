@@ -551,13 +551,14 @@ def _georeference_entry(
     mapped = [project(col, row) for col, row in shoreline]
     _write_json(
         shore_path,
-        _shoreline_collection(
-            mapped,
+        _stitched_shoreline(
+            sheets,
             {
                 "wbic": wbic,
                 "map_key": map_key,
-                "iou": round(registration.iou, 6),
+                "iou": iou,
             },
+            mapped,
         ),
     )
     warp_plan = _warp_plan_for(sheets, primary, iou_threshold)
@@ -1716,10 +1717,14 @@ def _review_items(items: list[dict]) -> list[dict]:
     return queued
 
 
-def _shoreline_collection(ring: list[tuple[float, float]], properties: dict) -> dict:
+def _close_ring(ring: list[tuple[float, float]]) -> list[list[float]]:
     closed = list(ring)
     if closed[0] != closed[-1]:
         closed.append(closed[0])
+    return [[x, y] for x, y in closed]
+
+
+def _shoreline_collection(ring: list[tuple[float, float]], properties: dict) -> dict:
     return {
         "type": "FeatureCollection",
         "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3071"}},
@@ -1727,10 +1732,57 @@ def _shoreline_collection(ring: list[tuple[float, float]], properties: dict) -> 
             {
                 "type": "Feature",
                 "properties": properties,
-                "geometry": {"type": "Polygon", "coordinates": [[[x, y] for x, y in closed]]},
+                "geometry": {"type": "Polygon", "coordinates": [_close_ring(ring)]},
             }
         ],
     }
+
+
+def _mapped_ring(sheet: dict) -> list[tuple[float, float]]:
+    warp = sheet["registration"]
+    project = warp.affine.apply if warp.method == "affine" else warp.tps.apply
+    return [project(col, row) for col, row in sheet["ring"]]
+
+
+def _stitched_shoreline(
+    sheets: list[dict],
+    properties: dict,
+    primary_ring: list[tuple[float, float]],
+) -> dict:
+    """One feature per sheet, plus their stitch. The properties iou is the gate.
+
+    The stitch is the sheets placed in map coordinates. It is not a new score:
+    ``properties["iou"]`` stays the minimum sheet gate, and a higher union
+    overlap does not replace it.
+    """
+    collection = _shoreline_collection(primary_ring, {**properties, "role": "primary"})
+    if len(sheets) < 2:
+        return collection
+    mapped = [_mapped_ring(sheet) for sheet in sheets]
+    for sheet, ring in zip(sheets, mapped, strict=True):
+        registration = sheet["registration"]
+        collection["features"].append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "role": "sheet",
+                    "page": sheet["page"].name,
+                    "iou": round(float(sheet.get("gate_iou", registration.iou)), 6),
+                },
+                "geometry": {"type": "Polygon", "coordinates": [_close_ring(ring)]},
+            }
+        )
+    collection["features"].append(
+        {
+            "type": "Feature",
+            "properties": {"role": "stitched", "iou": properties.get("iou")},
+            "geometry": {
+                "type": "MultiPolygon",
+                "coordinates": [[_close_ring(ring)] for ring in mapped],
+            },
+        }
+    )
+    return collection
 
 
 def _write_json(path: Path, body: dict) -> None:

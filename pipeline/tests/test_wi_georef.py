@@ -542,6 +542,81 @@ class ShorelineTest(unittest.TestCase):
         self.assertTrue(_road_like_ring(points, mask, width, height))
         self.assertFalse(_road_like_ring(points, mask, width, height) and not _has_reversal(points))
 
+    def test_cased_road_across_the_basin_does_not_split_the_shore(self):
+        # A double line through the water used to leave two holes. The shore
+        # is the whole basin, on both sides of the road.
+        width, height = 240, 180
+        rgb = bytearray([255]) * (width * height * 3)
+        lake = [(36, 40), (108, 28), (196, 46), (204, 108), (150, 148), (64, 140), (28, 90)]
+        _ink_polyline(rgb, width, lake, close=True)
+        _ink_polyline(rgb, width, [(118, 6), (118, 172)], close=False)
+        _ink_polyline(rgb, width, [(124, 6), (124, 172)], close=False)
+        for cx, cy in ((70, 80), (88, 110), (160, 78), (172, 112)):
+            _ink_block(rgb, width, height, cx, cy)
+        rings = extract_shoreline_candidates(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertGreaterEqual(len(rings), 1)
+        xs = [point[0] for point in rings[0]]
+        self.assertLess(min(xs), 70)
+        self.assertGreater(max(xs), 170)
+
+    def test_cased_road_does_not_wall_off_a_bay(self):
+        # The road crosses the bay mouth on a diagonal. The bay stays inside
+        # the outer shore.
+        width, height = 260, 200
+        rgb = bytearray([255]) * (width * height * 3)
+        lake = [
+            (36, 70),
+            (120, 48),
+            (148, 78),
+            (214, 62),
+            (220, 118),
+            (156, 132),
+            (140, 158),
+            (60, 150),
+            (28, 108),
+        ]
+        _ink_polyline(rgb, width, lake, close=True)
+        _ink_polyline(rgb, width, [(132, 40), (168, 168)], close=False)
+        _ink_polyline(rgb, width, [(138, 36), (174, 164)], close=False)
+        for cx, cy in ((80, 100), (110, 120), (186, 96), (196, 108)):
+            _ink_block(rgb, width, height, cx, cy)
+        rings = extract_shoreline_candidates(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertGreaterEqual(len(rings), 1)
+        xs = [point[0] for point in rings[0]]
+        self.assertGreater(max(xs), 190)
+
+    def test_split_sheet_traces_the_bay_the_other_page_omits(self):
+        # The north page is only the bay, cut by the sheet edge. The south
+        # page never draws that bay. Each page still yields its own piece.
+        width, height = 220, 160
+        south = bytearray([255]) * (width * height * 3)
+        body = [(30, 0), (180, 0), (190, 70), (150, 120), (40, 110)]
+        _ink_polyline(south, width, body, close=True)
+        for cx, cy in ((70, 50), (110, 70), (140, 48)):
+            _ink_block(south, width, height, cx, cy)
+        north = bytearray([255]) * (width * height * 3)
+        bay = [(70, height - 1), (150, height - 1), (140, 70), (80, 64)]
+        _ink_polyline(north, width, bay, close=True)
+        for cx, cy in ((100, 110), (120, 90)):
+            _ink_block(north, width, height, cx, cy)
+        south_rings = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(south)))
+        north_rings = extract_shoreline_figures(RasterImage(width=width, height=height, rgb=bytes(north)))
+        self.assertGreaterEqual(len(south_rings), 1)
+        self.assertGreaterEqual(len(north_rings), 1)
+        south_xs = [point[0] for point in south_rings[0].ring]
+        north_ys = [point[1] for point in north_rings[0].ring]
+        self.assertGreater(max(south_xs) - min(south_xs), 120)
+        self.assertLess(min(north_ys), 90)
+        # The bay is cut by the sheet edge, so the trace reaches that edge.
+        self.assertGreater(max(north_ys), height - 4)
+
+
+def _ink_block(rgb: bytearray, width: int, height: int, x: int, y: int) -> None:
+    for yy in range(y, min(height, y + 5)):
+        for xx in range(x, min(width, x + 5)):
+            index = (yy * width + xx) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+
 
 class HydroPolygonTest(unittest.TestCase):
     def test_rejects_non_3071(self):
@@ -1303,6 +1378,46 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertIs(wi_register._sweep_fallback([shear, similar]), similar)
         with self.assertRaises(ValueError):
             wi_register._sweep_fallback([shear])
+
+    def test_missed_bay_on_a_split_sheet_stays_in_the_minimum(self):
+        # The north bay is its own partial sheet and scores under the body.
+        # The stitch covers both. The gate recorded on the stitch is the
+        # minimum, not the union.
+        body = [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)]
+        bay = [(70.0, 50.0), (100.0, 50.0), (100.0, 90.0), (70.0, 90.0)]
+        hydro = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 90.0),
+            (70.0, 90.0),
+            (70.0, 50.0),
+            (0.0, 50.0),
+        ]
+        south = _sheet(0.81, 0.22, "south.png", ring=body)
+        north = _sheet(0.42, 0.30, "north.png", ring=bay)
+        south["gate_iou"] = 0.81
+        north["gate_iou"] = 0.42
+        pages = [Path("south.png"), Path("north.png")]
+        kept, missed = georef._select_lake_sheets([south, north], pages)
+        self.assertEqual(missed, [])
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"south.png", "north.png"})
+        gate = min(sheet["gate_iou"] for sheet in kept)
+        self.assertEqual(gate, 0.42)
+        self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
+        collection = georef._stitched_shoreline(
+            kept,
+            {"wbic": "2331600", "map_key": "2331600a", "iou": gate},
+            body,
+        )
+        stitched = next(feature for feature in collection["features"] if feature["properties"]["role"] == "stitched")
+        self.assertEqual(stitched["properties"]["iou"], 0.42)
+        self.assertEqual(stitched["geometry"]["type"], "MultiPolygon")
+        rings = [
+            [(point[0], point[1]) for point in polygon[0][:-1]]
+            for polygon in stitched["geometry"]["coordinates"]
+        ]
+        self.assertGreater(union_polygon_iou(rings, hydro), 0.85)
+        self.assertGreater(union_polygon_iou(rings, hydro), gate)
 
 
 class InkWaiverBandTest(unittest.TestCase):
