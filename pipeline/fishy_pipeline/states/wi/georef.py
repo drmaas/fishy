@@ -52,15 +52,18 @@ from fishy_pipeline.states.wi.register import (
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
-from fishy_pipeline.states.wi.raster import select_sheet_pages
+from fishy_pipeline.states.wi.raster import MIN_DPI, select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
 from fishy_pipeline.states.wi.shoreline import (
+    MAX_ROAD_STRAIGHTNESS,
     MIN_FIGURE_SPAN,
     NEATLINE_FRAME_BOUNDARY,
+    NEATLINE_MIN_STRAIGHTNESS,
     NEATLINE_SPAN,
     extract_shoreline,
     extract_shoreline_figures,
     interior_ink_fraction,
+    _ring_straightness,
 )
 from fishy_pipeline.states.wi.wbic import normalize_wbic
 
@@ -375,7 +378,7 @@ def _maybe_keep_all_pages(
         project = warp.affine.apply if warp.method == "affine" else warp.tps.apply
         mapped.append([project(col, row) for col, row in sheet["ring"]])
     combined = union_polygon_iou(mapped, list(hydro_ring))
-    if combined >= max(singles) + 0.03:
+    if combined >= max(singles) + 0.02:
         return unique
     return sheets
 
@@ -499,6 +502,7 @@ def _georeference_entry(
             sheet["gate_iou"] = min(sheet["registration"].iou, full_iou)
         else:
             sheet["gate_iou"] = sheet["registration"].iou
+    sheets = _drop_embed_preview_sheets(sheets, _page_dpi_map(entry))
     primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
     registration = primary["registration"]
     shoreline = primary["ring"]
@@ -772,7 +776,7 @@ MIN_HYDRO_SPAN_RATIO = 0.38
 MAX_HYDRO_SPAN_RATIO = 1.85
 # Sheet-filling enclosures with modest ink are often roads plus neatline, not the lake.
 LARGE_RING_SPAN = 0.72
-LARGE_RING_MIN_INK = 0.38
+LARGE_RING_MIN_INK = 0.12
 
 
 def _score_sheet_pages(
@@ -812,9 +816,21 @@ def _score_sheet_pages(
                 continue
             if ink < MIN_BASIN_INK and registration.iou < NEAR_GATE_IOU:
                 continue
-            if not _hydro_footprint_matches(registration, list(figure.ring), hydro_ring):
+            if not _hydro_footprint_matches(
+                registration,
+                list(figure.ring),
+                hydro_ring,
+                cut_fraction=cut_fraction,
+            ):
                 continue
             span = _span_fraction(list(figure.ring), image.width, image.height)
+            straight = _ring_straightness(list(figure.ring))
+            if (
+                straight >= MAX_ROAD_STRAIGHTNESS
+                and ink < 0.02
+                and registration.iou < NEAR_GATE_IOU
+            ):
+                continue
             if (
                 span > LARGE_RING_SPAN
                 and ink < LARGE_RING_MIN_INK
@@ -961,7 +977,7 @@ def _figure_quality(sheet: dict) -> float:
     """Favor real lake ink over long road-like enclosures with weak overlap."""
     iou = sheet["registration"].iou
     ink = float(sheet.get("ink", 0.0))
-    return iou * (0.22 + min(ink, 0.28))
+    return iou * (0.15 + min(ink, 0.40))
 
 
 def _false_shore_ring(
@@ -971,14 +987,22 @@ def _false_shore_ring(
     cut_fraction: float,
 ) -> bool:
     span = _span_fraction(list(ring), width, height)
-    return span >= NEATLINE_SPAN and cut_fraction >= NEATLINE_FRAME_BOUNDARY
+    if span < NEATLINE_SPAN or cut_fraction < NEATLINE_FRAME_BOUNDARY:
+        return False
+    if _ring_straightness(list(ring)) >= NEATLINE_MIN_STRAIGHTNESS:
+        return True
+    return span >= 0.92 and cut_fraction >= 0.45
 
 
 def _hydro_footprint_matches(
     registration,
     pixel_ring: list[tuple[float, float]],
     hydro_ring: list[tuple[float, float]],
+    *,
+    cut_fraction: float = 0.0,
 ) -> bool:
+    if registration.iou >= 0.68:
+        return True
     project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
     mapped = [project(col, row) for col, row in pixel_ring]
     hydro_span = _centroid_span(list(hydro_ring))
@@ -986,7 +1010,8 @@ def _hydro_footprint_matches(
     if hydro_span <= 0:
         return True
     ratio = mapped_span / hydro_span
-    return MIN_HYDRO_SPAN_RATIO <= ratio <= MAX_HYDRO_SPAN_RATIO
+    min_ratio = 0.22 if cut_fraction >= _PARTIAL_CUT else MIN_HYDRO_SPAN_RATIO
+    return min_ratio <= ratio <= MAX_HYDRO_SPAN_RATIO
 
 
 def _prefer_sheet(new: dict, old: dict) -> bool:
@@ -1171,6 +1196,37 @@ def _reasons(
         found.append("warp_failed")
     order = {name: index for index, name in enumerate(_REASON_ORDER)}
     return sorted(found, key=lambda name: order[name])
+
+
+def _page_dpi_map(entry: dict) -> dict[Path, float]:
+    result: dict[Path, float] = {}
+    for item in entry.get("raster_pages") or []:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        result[Path(str(item["path"]))] = float(item.get("dpi") or 0.0)
+    return result
+
+
+def _drop_embed_preview_sheets(sheets: list[dict], dpi_map: dict[Path, float]) -> list[dict]:
+    """Low-dpi embed previews should not drag down a sharp map page on the same PDF."""
+    if len(sheets) < 2:
+        return sheets
+    sharp_scores = [
+        sheet["gate_iou"]
+        for sheet in sheets
+        if dpi_map.get(sheet["page"], 0.0) >= MIN_DPI
+    ]
+    if not sharp_scores:
+        return sheets
+    anchor = max(sharp_scores)
+    if anchor < 0.55:
+        return sheets
+    kept = [
+        sheet
+        for sheet in sheets
+        if dpi_map.get(sheet["page"], 0.0) >= MIN_DPI or sheet["gate_iou"] >= anchor - 0.04
+    ]
+    return kept if kept else sheets
 
 
 def _page_rasters(entry: dict, raster: Path) -> list[Path]:

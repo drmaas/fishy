@@ -48,6 +48,8 @@ MIN_LAKE_INK = 0.012
 # A sheet-spanning ring with this much boundary on the neatline or page edge is not the lake.
 NEATLINE_SPAN = 0.88
 NEATLINE_FRAME_BOUNDARY = 0.12
+# Neatlines are nearly straight; irregular lake shores can share the span band.
+NEATLINE_MIN_STRAIGHTNESS = 0.40
 
 
 def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
@@ -80,7 +82,7 @@ def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, f
         if len(scaled) >= 8 and span >= MIN_FIGURE_SPAN:
             if _neatline_enclosure(scaled, width, height, frame, factor):
                 continue
-            if span >= 0.35 and _road_like_ring(scaled, mask, image.width, image.height):
+            if span >= 0.22 and _road_like_ring(scaled, mask, image.width, image.height):
                 continue
             rings.append(scaled)
     fallback = _component_shoreline(small, small_w, small_h, frame)
@@ -154,7 +156,9 @@ def _neatline_enclosure(
             )
         if on_edge or on_neatline:
             hits += 1
-    return hits / max(len(ring), 1) >= NEATLINE_FRAME_BOUNDARY
+    if hits / max(len(ring), 1) < NEATLINE_FRAME_BOUNDARY:
+        return False
+    return _ring_straightness(ring) >= NEATLINE_MIN_STRAIGHTNESS
 
 
 def _component_shoreline(
@@ -358,7 +362,9 @@ def _contour_on_frame(
     hits = sum(
         1 for point in contour if _vertex_on_frame(point[0], point[1], width, height, frame, tol=tol)
     )
-    return hits / len(contour) >= NEATLINE_FRAME_BOUNDARY
+    if hits / len(contour) < NEATLINE_FRAME_BOUNDARY:
+        return False
+    return _ring_straightness(contour) >= NEATLINE_MIN_STRAIGHTNESS
 
 
 def _interior_ink_in_hole(

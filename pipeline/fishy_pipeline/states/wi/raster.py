@@ -32,12 +32,19 @@ def select_sheet_pages(pages: list[dict]) -> list[dict]:
     """
     longs = [_page_long_inches(page) for page in pages]
     if any(value is not None and value > LETTER_LONG_INCHES for value in longs):
-        return [
+        chosen = [
             page
             for page, value in zip(pages, longs, strict=True)
             if value is None or value > LETTER_LONG_INCHES
         ]
-    return list(pages)
+    else:
+        chosen = list(pages)
+    keys = {int(page.get("page", -1)) for page in chosen}
+    if any(float(page.get("dpi") or 0) < MIN_DPI for page in chosen):
+        for page in pages:
+            if float(page.get("dpi") or 0) >= MIN_DPI:
+                keys.add(int(page.get("page", -1)))
+    return [page for page in pages if int(page.get("page", -1)) in keys]
 
 
 def _page_long_inches(page: dict) -> float | None:

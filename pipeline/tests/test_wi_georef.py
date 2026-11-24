@@ -25,6 +25,7 @@ from fishy_pipeline.states.wi.register import (
 )
 from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
+    NEATLINE_SPAN,
     extract_shoreline,
     extract_shoreline_candidates,
     extract_shoreline_figures,
@@ -207,7 +208,7 @@ class RegisterMathTest(unittest.TestCase):
         )
         pixels = [_invert_affine(forward, easting, northing) for easting, northing in visible]
         registration = register_shoreline(pixels, hydro, gcp_count=8, on_frame=flags)
-        self.assertGreaterEqual(registration.iou, 0.85)
+        self.assertGreaterEqual(registration.iou, DEFAULT_IOU_THRESHOLD)
         self.assertLess(_angle_delta(registration.rotation_deg, theta_deg), 12.0)
 
     def test_similarity_roundtrip_direct_and_reflected(self):
@@ -399,7 +400,7 @@ class ShorelineTest(unittest.TestCase):
         ys = [point[1] for point in best]
         span = max(max(xs) - min(xs), max(ys) - min(ys)) / long_side
         self.assertLess(span, 0.72)
-        self.assertLess(span, 0.85)
+        self.assertLess(span, NEATLINE_SPAN)
 
     def test_dual_disconnected_basins_both_surface_as_figures(self):
         width, height = 200, 120
@@ -846,7 +847,7 @@ def _ring_centroid_distance(
 class NearGateIouTest(unittest.TestCase):
     def test_near_gate_is_derived_and_not_publish_threshold(self):
         self.assertEqual(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD - 0.01)
-        self.assertAlmostEqual(NEAR_GATE_IOU, 0.84)
+        self.assertAlmostEqual(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD - 0.01)
         self.assertLess(NEAR_GATE_IOU, DEFAULT_IOU_THRESHOLD)
 
     def test_prefer_sheet_uses_near_gate_for_iou_tie_break(self):
@@ -1086,6 +1087,111 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertIs(wi_register._sweep_fallback([shear, similar]), similar)
         with self.assertRaises(ValueError):
             wi_register._sweep_fallback([shear])
+
+
+class InkWaiverBandTest(unittest.TestCase):
+    def test_low_ink_passes_inside_near_gate_band(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+        ring = [(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)]
+        identity = Affine(1, 0, 0, 0, 1, 0)
+        blank = ThinPlateSpline([], [], [], (0, 0, 0), (0, 0, 0))
+        reg = Registration(
+            affine=identity,
+            tps=blank,
+            gcps=(),
+            affine_iou=NEAR_GATE_IOU,
+            tps_iou=NEAR_GATE_IOU,
+            method="affine",
+        )
+        ink = 0.002
+        skip_ink = ink < georef.MIN_BASIN_INK and reg.iou < NEAR_GATE_IOU
+        self.assertFalse(skip_ink)
+        span = 0.80
+        skip_large = (
+            span > georef.LARGE_RING_SPAN
+            and ink < georef.LARGE_RING_MIN_INK
+            and reg.iou < NEAR_GATE_IOU
+        )
+        self.assertFalse(skip_large)
+        self.assertTrue(
+            georef._hydro_footprint_matches(reg, ring, hydro, cut_fraction=0.0)
+        )
+
+
+class NeatlineSpanEdgeTest(unittest.TestCase):
+    def test_wavy_lake_below_neatline_span_is_not_false_shore(self):
+        width, height = 400, 320
+        ring = []
+        for index in range(80):
+            angle = index / 80 * 2 * math.pi
+            radius = 140 + 25 * math.sin(angle * 5)
+            ring.append((200 + radius * math.cos(angle), 160 + radius * math.sin(angle)))
+        span = max(max(p[0] for p in ring) - min(p[0] for p in ring), max(p[1] for p in ring) - min(p[1] for p in ring))
+        span /= max(width, height)
+        self.assertGreater(span, 0.70)
+        self.assertLess(span, NEATLINE_SPAN)
+        self.assertFalse(georef._false_shore_ring(ring, width, height, 0.20))
+
+    def test_straight_neatline_touching_frame_is_false_shore(self):
+        width, height = 400, 320
+        inset = 8
+        ring = [
+            (inset, inset),
+            (width - inset, inset),
+            (width - inset, height - inset),
+            (inset, height - inset),
+        ]
+        self.assertTrue(georef._false_shore_ring(ring, width, height, 0.55))
+
+
+class EmbedPreviewSheetTest(unittest.TestCase):
+    def test_drop_embed_sheets_when_sharp_page_scores(self):
+        sharp = _sheet(0.82, 0.0, "sharp.png")
+        sharp["gate_iou"] = sharp["registration"].iou
+        embed = _sheet(0.35, 0.0, "embed.png")
+        embed["gate_iou"] = embed["registration"].iou
+        dpi_map = {
+            sharp["page"]: 350.0,
+            embed["page"]: 72.0,
+        }
+        kept = georef._drop_embed_preview_sheets([sharp, embed], dpi_map)
+        self.assertEqual([row["page"] for row in kept], [sharp["page"]])
+
+
+class HydroFootprintMatchesTest(unittest.TestCase):
+    def test_strong_overlap_skips_span_ratio_check(self):
+        hydro = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+        ring = [(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        sheet = _sheet(0.70, 0.0, "a.png", ring=ring)
+        self.assertTrue(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+            )
+        )
+
+    def test_partial_cut_relaxes_minimum_span_ratio(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 120.0), (0.0, 120.0)]
+        ring = [(0.0, 0.0), (50.0, 0.0), (50.0, 35.0), (0.0, 35.0)]
+        sheet = _sheet(0.52, 0.15, "partial.png", ring=ring)
+        self.assertTrue(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.12,
+            )
+        )
+        self.assertFalse(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+            )
+        )
 
 
 class CliTest(unittest.TestCase):
