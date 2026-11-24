@@ -942,6 +942,30 @@ def _sheet(iou: float, cut: float, name: str, ring: list[tuple[float, float]] | 
     return sheet
 
 
+def _tps_sheet(
+    spline: float,
+    affine_iou: float,
+    name: str,
+    ring: list[tuple[float, float]],
+) -> dict:
+    """A closed sheet whose published score is the spline, not the affine."""
+    blank = ThinPlateSpline([], [], [], (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    registration = Registration(
+        affine=Affine(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        tps=blank,
+        gcps=(),
+        affine_iou=affine_iou,
+        tps_iou=spline,
+        method="tps",
+    )
+    return {
+        "page": Path(name),
+        "cut_fraction": 0.0,
+        "registration": registration,
+        "ring": ring,
+    }
+
+
 def _ring_centroid_distance(
     ring: list[tuple[float, float]],
     target: list[tuple[int, int]],
@@ -1152,6 +1176,38 @@ class FailClosedGateTest(unittest.TestCase):
         )
         self.assertEqual([sheet["page"].name for sheet in kept], ["a.png"])
         self.assertEqual(missed, [])
+
+    def test_fence_closed_sheets_queue_as_multi_sheet(self):
+        # Sheet 1's spline is 0.822 and its affine is 0.674. Sheet 2's spline
+        # is 0.816 and its affine is 0.776. Ranking by the spline publishes
+        # sheet 1. Both drawings clear, so the lake stays in the multi-sheet queue.
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _tps_sheet(0.822, 0.674, "2323000a-p0.png", ring)
+        second = _tps_sheet(0.816, 0.776, "2323000a-p1.png", ring)
+        pages = [Path("2323000a-p0.png"), Path("2323000a-p1.png")]
+        kept, missed = georef._select_lake_sheets([first, second], pages)
+        self.assertEqual(missed, [])
+        self.assertEqual(
+            {sheet["page"].name for sheet in kept},
+            {"2323000a-p0.png", "2323000a-p1.png"},
+        )
+        for sheet in kept:
+            sheet["gate_iou"] = sheet["registration"].iou
+        gate = min(sheet["gate_iou"] for sheet in kept)
+        several = sum(1 for sheet in kept if sheet["gate_iou"] >= DEFAULT_IOU_THRESHOLD) > 1
+        self.assertTrue(several)
+        self.assertGreaterEqual(gate, DEFAULT_IOU_THRESHOLD)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=gate < DEFAULT_IOU_THRESHOLD,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=several,
+        )
+        self.assertEqual(reasons, ["multi_sheet"])
 
     def test_several_passing_pages_are_queued_and_each_is_warped(self):
         first = _sheet(0.92, 0.0, "north.png")

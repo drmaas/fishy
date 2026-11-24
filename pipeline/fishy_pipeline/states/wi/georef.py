@@ -1208,16 +1208,53 @@ def _centroid_distance(left: list[tuple[float, float]], right: list[tuple[float,
     return math.hypot(lx - rx, ly - ry)
 
 
+def _affine_overlap(sheet: dict) -> float:
+    return float(sheet["registration"].affine_iou)
+
+
+def _spline_overlap(sheet: dict) -> float:
+    """The score ``Registration.iou`` publishes when the method is the spline."""
+    registration = sheet["registration"]
+    if registration.method == "affine":
+        return float(registration.affine_iou)
+    return float(registration.tps_iou)
+
+
+def _closed_sheets_to_keep(unique: list[dict]) -> list[dict]:
+    """Rank closed sibling sheets by affine overlap.
+
+    Keep every sheet whose affine overlap clears the publish cutoff. When one
+    sheet clears on the affine and another closed sheet still clears on the
+    spline, keep both. Fence's higher spline (0.822, affine 0.674) was dropping
+    the second sheet (spline 0.816, affine 0.776) and the lake published. Both
+    drawings then reach ``several_pages_passed``.
+    """
+    cleared = [sheet for sheet in unique if _affine_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
+    if len(cleared) > 1:
+        return cleared
+    if len(cleared) == 1:
+        siblings = [
+            sheet
+            for sheet in unique
+            if sheet not in cleared and _spline_overlap(sheet) >= DEFAULT_IOU_THRESHOLD
+        ]
+        if siblings:
+            return [*cleared, *siblings]
+        return cleared
+    return [max(unique, key=_affine_overlap)]
+
+
 def _select_lake_sheets(
     sheets: list[dict],
     page_rasters: list[Path],
 ) -> tuple[list[dict], list[Path]]:
-    """Keep every page when any sheet is cut. Collapse only an all-closed set.
+    """Keep every page when any sheet is cut. Closed siblings rank by affine.
 
-    A closed shore on every page is one lake drawn more than once. The best of
-    those is enough. A cut or partial score on any page means the document does
-    not show one complete shore, so every other large page stays in the gate,
-    including a page that produced no shoreline.
+    A cut or partial score on any page means the document does not show one
+    complete shore, so every other large page stays in the gate, including a
+    page that produced no shoreline. Closed sheets are ranked by affine overlap.
+    Every closed sheet whose affine overlap clears 0.75 stays, and a sibling
+    whose spline also clears stays with it so the multi-sheet queue can run.
     """
     if not sheets:
         return [], []
@@ -1238,8 +1275,12 @@ def _select_lake_sheets(
     if _pages_complement_sheets(unique):
         missed = [page for page in page_rasters if page not in by_page]
         return unique, missed
-    best = max(sheets, key=lambda sheet: sheet["registration"].iou)
-    return [best], []
+    kept = _closed_sheets_to_keep(unique)
+    if len(kept) > 1:
+        kept_pages = {sheet["page"] for sheet in kept}
+        missed = [page for page in page_rasters if page not in kept_pages]
+        return kept, missed
+    return kept, []
 
 
 def _pages_complement_sheets(sheets: list[dict]) -> bool:
