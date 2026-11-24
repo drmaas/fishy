@@ -1199,7 +1199,15 @@ class FailClosedGateTest(unittest.TestCase):
 
 
 class InkWaiverBandTest(unittest.TestCase):
-    def test_low_ink_passes_inside_near_gate_band(self):
+    def test_small_low_ink_stays_rejected_at_high_overlap(self):
+        # Fence's blank section cell is about 5% of the page with ink under the
+        # basin floor. Overlap at 0.85 does not waive that rejection.
+        self.assertTrue(georef._margin_enclosure(0.052, 0.005))
+        self.assertTrue(georef._rejects_low_ink(0.052, 0.005, 0.851))
+        self.assertTrue(georef._rejects_low_ink(0.052, 0.005, NEAR_GATE_IOU))
+        self.assertFalse(georef._rejects_low_ink(0.052, 0.005, 0.851, keep_margin=True))
+
+    def test_large_low_ink_still_passes_inside_near_gate_band(self):
         hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
         ring = [(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)]
         identity = Affine(1, 0, 0, 0, 1, 0)
@@ -1212,13 +1220,12 @@ class InkWaiverBandTest(unittest.TestCase):
             tps_iou=NEAR_GATE_IOU,
             method="affine",
         )
-        ink = 0.002
-        skip_ink = ink < georef.MIN_BASIN_INK and reg.iou < NEAR_GATE_IOU
-        self.assertFalse(skip_ink)
+        self.assertFalse(georef._rejects_low_ink(0.20, 0.002, NEAR_GATE_IOU))
+        self.assertTrue(georef._rejects_low_ink(0.20, 0.002, NEAR_GATE_IOU - 0.02))
         span = 0.80
         skip_large = (
             span > georef.LARGE_RING_SPAN
-            and ink < georef.LARGE_RING_MIN_INK
+            and 0.002 < georef.LARGE_RING_MIN_INK
             and reg.iou < NEAR_GATE_IOU
         )
         self.assertFalse(skip_large)
@@ -1255,15 +1262,29 @@ class NeatlineSpanEdgeTest(unittest.TestCase):
 
 class DistinctLowDpiSheetTest(unittest.TestCase):
     def test_distinct_low_dpi_bathymetry_stays_in_the_minimum(self):
-        low = _sheet(0.35, 0.0, "scan.png")
-        low["gate_iou"] = low["registration"].iou
-        sharp = _sheet(0.82, 0.0, "letter.png")
-        sharp["gate_iou"] = sharp["registration"].iou
         # The pages are different drawings. A dpi gap does not remove the scan,
         # so the lake minimum stays on the low side of the gate.
-        sheets = [low, sharp]
-        gate = min(sheet["gate_iou"] for sheet in sheets)
-        self.assertEqual({sheet["page"].name for sheet in sheets}, {"scan.png", "letter.png"})
+        low = _sheet(
+            0.35,
+            0.0,
+            "scan.png",
+            ring=[(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)],
+        )
+        sharp = _sheet(
+            0.82,
+            0.0,
+            "letter.png",
+            ring=[(220.0, 0.0), (280.0, 0.0), (280.0, 40.0), (220.0, 40.0)],
+        )
+        low["gate_iou"] = low["registration"].iou
+        sharp["gate_iou"] = sharp["registration"].iou
+        kept, missed = georef._select_lake_sheets(
+            [low, sharp],
+            [Path("scan.png"), Path("letter.png")],
+        )
+        self.assertEqual(missed, [])
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"scan.png", "letter.png"})
+        gate = min(sheet["gate_iou"] for sheet in kept)
         self.assertAlmostEqual(gate, 0.35)
         self.assertLess(gate, DEFAULT_IOU_THRESHOLD)
 
@@ -1300,6 +1321,29 @@ class HydroFootprintMatchesTest(unittest.TestCase):
                 ring,
                 hydro,
                 cut_fraction=0.0,
+            )
+        )
+
+    def test_blank_cell_overlap_does_not_skip_the_span_check(self):
+        hydro = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0), (0.0, 50.0)]
+        ring = [(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)]
+        sheet = _sheet(0.85, 0.0, "cell.png", ring=ring)
+        self.assertTrue(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+            )
+        )
+        self.assertFalse(
+            georef._hydro_footprint_matches(
+                sheet["registration"],
+                ring,
+                hydro,
+                cut_fraction=0.0,
+                area_fraction=0.052,
+                ink=0.005,
             )
         )
 
@@ -1569,6 +1613,75 @@ class AnchorAndLegendTest(unittest.TestCase):
         }
         self.assertIs(georef._choose_anchor([partial, closed], hydro), closed)
 
+    def test_blank_section_cell_does_not_outrank_the_inked_basin(self):
+        # Fence sheet 2323000a-p1: a 5.2% blank cell scored 0.851 and hid the
+        # contoured basin at 0.730. The cell is not rectangular enough to be a legend.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        margin = {
+            "registration": _registration(0.851),
+            "ink": 0.005,
+            "cut_fraction": 0.0,
+            "ring": [(0.0, 0.0), (20.0, 0.0), (22.0, 18.0), (2.0, 16.0)],
+            "area": 0.052 * width * height,
+            "image": image,
+            "page": Path("2323000a-p1.png"),
+        }
+        basin = {
+            "registration": _registration(0.730),
+            "ink": 0.27,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.37 * width * height,
+            "image": image,
+            "page": Path("2323000a-p1.png"),
+        }
+        self.assertLess(margin["area"] / (width * height), georef._LEGEND_MAX_AREA)
+        self.assertLess(margin["ink"], georef.MIN_BASIN_INK)
+        self.assertGreater(basin["area"] / (width * height), margin["area"] / (width * height) * 3)
+        self.assertIs(georef._choose_anchor([margin, basin], hydro), basin)
+
+    def test_traced_margin_cell_loses_to_the_basin_and_a_lone_oval_stays(self):
+        width, height = 400, 320
+        rgb = bytearray([255]) * (width * height * 3)
+        margin = [(16, 250), (70, 242), (108, 268), (96, 302), (40, 308), (18, 280)]
+        basin = [(140, 40), (330, 55), (350, 150), (300, 210), (180, 200), (130, 120)]
+        _ink_polyline(rgb, width, margin, close=True)
+        _ink_polyline(rgb, width, basin, close=True)
+        for cx, cy in ((200, 100), (240, 130), (280, 110), (220, 160), (260, 150), (190, 140)):
+            for y in range(cy - 3, cy + 4):
+                for x in range(cx - 3, cx + 4):
+                    index = (y * width + x) * 3
+                    rgb[index : index + 3] = b"\x00\x00\x00"
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        _margin_image, margin_ring = _traced_outline(margin, width, height)
+        margin_metrics = _outline_metrics(image, margin_ring)
+        self.assertLess(margin_metrics["area"], georef._LEGEND_MAX_AREA)
+        self.assertGreater(margin_metrics["area"], 0.03)
+        self.assertLess(margin_metrics["box"], 0.90)
+        self.assertLess(margin_metrics["ink"], georef.MIN_BASIN_INK)
+        self.assertIsNone(
+            georef._score_ring(
+                image,
+                margin_ring,
+                [False] * len(margin_ring),
+                hydro_ring=margin_ring,
+                gcp_count=8,
+                page=Path("margin.png"),
+            )
+        )
+        _basin_image, basin_ring = _traced_outline(basin, width, height)
+        hydro = [(float(point[0]), float(point[1])) for point in basin_ring]
+        candidates, error = georef._collect_page_candidates(image, Path("fence.png"), hydro, 8)
+        self.assertIsNone(error)
+        self.assertTrue(candidates)
+        chosen = georef._choose_anchor(candidates, hydro)
+        chosen_area = chosen["area"] / float(width * height)
+        self.assertGreater(chosen_area, georef._LEGEND_MAX_AREA)
+        self.assertGreaterEqual(chosen["ink"], georef.MIN_BASIN_INK)
+        self.assertGreater(chosen_area, margin_metrics["area"] * 3)
+
     def test_legend_rectangle_is_not_a_shore(self):
         ring = _dense_rectangle(4.0, 4.0, 80.0, 50.0, step=3.0)
         straight = _ring_straightness(ring)
@@ -1597,15 +1710,26 @@ class AnchorAndLegendTest(unittest.TestCase):
                 area_fraction=oval_metrics["area"],
             )
         )
-        oval_row = georef._score_ring(
-            oval_image,
-            oval,
-            [False] * len(oval),
-            hydro_ring=oval,
-            gcp_count=8,
-            page=Path("oval.png"),
+        # Overlap with itself would waive the old ink rule. A small blank oval
+        # is still rejected as a competing ring, and kept only when it is alone.
+        self.assertIsNone(
+            georef._score_ring(
+                oval_image,
+                oval,
+                [False] * len(oval),
+                hydro_ring=oval,
+                gcp_count=8,
+                page=Path("oval.png"),
+            )
         )
-        self.assertIsNotNone(oval_row)
+        lone, lone_error = georef._collect_page_candidates(
+            oval_image,
+            Path("oval.png"),
+            oval,
+            8,
+        )
+        self.assertIsNone(lone_error)
+        self.assertTrue(lone)
 
         dam_image, dam = _traced_outline(_dam_ring(), 220, 160)
         dam_metrics = _outline_metrics(dam_image, dam)
