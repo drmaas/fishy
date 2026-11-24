@@ -1225,14 +1225,19 @@ def _spline_overlap(sheet: dict) -> float:
     return float(registration.tps_iou)
 
 
+def _published_overlap(sheet: dict) -> float:
+    """The score the lake gate reads: ``Registration.iou``."""
+    return float(sheet["registration"].iou)
+
+
 def _closed_sheets_to_keep(unique: list[dict]) -> list[dict]:
     """Rank closed sibling sheets by affine overlap.
 
     Keep every sheet whose affine overlap clears the publish cutoff. When one
-    sheet clears on the affine and another closed sheet still clears on the
-    spline, keep both. Fence's higher spline (0.822, affine 0.674) was dropping
-    the second sheet (spline 0.816, affine 0.776) and the lake published. Both
-    drawings then reach ``several_pages_passed``.
+    sheet clears on the affine and another still clears on its published score,
+    keep both. When no affine clears, keep every sheet whose published score
+    clears. Two or more of those queue the lake. The highest affine is the
+    fallback only when no published score clears.
     """
     cleared = [sheet for sheet in unique if _affine_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
     if len(cleared) > 1:
@@ -1241,11 +1246,16 @@ def _closed_sheets_to_keep(unique: list[dict]) -> list[dict]:
         siblings = [
             sheet
             for sheet in unique
-            if sheet not in cleared and _spline_overlap(sheet) >= DEFAULT_IOU_THRESHOLD
+            if sheet not in cleared and _published_overlap(sheet) >= DEFAULT_IOU_THRESHOLD
         ]
         if siblings:
             return [*cleared, *siblings]
         return cleared
+    published = [sheet for sheet in unique if _published_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
+    if len(published) >= 2:
+        return published
+    if len(published) == 1:
+        return published
     return [max(unique, key=_affine_overlap)]
 
 

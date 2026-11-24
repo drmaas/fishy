@@ -1209,6 +1209,43 @@ class FailClosedGateTest(unittest.TestCase):
         )
         self.assertEqual(reasons, ["multi_sheet"])
 
+    def test_spline_clears_queue_when_no_affine_clears(self):
+        # Splines 0.80 and 0.78, affines 0.70 and 0.72. The higher affine is the
+        # 0.78 sheet. Keeping only that sheet would publish it.
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _tps_sheet(0.80, 0.70, "a.png", ring)
+        second = _tps_sheet(0.78, 0.72, "b.png", ring)
+        pages = [Path("a.png"), Path("b.png")]
+        kept, missed = georef._select_lake_sheets([first, second], pages)
+        self.assertEqual(missed, [])
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png"})
+        for sheet in kept:
+            sheet["gate_iou"] = sheet["registration"].iou
+        several = sum(1 for sheet in kept if sheet["gate_iou"] >= DEFAULT_IOU_THRESHOLD) > 1
+        self.assertTrue(several)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=False,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=several,
+        )
+        self.assertEqual(reasons, ["multi_sheet"])
+
+    def test_only_clearing_page_survives_when_no_affine_clears(self):
+        # A published 0.81 with affine 0.62 must not lose to a page at 0.60.
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        clearing = _tps_sheet(0.81, 0.62, "clear.png", ring)
+        other = _tps_sheet(0.60, 0.70, "low.png", ring)
+        pages = [Path("clear.png"), Path("low.png")]
+        kept, missed = georef._select_lake_sheets([clearing, other], pages)
+        self.assertEqual(missed, [])
+        self.assertEqual([sheet["page"].name for sheet in kept], ["clear.png"])
+        self.assertGreaterEqual(kept[0]["registration"].iou, DEFAULT_IOU_THRESHOLD)
+
     def test_headline_comes_from_the_minimum_sheet(self):
         ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
         strong = _tps_sheet(0.90, 0.88, "strong.png", ring)
