@@ -11,8 +11,8 @@ Real sheets often leave a gap in that outer line, or the line runs off the
 page. A second pass closes small gaps, keeps a detected neatline as a wall,
 and returns those water polygons too. Vertices that sit on the neatline or the
 page edge are marked ``on_frame`` so registration can treat them as unknown
-shore. The georeferencer keeps whichever figure overlaps the hydro polygon
-more.
+shore. In the near-gate band, ink and area decide when the overlap gap is
+within 0.10. A wider gap keeps the higher overlap.
 
 A long straight run is usually a section line or a road, and those pixels are
 cleared before tracing. A shore can be straight for a long stretch too, and a
