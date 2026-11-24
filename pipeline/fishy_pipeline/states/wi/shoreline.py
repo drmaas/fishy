@@ -13,6 +13,12 @@ and returns those water polygons too. Vertices that sit on the neatline or the
 page edge are marked ``on_frame`` so registration can treat them as unknown
 shore. The georeferencer keeps whichever figure overlaps the hydro polygon
 more.
+
+A long straight run is usually a section line or a road, and those pixels are
+cleared before tracing. A shore can be straight for a long stretch too. If
+that stretch is the seal of a large enclosed water body, clearing it opens the
+water to the page border and the lake disappears from the candidate list.
+Ink that borders such a hole is kept.
 """
 
 from __future__ import annotations
@@ -113,12 +119,14 @@ def _trace_work_mask(
     small, small_w, small_h, factor = _shrink_mask(work, width, height, max_side)
     frame = _detect_frame(small, small_w, small_h)
     if max(width, height) >= 400:
+        run_len = max(8, int(0.14 * max(small_w, small_h)))
         _clear_long_runs(
             small,
             small_w,
             small_h,
-            max(8, int(0.14 * max(small_w, small_h))),
+            run_len,
             keep=frame,
+            protect=_hole_shore_pixels(small, small_w, small_h, run_len, frame),
         )
     return small, small_w, small_h, factor, frame
 
@@ -257,49 +265,160 @@ def _ring_pixel_indices(
 
 
 def _ring_straightness(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
-    """Fraction of perimeter that lies on long, nearly straight runs."""
+    """Fraction of perimeter that lies on long, nearly straight runs.
+
+    Each edge is counted once. Counting the same run again at every vertex
+    saturated ordinary lake shores at 1, so the road filter dropped them.
+    """
     points = list(ring)
     count = len(points)
     if count < 8:
         return 0.0
-    min_run = max(16.0, 0.05 * _ring_span(ring))
-    straight = 0.0
+    lengths: list[float] = []
+    directions: list[tuple[float, float]] = []
     perimeter = 0.0
-    index = 0
-    while index < count:
-        start = index
-        j = (index + 1) % count
-        dx = points[j][0] - points[index][0]
-        dy = points[j][1] - points[index][1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len < 1e-6:
-            index += 1
-            continue
-        ux, uy = dx / seg_len, dy / seg_len
-        run = seg_len
-        step = j
-        while run < min_run:
-            nxt = (step + 1) % count
-            if nxt == start:
-                break
-            edx = points[nxt][0] - points[step][0]
-            edy = points[nxt][1] - points[step][1]
-            elen = math.hypot(edx, edy)
-            if elen < 1e-6:
-                step = nxt
-                continue
-            cross = abs(ux * (edy / elen) - uy * (edx / elen))
-            if cross > 0.1:
-                break
-            run += elen
-            step = nxt
-        if run >= min_run:
-            straight += run
-        perimeter += seg_len
-        index += 1
+    for index in range(count):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % count]
+        length = math.hypot(x2 - x1, y2 - y1)
+        lengths.append(length)
+        perimeter += length
+        if length < 1e-9:
+            directions.append((0.0, 0.0))
+        else:
+            directions.append(((x2 - x1) / length, (y2 - y1) / length))
     if perimeter < 1e-6:
         return 0.0
+    min_run = max(16.0, 0.05 * _ring_span(ring))
+    straight = 0.0
+    index = 0
+    while index < count:
+        if lengths[index] < 1e-9:
+            index += 1
+            continue
+        ux, uy = directions[index]
+        run = 0.0
+        step = 0
+        while step < count:
+            edge = (index + step) % count
+            if lengths[edge] < 1e-9:
+                step += 1
+                continue
+            vx, vy = directions[edge]
+            if step > 0 and abs(ux * vy - uy * vx) > 0.12:
+                break
+            run += lengths[edge]
+            step += 1
+        if run >= min_run and step > 0:
+            straight += run
+            index += step
+        else:
+            index += 1
     return min(1.0, straight / perimeter)
+
+
+def _ring_boxiness(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> float:
+    """Filled area divided by the axis-aligned box. A legend rectangle is near 1."""
+    if len(ring) < 4:
+        return 0.0
+    xs = [point[0] for point in ring]
+    ys = [point[1] for point in ring]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    if width < 1.0 or height < 1.0:
+        return 0.0
+    return _ring_area(ring) / (width * height)
+
+
+def cleanup_shore_ring(ring: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
+    """Filled-shore alternates with thin road spurs opened away.
+
+    The tracer often follows the shore and then runs out and back along a
+    road. That spur wrecks the polygon fill. A one- or two-pixel open, erode,
+    or dilate on the filled ring drops the spur and leaves the lake body.
+    Callers keep a variant only when it overlaps hydro more than the original.
+    """
+    base = [(float(point[0]), float(point[1])) for point in ring]
+    if len(base) < 12:
+        return []
+    mask, width, height, geo = _rasterize_ring(base, 360)
+    base_area = sum(mask)
+    if base_area < 40:
+        return []
+    variants: list[bytearray] = [
+        _dilate_mask(_erode_mask(mask, width, height, 2), width, height, 2),
+        _erode_mask(mask, width, height, 1),
+        _dilate_mask(mask, width, height, 1),
+        _dilate_mask(mask, width, height, 2),
+    ]
+    cleaned: list[list[tuple[float, float]]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for variant in variants:
+        area = sum(variant)
+        if area < 0.72 * base_area or area > 1.28 * base_area:
+            continue
+        traced = _trace_outer(variant, width, height)
+        if len(traced) < 12:
+            continue
+        scaled = _unmap_ring(traced, geo)
+        key = (
+            round(min(point[0] for point in scaled)),
+            round(max(point[0] for point in scaled)),
+            round(area),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(scaled)
+    return cleaned
+
+
+def _rasterize_ring(
+    ring: list[tuple[float, float]], grid: int
+) -> tuple[bytearray, int, int, tuple[float, float, float, float]]:
+    xs = [point[0] for point in ring]
+    ys = [point[1] for point in ring]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 1.0)
+    span_y = max(max_y - min_y, 1.0)
+    min_x -= span_x * 0.04
+    max_x += span_x * 0.04
+    min_y -= span_y * 0.04
+    max_y += span_y * 0.04
+    cell_x = (max_x - min_x) / grid
+    cell_y = (max_y - min_y) / grid
+    cells = bytearray(grid * grid)
+    count = len(ring)
+    for iy in range(grid):
+        y = min_y + (iy + 0.5) * cell_y
+        crossings: list[float] = []
+        for index in range(count):
+            x1, y1 = ring[index]
+            x2, y2 = ring[(index + 1) % count]
+            if y1 == y2 or (y1 > y) == (y2 > y):
+                continue
+            fraction = (y - y1) / (y2 - y1)
+            crossings.append(x1 + fraction * (x2 - x1))
+        crossings.sort()
+        for pair in range(0, len(crossings) - 1, 2):
+            start = math.ceil((crossings[pair] - min_x) / cell_x - 0.5)
+            end = math.floor((crossings[pair + 1] - min_x) / cell_x - 0.5)
+            if start < 0:
+                start = 0
+            if end >= grid:
+                end = grid - 1
+            row = iy * grid
+            for ix in range(start, end + 1):
+                cells[row + ix] = 1
+    return cells, grid, grid, (min_x, min_y, cell_x, cell_y)
+
+
+def _unmap_ring(
+    ring: list[tuple[float, float]], geo: tuple[float, float, float, float]
+) -> list[tuple[float, float]]:
+    min_x, min_y, cell_x, cell_y = geo
+    return [((point[0] + 0.5) * cell_x + min_x, (point[1] + 0.5) * cell_y + min_y) for point in ring]
 
 
 def _road_like_ring(
@@ -785,12 +904,14 @@ def _gap_closed_figures(image: RasterImage) -> list[ShoreFigure]:
     mask = _dark_mask(image)
     small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_WORK_SIDE)
     frame = _detect_frame(small, small_w, small_h)
+    run_len = max(8, int(0.16 * max(small_w, small_h)))
     _clear_long_runs(
         small,
         small_w,
         small_h,
-        max(8, int(0.16 * max(small_w, small_h))),
+        run_len,
         keep=frame,
+        protect=_hole_shore_pixels(small, small_w, small_h, run_len, frame),
     )
     walled = _burn_walls(small, small_w, small_h, frame)
     figures: list[ShoreFigure] = []
@@ -916,12 +1037,62 @@ def _burn_walls(
     return out
 
 
+def _hole_shore_pixels(
+    mask: bytearray,
+    width: int,
+    height: int,
+    min_len: int,
+    keep: tuple[int, int, int, int] | None = None,
+) -> bytearray:
+    """Ink that seals a large hole, when deleting it would open that hole.
+
+    ``_clear_long_runs`` deletes section lines. The same test matches a long
+    straight piece of shoreline. On Trout sheet 1 and Fence sheet 2 that piece
+    is the only seal: removing a few dozen pixels opens the water to the page
+    border. Lakes whose shore already survives the clear are left alone, so a
+    passing trace is not redrawn.
+
+    Holes are largest-first. Four percent of the mask is large enough to be a
+    basin and small enough to ignore lettering.
+    """
+    protect = bytearray(width * height)
+    if width < 8 or height < 8:
+        return protect
+    holes = _hole_contours(mask, width, height)
+    minimum = 0.04 * width * height
+    if not holes or holes[0][0] < minimum:
+        return protect
+    trial = bytearray(mask)
+    _clear_long_runs(trial, width, height, min_len, keep=keep)
+    opened = _hole_contours(trial, width, height)
+    opened_area = opened[0][0] if opened else 0
+    if opened_area >= 0.85 * holes[0][0]:
+        return protect
+    for area, contour in holes:
+        if area < minimum:
+            break
+        for point in contour:
+            x = int(point[0])
+            y = int(point[1])
+            for dy in (-1, 0, 1):
+                ny = y + dy
+                if ny < 0 or ny >= height:
+                    continue
+                row = ny * width
+                for dx in (-1, 0, 1):
+                    nx = x + dx
+                    if 0 <= nx < width and mask[row + nx]:
+                        protect[row + nx] = 1
+    return protect
+
+
 def _clear_long_runs(
     mask: bytearray,
     width: int,
     height: int,
     min_len: int,
     keep: tuple[int, int, int, int] | None = None,
+    protect: bytearray | None = None,
 ) -> None:
     """Drop long straight ink (section lines) and keep pixels where a shore leaves the run."""
     horizontal: list[tuple[int, int, int]] = []
@@ -951,14 +1122,20 @@ def _clear_long_runs(
                 y += 1
     for y, x0, x1 in horizontal:
         for x in range(x0, x1):
-            if _on_kept_frame(x, y, keep) or _run_has_side_ink(mask, width, height, x, y, axis="row"):
+            index = y * width + x
+            if (protect is not None and protect[index]) or _on_kept_frame(x, y, keep) or _run_has_side_ink(
+                mask, width, height, x, y, axis="row"
+            ):
                 continue
-            mask[y * width + x] = 0
+            mask[index] = 0
     for x, y0, y1 in vertical:
         for y in range(y0, y1):
-            if _on_kept_frame(x, y, keep) or _run_has_side_ink(mask, width, height, x, y, axis="col"):
+            index = y * width + x
+            if (protect is not None and protect[index]) or _on_kept_frame(x, y, keep) or _run_has_side_ink(
+                mask, width, height, x, y, axis="col"
+            ):
                 continue
-            mask[y * width + x] = 0
+            mask[index] = 0
 
 
 def _on_kept_frame(x: int, y: int, frame: tuple[int, int, int, int] | None) -> bool:

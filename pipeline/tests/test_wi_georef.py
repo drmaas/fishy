@@ -26,9 +26,11 @@ from fishy_pipeline.states.wi.register import (
 from fishy_pipeline.states.wi import register as wi_register
 from fishy_pipeline.states.wi.shoreline import (
     NEATLINE_SPAN,
+    cleanup_shore_ring,
     extract_shoreline,
     extract_shoreline_candidates,
     extract_shoreline_figures,
+    _ring_straightness,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -351,6 +353,24 @@ class ShorelineTest(unittest.TestCase):
         self.assertGreater(max(xs), 110)
         self.assertLess(min(ys), 40)
         self.assertGreater(max(ys), 95)
+
+    def test_straight_shore_seal_is_kept(self):
+        # A long straight shore used to be cleared as a section line. That
+        # opened the water onto the page, so the tracer never saw the lake.
+        width, height = 240, 120
+        rgb = bytearray([255]) * (width * height * 3)
+        left = [(40 + (6 if index % 2 == 0 else 0), y) for index, y in enumerate(range(28, 80, 5))]
+        right = [(190 + (6 if index % 2 == 0 else 0), y) for index, y in enumerate(range(80, 26, -5))]
+        # The bottom is one long horizontal shore. It is the seal of the water.
+        ring = left + [(left[-1][0], 96), (190, 96)] + right
+        _ink_polyline(rgb, width, ring, close=True)
+        for x in range(width):
+            index = (6 * width + x) * 3
+            rgb[index : index + 3] = b"\x00\x00\x00"
+        rings = extract_shoreline_candidates(RasterImage(width=width, height=height, rgb=bytes(rgb)))
+        self.assertTrue(
+            any(max(point[0] for point in ring) - min(point[0] for point in ring) > 140 for ring in rings)
+        )
 
     def test_long_road_enclosure_is_not_the_outer_shore_candidate(self):
         width, height = 220, 180
@@ -1192,6 +1212,141 @@ class HydroFootprintMatchesTest(unittest.TestCase):
                 cut_fraction=0.0,
             )
         )
+
+
+def _registration(iou: float) -> Registration:
+    blank = ThinPlateSpline([], [], [], (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    return Registration(
+        affine=Affine(1, 0, 0, 0, 1, 0),
+        tps=blank,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="affine",
+    )
+
+
+def _dense_rectangle(x0: float, y0: float, x1: float, y1: float, step: float = 4.0) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    x = x0
+    while x < x1:
+        points.append((x, y0))
+        x += step
+    y = y0
+    while y < y1:
+        points.append((x1, y))
+        y += step
+    x = x1
+    while x > x0:
+        points.append((x, y1))
+        x -= step
+    y = y1
+    while y > y0:
+        points.append((x0, y))
+        y -= step
+    return points
+
+
+class ShorelineStraightnessTest(unittest.TestCase):
+    def test_each_edge_is_counted_once(self):
+        rectangle = _dense_rectangle(0.0, 0.0, 200.0, 120.0)
+        self.assertGreater(_ring_straightness(rectangle), 0.85)
+        wavy: list[tuple[float, float]] = []
+        for index in range(180):
+            angle = index / 180 * 2 * math.pi
+            radius = 80 + 26 * math.sin(angle * 5)
+            wavy.append((120 + radius * math.cos(angle), 120 + radius * math.sin(angle)))
+        self.assertLess(_ring_straightness(wavy), 0.45)
+
+    def test_opening_removes_a_thin_road_spur(self):
+        ring = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 39.6),
+            (150.0, 39.6),
+            (150.0, 40.2),
+            (100.0, 40.2),
+            (100.0, 80.0),
+            (0.0, 80.0),
+        ]
+        # Repeat vertices so the rectangle edges are long enough to rasterize.
+        dense: list[tuple[float, float]] = []
+        for start, end in zip(ring, ring[1:] + ring[:1], strict=True):
+            dense.append(start)
+            for step in range(1, 8):
+                fraction = step / 8
+                dense.append(
+                    (
+                        start[0] + (end[0] - start[0]) * fraction,
+                        start[1] + (end[1] - start[1]) * fraction,
+                    )
+                )
+        cleaned = cleanup_shore_ring(dense)
+        self.assertTrue(cleaned)
+        self.assertTrue(any(max(point[0] for point in variant) < 120.0 for variant in cleaned))
+
+
+class AnchorAndLegendTest(unittest.TestCase):
+    def test_near_gate_shore_beats_an_inkier_road(self):
+        hydro = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        shore = {"registration": _registration(0.88), "ink": 0.06, "cut_fraction": 0.0, "ring": hydro}
+        road = {"registration": _registration(0.62), "ink": 0.30, "cut_fraction": 0.0, "ring": hydro}
+        self.assertIs(georef._choose_anchor([road, shore], hydro), shore)
+
+    def test_ink_still_breaks_a_below_gate_near_tie(self):
+        hydro = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        high_ink = {"registration": _registration(0.58), "ink": 0.18, "cut_fraction": 0.0, "ring": hydro}
+        low_ink = {"registration": _registration(0.62), "ink": 0.004, "cut_fraction": 0.0, "ring": hydro}
+        self.assertIs(georef._choose_anchor([low_ink, high_ink], hydro), high_ink)
+
+    def test_partial_footprint_cannot_outrank_a_closed_shore(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+        closed_ring = list(hydro)
+        fragment = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)]
+        closed = {
+            "registration": _registration(0.73),
+            "ink": 0.2,
+            "cut_fraction": 0.0,
+            "ring": closed_ring,
+        }
+        partial = {
+            "registration": _registration(0.85),
+            "ink": 0.01,
+            "cut_fraction": 0.25,
+            "ring": fragment,
+        }
+        self.assertIs(georef._choose_anchor([partial, closed], hydro), closed)
+
+    def test_legend_rectangle_is_not_a_shore(self):
+        ring = _dense_rectangle(4.0, 4.0, 80.0, 50.0, step=3.0)
+        straight = _ring_straightness(ring)
+        self.assertTrue(georef._legend_box(ring, 0.004, straight, area_fraction=0.05))
+        self.assertFalse(georef._legend_box(ring, 0.2, straight, area_fraction=0.05))
+
+    def test_small_low_ink_box_is_a_legend_even_when_not_perfectly_straight(self):
+        ring = _dense_rectangle(10.0, 10.0, 90.0, 70.0, step=6.0)
+        # A legend outline with a few ticks is only moderately straight.
+        straight = min(_ring_straightness(ring), 0.34)
+        self.assertTrue(georef._legend_box(ring, 0.005, straight, area_fraction=0.05))
+        self.assertFalse(georef._legend_box(ring, 0.005, straight, area_fraction=0.20))
+
+
+class CitationPageTest(unittest.TestCase):
+    def test_blank_citation_is_not_a_map_sheet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blank = root / "cite.png"
+            write_png(blank, RasterImage(80, 100, bytes([250]) * (80 * 100 * 3)))
+            ink = bytearray([255]) * (80 * 100 * 3)
+            for y in range(15, 70):
+                for x in range(10, 70):
+                    if (x + y) % 5 == 0:
+                        offset = (y * 80 + x) * 3
+                        ink[offset : offset + 3] = b"\x10\x10\x10"
+            drawn = root / "map.png"
+            write_png(drawn, RasterImage(80, 100, bytes(ink)))
+            self.assertTrue(georef._is_citation_raster(blank))
+            self.assertFalse(georef._is_citation_raster(drawn))
 
 
 class CliTest(unittest.TestCase):
