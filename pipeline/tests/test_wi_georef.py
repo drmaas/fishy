@@ -1793,7 +1793,7 @@ class AnchorAndLegendTest(unittest.TestCase):
         image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
         hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
         small = {
-            "registration": _registration(0.88),
+            "registration": _registration(0.80),
             "ink": 0.031,
             "cut_fraction": 0.0,
             "ring": [(0.0, 0.0), (24.0, 0.0), (24.0, 20.0), (0.0, 20.0)],
@@ -1812,7 +1812,60 @@ class AnchorAndLegendTest(unittest.TestCase):
         }
         self.assertGreater(small["ink"], georef._LEGEND_MAX_INK)
         self.assertLess(small["area"] / (width * height), georef._LEGEND_MAX_AREA)
+        self.assertLessEqual(0.80 - 0.75, georef._ANCHOR_IOU_BAND)
         self.assertIs(georef._choose_anchor([small, basin], hydro), basin)
+
+    def test_overlap_gap_over_a_tenth_keeps_the_higher_score(self):
+        # Big Muskellunge: the 0.902 spline must not lose to the 0.779 affine ring.
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        spline = {
+            "registration": _registration(0.902),
+            "ink": 0.08,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.20 * width * height,
+            "image": image,
+            "page": Path("muskie.png"),
+        }
+        affine = {
+            "registration": _registration(0.779),
+            "ink": 0.24,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.35 * width * height,
+            "image": image,
+            "page": Path("muskie.png"),
+        }
+        self.assertGreater(0.902 - 0.779, georef._ANCHOR_IOU_BAND)
+        self.assertIs(georef._choose_anchor([affine, spline], hydro), spline)
+
+    def test_allequash_gap_inside_a_tenth_keeps_the_inkier_ring(self):
+        width, height = 1000, 1000
+        image = RasterImage(width=width, height=height, rgb=bytes([255]) * (width * height * 3))
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        higher = {
+            "registration": _registration(0.964),
+            "ink": 0.08,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.22 * width * height,
+            "image": image,
+            "page": Path("allequash.png"),
+        }
+        inkier = {
+            "registration": _registration(0.942),
+            "ink": 0.21,
+            "cut_fraction": 0.0,
+            "ring": list(hydro),
+            "area": 0.28 * width * height,
+            "image": image,
+            "page": Path("allequash.png"),
+        }
+        self.assertAlmostEqual(0.964 - 0.942, 0.022, places=3)
+        self.assertLessEqual(0.964 - 0.942, georef._ANCHOR_IOU_BAND)
+        self.assertIs(georef._choose_anchor([higher, inkier], hydro), inkier)
 
     def test_small_real_lake_stays_when_its_overlap_beats_the_basin(self):
         # The drop used to remove this ring because a larger basin exists.

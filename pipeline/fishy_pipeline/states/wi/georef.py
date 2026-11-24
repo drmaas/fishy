@@ -1131,17 +1131,21 @@ def _anchor_ink_area(row: dict) -> tuple[float, float]:
 
 
 def _choose_anchor(candidates: list[dict], hydro_ring: list[tuple[float, float]]) -> dict:
-    """In the near-gate band, ink and area pick the shore. Overlap does not.
+    """Above 0.74, ink and area decide only inside a tenth of overlap.
 
-    A 9% ring or a 6% ring with ink just over the legend cap can outscore the
-    basin on overlap and still be the wrong figure. Those candidates are ranked
-    by ink, then area. Below the band, a wide overlap gap still wins.
+    A wider gap keeps the higher score. Big Muskellunge's 0.902 spline stays
+    ahead of a 0.779 affine ring. Allequash's 0.022 gap still picks the inkier
+    ring. Below the band, a wide overlap gap still wins.
     """
     candidates = _drop_margin_enclosures(candidates)
     scored = [(_publish_gate(row, hydro_ring), row) for row in candidates]
     above = [pair for pair in scored if pair[0] >= NEAR_GATE_IOU]
     if above:
-        return max(above, key=lambda pair: _anchor_ink_area(pair[1]))[1]
+        best_gate = max(pair[0] for pair in above)
+        close = [pair for pair in above if best_gate - pair[0] <= _ANCHOR_IOU_BAND]
+        if len(close) > 1:
+            return max(close, key=lambda pair: _anchor_ink_area(pair[1]))[1]
+        return max(above, key=lambda pair: pair[0])[1]
     best_gate = max(pair[0] for pair in scored)
     band = [pair for pair in scored if best_gate - pair[0] < _ANCHOR_IOU_BAND]
     return max(band, key=lambda pair: (_figure_quality(pair[1]), pair[0]))[1]
