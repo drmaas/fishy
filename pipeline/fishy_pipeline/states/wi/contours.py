@@ -5,8 +5,10 @@ Trace Wisconsin depth contours and tag them with positive depth_ft.
 Reads ``georef/results.json`` and the 24K Hydro polygon (island rings included).
 Every kept warp is clipped to that polygon. Depth labels come from committed
 ``pipeline/data/wi/labels/<wbic>.json`` only when that file's page is the raster
-being traced; EasyOCR runs only with ``--ocr-fallback``. Label ink is inpainted,
-strokes are skeletonized and traced.
+being traced. The interval from that page is then used to step depths on the
+other kept warps. The publish gate runs once on the merged depths. EasyOCR runs
+only with ``--ocr-fallback``. Label ink is inpainted, strokes are skeletonized
+and traced.
 Depths snap to labels and step inward from the 0 shoreline by ``interval_ft``,
 staying inside ``max_depth_ft``. A lake publishes only when shoreline IoU is at
 least ``constants.DEFAULT_IOU_THRESHOLD`` and traced depths match the recorded
@@ -227,11 +229,13 @@ def _trace_item(
                     page=page or None,
                     ocr_fallback=ocr_fallback,
                     compare_ocr=compare_ocr and index == 0,
+                    publish=len(jobs) == 1,
                 )
             )
         if len(pieces) == 1:
-            pieces[0].pop("_features", None)
+            _drop_trace_scratch(pieces[0])
             return pieces[0]
+        _carry_label_interval(pieces)
         return _merge_sheet_traces(base, pieces, out_dir=out_dir, entry=entry)
     except Exception as error:
         return {
@@ -277,6 +281,11 @@ def _sheet_dir_name(page: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in stem)
 
 
+# A page that is not the label file's page has no recorded depths of its own.
+# Those two reasons belong to the lake gate, which runs once on the merge.
+_LABEL_REJECT_REASONS = frozenset({"recorded_depth_missing", "no_contour_lines"})
+
+
 def _merge_sheet_traces(base: dict, pieces: list[dict], *, out_dir: Path, entry: dict | None) -> dict:
     """One lake collection from every kept warp. A weak sheet keeps the lake in review."""
     features = []
@@ -288,12 +297,13 @@ def _merge_sheet_traces(base: dict, pieces: list[dict], *, out_dir: Path, entry:
                     continue
                 hydro_kept = True
             features.append(feature)
+        _drop_trace_scratch(piece)
     reasons: list[str] = []
     for piece in pieces:
-        for reason in piece.get("reasons") or []:
+        for reason in _sheet_reasons_for_lake(piece):
             if reason not in reasons:
                 reasons.append(reason)
-    review = any(piece.get("qa_status") != "auto" for piece in pieces)
+    review = any(_sheet_trace_failed(piece) for piece in pieces)
     review = review or any(getattr(feature, "needs_review", False) for feature in features if feature.depth_ft is not None)
     depths = sorted({int(feature.depth_ft) for feature in features if feature.depth_ft is not None})
     emitted = [feature for feature in features if feature.depth_ft is not None and feature.source != "hydro"]
@@ -368,6 +378,7 @@ def _trace_sheet(
     ocr_fallback: bool,
     compare_ocr: bool,
     page: str | None = None,
+    publish: bool = True,
 ) -> dict:
     parts = [_water_part(part) for part in geometry.parts]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -418,9 +429,13 @@ def _trace_sheet(
                 if feature.depth_ft is not None and feature.source != "hydro"
             }
         )
+    traced_lines = [Line(coords=line.coords, closed=line.closed) for line in traced.lines]
+    traced_labels = [
+        Label(x=label.x, y=label.y, depth_ft=label.depth_ft, confidence=label.confidence) for label in traced.labels
+    ]
     assignment = assign_depths(
-        [Line(coords=line.coords, closed=line.closed) for line in traced.lines],
-        [Label(x=label.x, y=label.y, depth_ft=label.depth_ft, confidence=label.confidence) for label in traced.labels],
+        traced_lines,
+        traced_labels,
         parts,
         max_depth_ft=assign_max,
         snap_m=traced.snap_m,
@@ -430,21 +445,33 @@ def _trace_sheet(
     emitted = [line for line in assignment.features if line.depth_ft is not None and line.source != "hydro"]
     depths = sorted({int(feature.depth_ft) for feature in assignment.features if feature.depth_ft is not None})
     iou = base.get("iou")
+    labels_applied = _recorded_labels_applied(wbic, page, traced.labels)
+    recorded_body = load_recorded_labels(wbic)
+    label_page_rejected = recorded_body is not None and not label_page_matches(recorded_body, page)
     review = any(line.needs_review for line in assignment.features if line.depth_ft is not None)
-    publishable, qa_status, gate_reasons = publish_gate(
-        wbic=wbic,
-        iou=iou if isinstance(iou, (int, float)) else None,
-        depths_ft=[depth for depth in depths if depth != 0],
-        georef_qa_status=base.get("georef_qa_status"),
-        georef_reasons=base.get("georef_reasons"),
-        warp_source=base.get("warp_source"),
-    )
-    reasons = list(dict.fromkeys(list(assignment.reasons) + gate_reasons))
-    if not emitted:
-        reasons.append("no_contour_lines")
-    if assignment.reasons or review or not publishable:
-        qa_status = "needs_review"
-        publishable = False
+    reasons = list(assignment.reasons)
+    publishable = False
+    if publish:
+        publishable, qa_status, gate_reasons = publish_gate(
+            wbic=wbic,
+            iou=iou if isinstance(iou, (int, float)) else None,
+            depths_ft=[depth for depth in depths if depth != 0],
+            georef_qa_status=base.get("georef_qa_status"),
+            georef_reasons=base.get("georef_reasons"),
+            warp_source=base.get("warp_source"),
+        )
+        reasons = list(dict.fromkeys(reasons + gate_reasons))
+        if not emitted:
+            reasons.append("no_contour_lines")
+        if reasons or review or not publishable:
+            qa_status = "needs_review"
+            publishable = False
+    else:
+        # The lake gate runs once, on the merged depths. A page that is not the
+        # label page does not invent recorded_depth_missing or no_contour_lines.
+        if not emitted and not label_page_rejected:
+            reasons.append("no_contour_lines")
+        qa_status = "needs_review" if reasons or review else "auto"
     collection = features_to_geojson(
         assignment.features,
         wbic=str(base["wbic"]),
@@ -463,14 +490,20 @@ def _trace_sheet(
         "depths_ft": depths,
         "depths_ft_ocr": depths_ocr,
         "page": page,
-        "labels_applied": _recorded_labels_applied(wbic, page, traced.labels),
-        "recorded_labels": load_recorded_labels(wbic) is not None,
+        "labels_applied": labels_applied,
+        "label_page_rejected": label_page_rejected,
+        "recorded_labels": recorded_body is not None,
         "label_source": (
             "recorded"
-            if _recorded_labels_applied(wbic, page, traced.labels)
+            if labels_applied
             else ("ocr" if ocr_fallback and traced.labels else "none")
         ),
         "_features": assignment.features,
+        "_lines": traced_lines,
+        "_assign_labels": traced_labels,
+        "_parts": parts,
+        "_assign_max": assign_max,
+        "_snap_m": traced.snap_m,
         "contour_count": len(emitted),
         "label_count": len(traced.labels),
         "needs_review_count": sum(1 for line in emitted if line.needs_review),
@@ -485,6 +518,93 @@ def _trace_sheet(
         flush=True,
     )
     return summary
+
+
+def _drop_trace_scratch(piece: dict) -> None:
+    for key in ("_lines", "_assign_labels", "_parts", "_assign_max", "_snap_m"):
+        piece.pop(key, None)
+
+
+def _sheet_reasons_for_lake(piece: dict) -> list[str]:
+    reasons = list(piece.get("reasons") or [])
+    if piece.get("label_page_rejected"):
+        return [reason for reason in reasons if reason not in _LABEL_REJECT_REASONS]
+    return reasons
+
+
+def _sheet_trace_failed(piece: dict) -> bool:
+    """True when this warp's own tracing cannot be published.
+
+    A page that is not the label page is not failed merely because it has no
+    recorded labels. Ambiguous rings and a missing interval still fail it.
+    """
+    if _sheet_reasons_for_lake(piece):
+        return True
+    if piece.get("label_page_rejected"):
+        return False
+    return piece.get("qa_status") not in (None, "auto")
+
+
+def _carry_label_interval(pieces: list[dict]) -> None:
+    """Step unlabeled warps with the interval read from the label page.
+
+    Nothing is carried when that page did not produce an interval. The
+    unlabeled warp then stays in review. A carried assignment that still marks
+    a ring ``needs_review`` stays in review too.
+    """
+    donors = [
+        piece
+        for piece in pieces
+        if piece.get("labels_applied") and isinstance(piece.get("interval_ft"), int) and piece["interval_ft"] > 0
+    ]
+    if len(donors) != 1:
+        return
+    interval = int(donors[0]["interval_ft"])
+    for piece in pieces:
+        if not piece.get("label_page_rejected") or piece.get("labels_applied"):
+            continue
+        if piece.get("interval_ft") is not None:
+            continue
+        lines = piece.get("_lines")
+        parts = piece.get("_parts")
+        if not lines or not parts:
+            continue
+        assignment = assign_depths(
+            lines,
+            list(piece.get("_assign_labels") or []),
+            parts,
+            max_depth_ft=piece.get("_assign_max"),
+            snap_m=float(piece.get("_snap_m") or piece.get("snap_m") or 1.0),
+            interval_ft=interval,
+        )
+        _replace_assignment(piece, assignment)
+
+
+def _replace_assignment(piece: dict, assignment) -> None:
+    """Replace a rejected page's tags after the label-page interval is known."""
+    emitted = [line for line in assignment.features if line.depth_ft is not None and line.source != "hydro"]
+    depths = sorted({int(feature.depth_ft) for feature in assignment.features if feature.depth_ft is not None})
+    review = any(line.needs_review for line in assignment.features if line.depth_ft is not None)
+    reasons = [reason for reason in assignment.reasons if reason not in _LABEL_REJECT_REASONS]
+    qa_status = "needs_review" if reasons or review else "auto"
+    piece["qa_status"] = qa_status
+    piece["interval_ft"] = assignment.interval_ft
+    piece["depths_ft"] = depths
+    piece["_features"] = assignment.features
+    piece["contour_count"] = len(emitted)
+    piece["needs_review_count"] = sum(1 for line in emitted if line.needs_review)
+    piece["unassigned_count"] = assignment.unassigned_count
+    piece["reasons"] = reasons
+    path = piece.get("path")
+    if path:
+        collection = features_to_geojson(
+            assignment.features,
+            wbic=str(piece.get("wbic") or ""),
+            interval_ft=assignment.interval_ft,
+            max_depth_ft=piece.get("max_depth_ft"),
+            qa_status=qa_status,
+        )
+        _write_json(Path(str(path)), collection)
 
 
 def _recorded_labels_applied(wbic: str, page: str | None, labels) -> bool:

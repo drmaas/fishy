@@ -11,6 +11,7 @@ from fishy_pipeline.states.wi.depth_tag import (
     Label,
     Line,
     WaterPart,
+    TaggedLine,
     assign_depths,
     assignment_to_feet,
     cutline_collection,
@@ -89,6 +90,25 @@ class AssignDepthTest(unittest.TestCase):
         self.assertTrue(all(line.confidence >= 0.8 for line in labeled))
         shore = [line for line in assignment.features if line.source == "hydro"]
         self.assertEqual([line.depth_ft for line in shore], [0])
+
+    def test_carried_interval_steps_rings_that_have_no_labels(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5, interval_ft=5)
+        self.assertEqual(assignment.interval_ft, 5)
+        self.assertEqual(_depths(assignment), [5, 10])
+        self.assertFalse(any(line.needs_review for line in assignment.features))
+        self.assertNotIn("interval_unknown", assignment.reasons)
+
+    def test_unlabeled_rings_without_an_interval_stay_in_review(self):
+        rings = [Line(coords=_box(10, 10, 90, 90), closed=True)]
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5)
+        self.assertIsNone(assignment.interval_ft)
+        self.assertIn("interval_unknown", assignment.reasons)
+        tagged = [line for line in assignment.features if line.source != "hydro"]
+        self.assertTrue(all(line.needs_review for line in tagged))
 
     def test_unlabeled_rings_propagate_until_max_depth(self):
         rings = [
@@ -680,6 +700,132 @@ class RecordedLabelPageTest(unittest.TestCase):
         self.assertEqual(result["sheet_count"], 2)
         self.assertTrue(result["sheets"][0]["labels_applied"])
         self.assertFalse(result["sheets"][1]["labels_applied"])
+
+
+class CarriedIntervalMergeTest(unittest.TestCase):
+    def _donor(self) -> dict:
+        return {
+            "wbic": "0980900",
+            "page": "0980900a-p0.png",
+            "qa_status": "auto",
+            "labels_applied": True,
+            "label_page_rejected": False,
+            "interval_ft": 5,
+            "depths_ft": [0, 5, 10],
+            "reasons": [],
+            "unassigned_count": 0,
+            "_features": [],
+            "label_count": 2,
+            "recorded_labels": True,
+            "label_source": "recorded",
+        }
+
+    def _rejected(self, *, reasons: list[str], lines: list[Line], max_depth: float) -> dict:
+        return {
+            "wbic": "0980900",
+            "page": "0980900a-p1.png",
+            "qa_status": "needs_review",
+            "labels_applied": False,
+            "label_page_rejected": True,
+            "interval_ft": None,
+            "depths_ft": [0],
+            "reasons": reasons,
+            "unassigned_count": 0,
+            "_features": [],
+            "_lines": lines,
+            "_assign_labels": [],
+            "_parts": _shore(),
+            "_assign_max": max_depth,
+            "_snap_m": 5.0,
+            "max_depth_ft": max_depth,
+            "label_count": 0,
+            "recorded_labels": True,
+            "label_source": "none",
+        }
+
+    def _merge(self, pieces: list[dict]):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "fishy_pipeline.states.wi.contours.publish_gate",
+                return_value=(True, "auto", []),
+            ) as gate:
+                result = contours._merge_sheet_traces(
+                    {
+                        "wbic": "0980900",
+                        "map_key": "0980900a",
+                        "iou": 0.91,
+                        "georef_qa_status": "auto",
+                        "georef_reasons": [],
+                        "warp_source": "auto",
+                    },
+                    pieces,
+                    out_dir=Path(tmp),
+                    entry={"max_depth_ft": 40},
+                )
+        return result, gate
+
+    def test_rejected_page_takes_the_label_interval_and_the_gate_runs_once(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        donor = self._donor()
+        other = self._rejected(
+            reasons=["interval_unknown", "recorded_depth_missing", "no_contour_lines"],
+            lines=rings,
+            max_depth=40,
+        )
+        contours._carry_label_interval([donor, other])
+        self.assertEqual(other["qa_status"], "auto")
+        self.assertEqual(other["depths_ft"], [0, 5, 10])
+        self.assertEqual(other["reasons"], [])
+        result, gate = self._merge([donor, other])
+        self.assertEqual(gate.call_count, 1)
+        self.assertEqual(gate.call_args.kwargs["depths_ft"], [5, 10])
+        self.assertEqual(result["qa_status"], "auto")
+        self.assertNotIn("recorded_depth_missing", result["reasons"])
+        self.assertNotIn("no_contour_lines", result["reasons"])
+
+    def test_ambiguous_carried_rings_stay_in_review(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        other = self._rejected(reasons=["interval_unknown"], lines=rings, max_depth=8)
+        contours._carry_label_interval([self._donor(), other])
+        self.assertEqual(other["qa_status"], "needs_review")
+        self.assertTrue(any(line.needs_review for line in other["_features"] if line.depth_ft))
+        result, _gate = self._merge([self._donor(), other])
+        self.assertEqual(result["qa_status"], "needs_review")
+
+    def test_missing_interval_does_not_copy_label_rejection_reasons(self):
+        donor = self._donor()
+        donor["interval_ft"] = None
+        donor["_features"] = [
+            TaggedLine(
+                coords=_box(10, 10, 90, 90),
+                closed=True,
+                depth_ft=5,
+                interval_ft=None,
+                confidence=0.9,
+                needs_review=False,
+                reason=None,
+                source="label",
+            )
+        ]
+        other = self._rejected(
+            reasons=["interval_unknown", "recorded_depth_missing", "no_contour_lines"],
+            lines=[Line(coords=_box(10, 10, 90, 90), closed=True)],
+            max_depth=40,
+        )
+        contours._carry_label_interval([donor, other])
+        self.assertIsNone(other["interval_ft"])
+        result, gate = self._merge([donor, other])
+        self.assertEqual(gate.call_count, 1)
+        self.assertIn("interval_unknown", result["reasons"])
+        self.assertNotIn("recorded_depth_missing", result["reasons"])
+        self.assertNotIn("no_contour_lines", result["reasons"])
+        self.assertEqual(result["qa_status"], "needs_review")
 
 
 if __name__ == "__main__":

@@ -260,8 +260,15 @@ def assign_depths(
     *,
     max_depth_ft: float | None,
     snap_m: float,
+    interval_ft: int | None = None,
 ) -> Assignment:
-    """Tag lines and add the hydro shoreline as depth 0."""
+    """Tag lines and add the hydro shoreline as depth 0.
+
+    ``interval_ft`` is used only when this sheet's labels do not determine one.
+    A sibling warp can pass the interval read from the page that holds the
+    recorded labels. Rings that still cannot be stepped with confidence stay
+    ``needs_review``.
+    """
     if snap_m <= 0:
         raise ValueError("snap distance must be positive")
     kept = [line for line in lines if _mostly_inside(line, parts)]
@@ -274,6 +281,8 @@ def assign_depths(
             for index, depths in snapped.items()
         }
         interval = infer_interval([depth for depths in snapped.values() for depth, _conf in depths]) or interval
+    elif interval_ft is not None and interval_ft > 0:
+        interval = int(interval_ft)
 
     indexed: list[tuple[int, Line]] = []
     unassigned = 0

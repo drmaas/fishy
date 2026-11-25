@@ -1323,10 +1323,10 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertEqual([sheet["page"].name for sheet in kept], ["a.png"])
         self.assertEqual([page.name for page in missed], ["b.png"])
 
-    def test_fence_closed_sheets_queue_as_multi_sheet(self):
+    def test_fence_closed_sheets_publish_when_rings_sit_on_the_hydro(self):
         # Sheet 1's spline is 0.822 and its affine is 0.674. Sheet 2's spline
-        # is 0.816 and its affine is 0.776. Ranking by the spline publishes
-        # sheet 1. Both drawings clear, so the lake stays in the multi-sheet queue.
+        # is 0.816 and its affine is 0.776. Both drawings clear and both rings
+        # sit on the hydro, so the stitch publishes at the minimum.
         ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
         first = _tps_sheet(0.822, 0.674, "2323000a-p0.png", ring)
         second = _tps_sheet(0.816, 0.776, "2323000a-p1.png", ring)
@@ -1338,22 +1338,32 @@ class FailClosedGateTest(unittest.TestCase):
             {"2323000a-p0.png", "2323000a-p1.png"},
         )
         for sheet in kept:
+            reg = sheet["registration"]
+            sheet["registration"] = Registration(
+                affine=reg.affine,
+                tps=ThinPlateSpline([], [], [], (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                gcps=reg.gcps,
+                affine_iou=reg.affine_iou,
+                tps_iou=reg.tps_iou,
+                method=reg.method,
+            )
             sheet["gate_iou"] = sheet["registration"].iou
-        gate = min(sheet["gate_iou"] for sheet in kept)
-        several = sum(1 for sheet in kept if sheet["gate_iou"] >= DEFAULT_IOU_THRESHOLD) > 1
-        self.assertTrue(several)
-        self.assertGreaterEqual(gate, DEFAULT_IOU_THRESHOLD)
+            sheet["ring"] = list(ring)
+        iou, queue = georef._stitch_gate(kept, ring, missed, DEFAULT_IOU_THRESHOLD)
         reasons = georef._reasons(
             flowage=False,
             shared_sheet=False,
-            low_iou=gate < DEFAULT_IOU_THRESHOLD,
+            low_iou=iou < DEFAULT_IOU_THRESHOLD,
             multi_sheet=False,
             shoreline_found=True,
             registration_error=False,
             warp_failed=False,
-            several_pages_passed=several,
+            several_pages_passed=queue,
         )
-        self.assertEqual(reasons, ["multi_sheet"])
+        self.assertFalse(queue)
+        self.assertAlmostEqual(iou, min(sheet["gate_iou"] for sheet in kept))
+        self.assertGreaterEqual(iou, DEFAULT_IOU_THRESHOLD)
+        self.assertEqual(reasons, [])
 
     def test_spline_clears_queue_when_no_affine_clears(self):
         # Splines 0.80 and 0.78, affines 0.70 and 0.72. The higher affine is the
