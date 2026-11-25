@@ -2533,11 +2533,37 @@ class CartographicLineTest(unittest.TestCase):
         _mask_polyline(mask, width, lake, close=True)
         for y in range(height):
             mask[y * width + 100] = 1
-        cleared, opened = clear_cartographic_lines(mask, width, height)
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[lake])
         self.assertGreater(cleared, 20)
         self.assertFalse(opened)
         self.assertEqual(mask[70 * width + 100], 0)
         self.assertEqual(mask[36 * width + 40], 1)
+
+    def test_a_rectangular_shore_survives(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        rect = [(20, 20), (160, 20), (160, 110), (20, 110)]
+        _mask_polyline(mask, width, rect, close=True)
+        before = bytes(mask)
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[rect])
+        self.assertEqual(cleared, 0)
+        self.assertTrue(opened)
+        self.assertEqual(bytes(mask), before)
+        self.assertEqual(mask[20 * width + 90], 1)
+
+    def test_a_neatline_tick_is_cleared_and_a_continuing_shore_is_not(self):
+        width = height = 800
+        mask = bytearray(width * height)
+        for x in range(width):
+            mask[x] = 1
+        for y in range(24):
+            mask[y * width + 400] = 1
+            mask[y * width + 200] = 1
+        for x in range(200, 280):
+            mask[23 * width + x] = 1
+        clear_cartographic_lines(mask, width, height)
+        self.assertEqual(mask[12 * width + 400], 0)
+        self.assertEqual(mask[12 * width + 200], 1)
 
     def test_opening_an_irregular_shore_is_reported(self):
         width, height = 180, 120
@@ -2553,7 +2579,7 @@ class CartographicLineTest(unittest.TestCase):
 
 
 class ControlPointTest(unittest.TestCase):
-    def test_shared_map_coordinate_is_dropped_and_the_affine_fits(self):
+    def test_a_coincident_pair_that_disagrees_fails_closed(self):
         points = [
             GroundControlPoint(0, 0, 500000, 300000),
             GroundControlPoint(100, 0, 500100, 300000),
@@ -2562,22 +2588,42 @@ class ControlPointTest(unittest.TestCase):
             GroundControlPoint(40, 10, 500100, 300080),
         ]
         prepared = prepare_control_points(points)
-        self.assertTrue(prepared.usable)
-        self.assertEqual(prepared.dropped, 1)
-        self.assertEqual(len(prepared.points), 4)
-        affine = fit_affine(
-            [(point.pixel, point.line) for point in prepared.points],
-            [(point.easting, point.northing) for point in prepared.points],
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("disagrees", prepared.reason)
+
+    def test_a_singular_affine_fails_closed(self):
+        span = 1.0e7
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(span, 0, 2, 0),
+                GroundControlPoint(span, span, 2, 2),
+                GroundControlPoint(0, span, 0, 2),
+            ]
         )
-        for point in prepared.points:
-            easting, northing = affine.apply(point.pixel, point.line)
-            self.assertLess(math.hypot(easting - point.easting, northing - point.northing), 1e-3)
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("singular", prepared.reason)
+
+    def test_map_collinear_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(0, 100, 50, 0),
+                GroundControlPoint(100, 0, 100, 0),
+                GroundControlPoint(100, 100, 150, 0),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("collinear", prepared.reason)
 
     def test_too_few_points_fail_closed(self):
         prepared = prepare_control_points(
             [
                 GroundControlPoint(0, 0, 1, 1),
-                GroundControlPoint(5, 1, 1, 1),
+                GroundControlPoint(0, 0, 1, 1),
             ]
         )
         self.assertFalse(prepared.usable)

@@ -27,8 +27,8 @@ import sys
 import traceback
 from pathlib import Path
 
-from fishy_pipeline.states.wi.depth_tag import join_gap_m_for_pixel
 from fishy_pipeline.states.wi.depth_tag import (
+    JOIN_GAP_MIN_M,
     Label,
     Line,
     WaterPart,
@@ -36,6 +36,7 @@ from fishy_pipeline.states.wi.depth_tag import (
     assignment_to_feet,
     cutline_collection,
     features_to_geojson,
+    join_gap_m_for_pixel,
 )
 from fishy_pipeline.states.wi.hydro import HydroGeometry, HydroPart, load_hydro_geometries
 from fishy_pipeline.states.wi.manifest import read_manifest
@@ -149,6 +150,7 @@ def run_fixture(work_dir: Path) -> dict:
         [WaterPart(exterior=shore)],
         max_depth_ft=20,
         snap_m=5,
+        join_gap_m=0,
     )
     qa_status = "needs_review" if assignment.reasons or any(line.needs_review for line in assignment.features) else "auto"
     collection = features_to_geojson(
@@ -574,6 +576,8 @@ def _carry_label_interval(pieces: list[dict]) -> None:
         parts = piece.get("_parts")
         if not lines or not parts:
             continue
+        stored_gap = piece.get("_join_gap_m")
+        join_gap_m = float(stored_gap) if isinstance(stored_gap, (int, float)) else JOIN_GAP_MIN_M
         assignment = assign_depths(
             lines,
             list(piece.get("_assign_labels") or []),
@@ -581,7 +585,7 @@ def _carry_label_interval(pieces: list[dict]) -> None:
             max_depth_ft=piece.get("_assign_max"),
             snap_m=float(piece.get("_snap_m") or piece.get("snap_m") or 1.0),
             interval_ft=interval,
-            join_gap_m=piece.get("_join_gap_m"),
+            join_gap_m=join_gap_m,
         )
         _replace_assignment(piece, assignment)
 

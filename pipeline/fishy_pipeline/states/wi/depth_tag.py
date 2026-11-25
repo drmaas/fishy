@@ -39,6 +39,9 @@ JOIN_GAP_MAX_M = 35.0
 # Tangents and the gap chord must agree. 25° admits a gentle curve across a
 # short break and rejects a cove corner or a jump to the next depth.
 JOIN_MAX_ANGLE_DEG = 25.0
+# Samples along the chord are 1 m apart, finer than the shortest join, so a
+# land crossing between the two ends is not skipped.
+JOIN_CHORD_SAMPLE_M = 1.0
 
 
 @dataclass(frozen=True)
@@ -265,9 +268,13 @@ def assignment_to_feet(assignment: Assignment) -> Assignment:
 
 
 def join_gap_m_for_pixel(pixel_size_m: float) -> float:
-    """Ground gap for ``JOIN_GAP_PX`` at this sheet's pixel size, clamped."""
+    """Ground gap for ``JOIN_GAP_PX`` at this sheet's pixel size, clamped.
+
+    A missing or non-positive pixel size uses the shortest gap. It must not
+    open the maximum bridge.
+    """
     if not math.isfinite(pixel_size_m) or pixel_size_m <= 0:
-        return JOIN_GAP_MAX_M
+        return JOIN_GAP_MIN_M
     return min(JOIN_GAP_MAX_M, max(JOIN_GAP_MIN_M, pixel_size_m * JOIN_GAP_PX))
 
 
@@ -282,25 +289,19 @@ def join_open_strokes(
 ) -> list[Line]:
     """Join open contour ends that continue each other.
 
-    Each end joins at most once. The gap and both outward tangents have to
-    agree, and labeled depths have to be the same depth when both ends have
-    one. A section line is not a contour and is left alone. Closing a ring
-    does not write a depth; later propagation still has to earn it.
+    Each end joins at most once. The gap, both outward tangents, and the
+    chord through the water have to agree. Each stroke has one depth set:
+    the join is kept only when both sets are the same and neither is empty.
+    An unlabeled end cannot carry a neighbor's depth across a gap. The
+    merged line stays open, so a joined stroke is never given a parent depth.
+    A section line is not a contour and is left alone.
     """
     if max_gap_m <= 0 or max_angle_deg <= 0 or len(lines) < 1:
         return list(lines)
     snapped = _snap_labels(lines, labels, snap_m)
-    depths: list[int | None] = []
-    blocked: list[bool] = []
-    for index, line in enumerate(lines):
-        summary = _label_summary(snapped.get(index, []))
-        if summary is None:
-            depths.append(None)
-            blocked.append(False)
-        else:
-            depth, _confidence, conflict = summary
-            depths.append(depth)
-            blocked.append(conflict)
+    depth_sets = [
+        frozenset(depth for depth, _confidence in snapped.get(index, [])) for index in range(len(lines))
+    ]
     open_ids = [
         index
         for index, line in enumerate(lines)
@@ -314,10 +315,16 @@ def join_open_strokes(
             for left_end, right_end in ends:
                 if left == right and left_end == right_end:
                     continue
-                gap, angle = _join_cost(lines[left].coords, left_end, lines[right].coords, right_end)
-                if gap > max_gap_m or angle > max_angle_deg:
+                if not _same_labeled_depth(depth_sets[left], depth_sets[right]):
                     continue
-                if not _depths_agree(depths[left], blocked[left], depths[right], blocked[right]):
+                gap, angle, in_water = _join_cost(
+                    lines[left].coords,
+                    left_end,
+                    lines[right].coords,
+                    right_end,
+                    parts,
+                )
+                if gap > max_gap_m or angle > max_angle_deg or not in_water:
                     continue
                 candidates.append((gap, angle, left, left_end, right, right_end))
     candidates.sort()
@@ -366,16 +373,10 @@ def join_open_strokes(
     return result
 
 
-def _depths_agree(
-    left: int | None,
-    left_blocked: bool,
-    right: int | None,
-    right_blocked: bool,
-) -> bool:
-    if left_blocked or right_blocked:
+def _same_labeled_depth(left: frozenset[int], right: frozenset[int]) -> bool:
+    """True only when both strokes carry the same non-empty depth set."""
+    if not left or not right:
         return False
-    if left is None or right is None:
-        return True
     return left == right
 
 
@@ -384,7 +385,8 @@ def _join_cost(
     left_end: int,
     right: tuple[tuple[float, float], ...],
     right_end: int,
-) -> tuple[float, float]:
+    parts: list[WaterPart],
+) -> tuple[float, float, bool]:
     a = left[0] if left_end == 0 else left[-1]
     b = right[0] if right_end == 0 else right[-1]
     chord = (b[0] - a[0], b[1] - a[1])
@@ -392,7 +394,28 @@ def _join_cost(
     out_a = _outward(left, left_end)
     out_b = _outward(right, right_end)
     angle = max(_angle_deg(out_a, chord), _angle_deg(out_b, (-chord[0], -chord[1])))
-    return gap, angle
+    return gap, angle, _chord_in_water(a, b, parts)
+
+
+def _chord_in_water(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    parts: list[WaterPart],
+) -> bool:
+    """False when any sample of the gap lies on land or in a hole."""
+    if not parts:
+        return False
+    gap = math.hypot(end[0] - start[0], end[1] - start[1])
+    if gap <= 0:
+        return point_in_water(start[0], start[1], parts)
+    steps = max(2, math.ceil(gap / JOIN_CHORD_SAMPLE_M))
+    for index in range(1, steps):
+        fraction = index / steps
+        x = start[0] + (end[0] - start[0]) * fraction
+        y = start[1] + (end[1] - start[1]) * fraction
+        if not point_in_water(x, y, parts):
+            return False
+    return True
 
 
 def _outward(coords: tuple[tuple[float, float], ...], end: int) -> tuple[float, float]:
@@ -421,7 +444,8 @@ def _walk_joined(
     start: int,
 ) -> tuple[Line, set[int]]:
     if links.get((start, 0)) == (start, 1) or links.get((start, 1)) == (start, 0):
-        return Line(coords=lines[start].coords, closed=True), {start}
+        # The ends meet, but the stroke stays open so it cannot inherit a depth.
+        return Line(coords=lines[start].coords, closed=False), {start}
     # Enter at the free end so the walk leaves through the joined end.
     if (start, 0) not in links:
         enter = 0
@@ -439,7 +463,6 @@ def _walk_joined(
         guard += 1
         nxt, nxt_enter = links[(line_index, leave)]
         if nxt == start:
-            closed = True
             break
         if nxt in members:
             break
@@ -469,7 +492,7 @@ def assign_depths(
     max_depth_ft: float | None,
     snap_m: float,
     interval_ft: int | None = None,
-    join_gap_m: float | None = None,
+    join_gap_m: float,
     join_angle_deg: float = JOIN_MAX_ANGLE_DEG,
 ) -> Assignment:
     """Tag lines and add the hydro shoreline as depth 0.
@@ -477,11 +500,14 @@ def assign_depths(
     ``interval_ft`` is used only when this sheet's labels do not determine one.
     A sibling warp can pass the interval read from the page that holds the
     recorded labels. Rings that still cannot be stepped with confidence stay
-    ``needs_review``.
+    ``needs_review``. ``join_gap_m`` is required so a missing pixel size cannot
+    silently use the longest bridge.
     """
     if snap_m <= 0:
         raise ValueError("snap distance must be positive")
-    gap_m = JOIN_GAP_MAX_M if join_gap_m is None else join_gap_m
+    if not math.isfinite(join_gap_m):
+        raise ValueError("join gap must be explicit")
+    gap_m = join_gap_m
     if gap_m > 0 and lines:
         lines = join_open_strokes(
             lines,

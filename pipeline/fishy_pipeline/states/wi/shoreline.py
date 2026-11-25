@@ -2122,17 +2122,25 @@ def _ring_span(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]
     return max(max(xs) - min(xs), max(ys) - min(ys))
 
 
-def clear_cartographic_lines(mask: bytearray, width: int, height: int) -> tuple[int, bool]:
+def clear_cartographic_lines(
+    mask: bytearray,
+    width: int,
+    height: int,
+    shore_rings: list[list[tuple[float, float]]] | None = None,
+) -> tuple[int, bool]:
     """Clear PLSS lines, neatline strokes, and grid ticks on ``mask``.
 
     Detection runs on the shoreline work grid and is the same for every sheet.
     A long straight stroke counts when it shares the sheet's grid angle and
     either spans opposite borders or has a parallel companion. Dashed pieces
-    of one line are joined first. A tick is a short stub on the neatline.
+    of one line are joined first. A tick is a short stub that leaves the
+    neatline and stops. A shore of that length that continues inland stays.
 
-    Returns how many source pixels were cleared, and whether an irregular
-    basin (not a section cell) opened onto the page. The caller keeps the
-    previous trace when that flag is set.
+    Returns how many source pixels were cleared, and whether the clear was
+    rejected. Any contained hole that opens rejects the clear unless the
+    cleared pixels are disjoint from ``shore_rings``. A rectangular shore is
+    that hole's boundary, so its pixels stay. The caller keeps the previous
+    trace when the flag is set.
     """
     if width < 24 or height < 24 or len(mask) != width * height:
         return 0, False
@@ -2146,10 +2154,18 @@ def clear_cartographic_lines(mask: bytearray, width: int, height: int) -> tuple[
     # the basin does not open at the crossing. The rest of the line goes.
     _keep_crossing_pixels(small, doomed, small_w, small_h)
     _protect_short_irregular_seals(small, small_w, small_h, doomed)
+    after = bytearray(small)
     for index, flag in enumerate(doomed):
         if flag:
-            small[index] = 0
-    opened = irregular_basin_opened(before, small, small_w, small_h)
+            after[index] = 0
+    hole_opened = _contained_hole_opened(before, after, small_w, small_h)
+    hits_shore = _cleared_hits_rings(doomed, small_w, small_h, factor, shore_rings or [])
+    # No ring was supplied, so a hole that opens cannot be shown to miss the shore.
+    disjoint = bool(shore_rings) and not hits_shore
+    if hole_opened and not disjoint:
+        return 0, True
+    small = after
+    opened = False
     cleared = 0
     if factor == 1:
         mask[:] = small
@@ -2199,6 +2215,72 @@ def irregular_basin_opened(
     return False
 
 
+def _contained_hole_opened(
+    before: bytearray,
+    after: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    """True when any contained hole, straight or not, reaches the page."""
+    if width < 8 or height < 8 or len(before) != width * height or len(after) != width * height:
+        return False
+    if not any(was and not now for was, now in zip(before, after, strict=True)):
+        return False
+    outside = _outside_mask(before, width, height)
+    holes = _sealed_white(before, width, height, outside)
+    if not holes:
+        return False
+    opened = _outside_mask(after, width, height)
+    return any(any(opened[index] for index in hole) for hole in holes)
+
+
+def _sealed_white(
+    mask: bytearray,
+    width: int,
+    height: int,
+    outside: bytearray,
+) -> list[list[int]]:
+    """White the border cannot reach, including a basin the frame-hole cap would skip."""
+    seen = bytearray(width * height)
+    holes: list[list[int]] = []
+    for start in range(width * height):
+        if mask[start] or outside[start] or seen[start]:
+            continue
+        component = _flood_component(seen, mask, outside, width, height, start)
+        if len(component) < MIN_INTERIOR:
+            continue
+        holes.append(component)
+    return holes
+
+
+def _cleared_hits_rings(
+    doomed: bytearray,
+    width: int,
+    height: int,
+    factor: int,
+    rings: list[list[tuple[float, float]]],
+) -> bool:
+    """True when a doomed pixel lies on a current shore ring."""
+    if factor < 1:
+        return True
+    for ring in rings:
+        if len(ring) < 2:
+            continue
+        points = list(ring) + [ring[0]]
+        for (x1, y1), (x2, y2) in zip(points, points[1:]):
+            for x, y in _line_pixels(x1 / factor, y1 / factor, x2 / factor, y2 / factor):
+                if 0 <= x < width and 0 <= y < height and doomed[y * width + x]:
+                    return True
+    return False
+
+
+def _line_pixels(x1: float, y1: float, x2: float, y2: float):
+    steps = max(int(math.hypot(x2 - x1, y2 - y1)), 1)
+    for index in range(steps + 1):
+        fraction = index / steps
+        yield round(x1 + (x2 - x1) * fraction), round(y1 + (y2 - y1) * fraction)
+
+
 def _cartographic_pixels(
     mask: bytearray,
     width: int,
@@ -2209,11 +2291,14 @@ def _cartographic_pixels(
     long_side = max(width, height)
     min_len = max(10, int(0.06 * long_side))
     chains = _straight_ink_chains(mask, width, height, min_len)
+    # Ticks are shorter than that minimum (4 px up to 4.5% of the side), so
+    # they never enter ``chains``. Collect them on their own.
+    stubs = _straight_ink_chains(mask, width, height, CARTO_TICK_MIN_PX)
     groups = _collinear_groups(chains, max(4.0, CARTO_GAP_FRACTION * long_side))
     if frame is not None:
         _mark_frame_stroke(doomed, width, height, frame)
     if not groups and not any(doomed):
-        _mark_ticks(doomed, mask, width, height, frame, chains)
+        _mark_ticks(doomed, mask, width, height, frame, stubs)
         return doomed
     grid = _dominant_grid_angle(groups)
     min_group = CARTO_MIN_FRACTION * long_side
@@ -2231,7 +2316,7 @@ def _cartographic_pixels(
         for chain in groups[index]["chains"]:
             for x, y in chain:
                 doomed[y * width + x] = 1
-    _mark_ticks(doomed, mask, width, height, frame, chains)
+    _mark_ticks(doomed, mask, width, height, frame, stubs)
     return doomed
 
 
@@ -2449,16 +2534,44 @@ def _mark_ticks(
         if math.hypot(dx, dy) < CARTO_TICK_MIN_PX:
             continue
         anchor = border[0]
+        free = chain[-1] if anchor == chain[0] else chain[0]
+        # A shore of tick length keeps going inland. A tick stops.
+        if _ink_leaves_chain(mask, width, height, chain, free):
+            continue
         # The stub has to leave the border, not run along it.
-        if anchor[0] <= 3 or anchor[0] >= width - 4 or (frame and (abs(anchor[0] - frame[0]) <= 3 or abs(anchor[0] - frame[2]) <= 3)):
-            if abs(dx) > abs(dy):
-                continue
-        else:
+        on_vertical = anchor[0] <= 3 or anchor[0] >= width - 4 or (
+            frame is not None and (abs(anchor[0] - frame[0]) <= 3 or abs(anchor[0] - frame[2]) <= 3)
+        )
+        if on_vertical:
             if abs(dy) > abs(dx):
                 continue
+        elif abs(dx) > abs(dy):
+            continue
         for x, y in chain:
             if mask[y * width + x]:
                 doomed[y * width + x] = 1
+
+
+def _ink_leaves_chain(
+    mask: bytearray,
+    width: int,
+    height: int,
+    chain: list[tuple[int, int]],
+    end: tuple[int, int],
+) -> bool:
+    """True when ink continues past ``end`` off this chain."""
+    occupied = set(chain)
+    x, y = end
+    for dx, dy in _INK_STEPS:
+        nx = x + dx
+        ny = y + dy
+        if nx < 0 or ny < 0 or nx >= width or ny >= height:
+            continue
+        if (nx, ny) in occupied:
+            continue
+        if mask[ny * width + nx]:
+            return True
+    return False
 
 
 def _on_sheet_border(

@@ -835,11 +835,12 @@ _LEGEND_MIN_BOXINESS = 0.90
 # Nine percent of the page, and six percent with ink just over the legend cap,
 # used to skip that check once overlap reached 0.68.
 _SMALL_RING_AREA = 0.12
-# Wiping a sheet grid re-fits the same shore by a few hundredths. On the
-# synthetic fixture that lifts a deliberate mismatch from 0.719 to 0.758 and
-# across the publish cutoff. 0.05 is a different shore, so a smaller move
-# keeps the first registration.
+# Wiping a sheet grid re-fits the same shore by a few hundredths. A rise
+# under 0.05 stays on the first registration. The replacement also has to
+# cover at least half of the previous ring, so a different figure cannot
+# win on a small gain in the minimum.
 _CARTO_MIN_GAIN = 0.05
+_CARTO_RING_OVERLAP = 0.50
 
 
 def _score_sheet_pages(
@@ -1080,18 +1081,24 @@ def _apply_cartographic_mask(
     gcp_count: int,
     picked: list[dict],
 ) -> list[dict]:
-    """Clear grid lines, then keep the new shore only when overlap rises.
+    """Clear grid lines, then keep the new shore only when the published score rises.
 
-    The first registration stays when the clear opens an irregular basin or
-    the weakest kept ring rises by less than ``_CARTO_MIN_GAIN``. A second
-    ring that scores well must not hide one that falls. A grid wipe can nudge
-    the same shore by a few hundredths; that is not a new shore.
+    The compared values are the gate scores: a partial sheet uses the worse
+    of its registration IoU and its full-hydro IoU. The new ring has to
+    cover at least half the previous ring. A clear that opens any contained
+    hole is dropped unless the cleared pixels miss the current shore.
     """
-    old_iou = min(float(row["registration"].iou) for row in picked)
+    old_iou = min(_published_iou(row, hydro_ring) for row in picked)
     try:
         mask = _dark_mask(image)
         _clear_cased_roads(mask, image.width, image.height)
-        cleared, opened = clear_cartographic_lines(mask, image.width, image.height)
+        rings = [list(row["ring"]) for row in picked]
+        cleared, opened = clear_cartographic_lines(
+            mask,
+            image.width,
+            image.height,
+            shore_rings=rings,
+        )
     except (OSError, ValueError, ZeroDivisionError):
         return picked
     if cleared <= 0 or opened:
@@ -1118,8 +1125,13 @@ def _apply_cartographic_mask(
     )
     candidates = _drop_margin_enclosures(candidates)
     new_picked = _pick_page_basins(candidates, hydro_ring)
-    new_iou = min((float(row["registration"].iou) for row in new_picked), default=None)
-    accept = new_iou is not None and bool(new_picked) and new_iou >= old_iou + _CARTO_MIN_GAIN
+    new_iou = min((_published_iou(row, hydro_ring) for row in new_picked), default=None)
+    accept = (
+        new_iou is not None
+        and bool(new_picked)
+        and new_iou >= old_iou + _CARTO_MIN_GAIN
+        and _replacement_overlaps(picked, new_picked)
+    )
     if not accept or new_iou is None:
         for row in picked:
             row["cartographic_pixels_cleared"] = cleared
@@ -1372,7 +1384,12 @@ def _score_ring(
     # ``_keep_margin`` is only for a page whose sole figure is that outline.
     if _rejects_low_ink(area_fraction, ink, iou=None, keep_margin=_keep_margin):
         return None
-    registration = register_shoreline(list(ring), list(hydro_ring), gcp_count, on_frame=flags)
+    try:
+        registration = register_shoreline(list(ring), list(hydro_ring), gcp_count, on_frame=flags)
+    except ValueError as error:
+        if _is_degenerate_gcp_error(str(error)):
+            return None
+        raise
     if _rejects_low_ink(area_fraction, ink, registration.iou, keep_margin=_keep_margin):
         return None
     if not _hydro_footprint_matches(
@@ -1765,6 +1782,33 @@ def _public_sheet(sheet: dict) -> dict:
     return row
 
 
+def _published_iou(row: dict, hydro_ring: list[tuple[float, float]]) -> float:
+    """The gate score for one ring: registration IoU, or the worse of that and full hydro."""
+    registration = row["registration"]
+    cut = float(row.get("cut_fraction") or 0.0)
+    if cut < _PARTIAL_CUT:
+        return float(registration.iou)
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, line) for col, line in row["ring"]]
+    return min(float(registration.iou), polygon_iou(mapped, list(hydro_ring)))
+
+
+def _replacement_overlaps(old_rows: list[dict], new_rows: list[dict]) -> bool:
+    """True when every new ring covers at least half of some previous ring."""
+
+    def mapped(row: dict) -> list[tuple[float, float]]:
+        registration = row["registration"]
+        project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+        return [project(col, line) for col, line in row["ring"]]
+
+    old_rings = [mapped(row) for row in old_rows]
+    for row in new_rows:
+        new_ring = mapped(row)
+        if not any(polygon_iou(new_ring, old) >= _CARTO_RING_OVERLAP for old in old_rings):
+            return False
+    return bool(new_rows)
+
+
 def _full_hydro_iou(sheet: dict, hydro_ring: list[tuple[float, float]]) -> float:
     """Overlap of the mapped ring with the whole hydro polygon, not the footprint."""
     registration = sheet["registration"]
@@ -2016,19 +2060,6 @@ def _is_degenerate_gcp_error(error: str | None) -> bool:
     return bool(error) and error.startswith("degenerate control points")
 
 
-def _affine_is_usable(affine: dict[str, float] | None) -> bool:
-    if not affine:
-        return False
-    try:
-        values = [float(affine[key]) for key in ("a", "b", "tx", "c", "d", "ty")]
-    except (KeyError, TypeError, ValueError):
-        return False
-    if not all(math.isfinite(value) for value in values):
-        return False
-    determinant = values[0] * values[4] - values[1] * values[3]
-    return abs(determinant) >= 1e-12
-
-
 def _prepared_gcp_dicts(gcps: list[dict]) -> tuple[list[dict] | None, str | None]:
     points: list[GroundControlPoint] = []
     for item in gcps:
@@ -2063,17 +2094,12 @@ def _warp(
         return "unavailable", None, None
     use_method = method
     use_gcps = gcps
+    cleaned, reject = _prepared_gcp_dicts(gcps)
+    if cleaned is None:
+        # A rejected control set does not fall back to the affine.
+        return "failed", None, reject
     if method != "affine":
-        cleaned, reject = _prepared_gcp_dicts(gcps)
-        if cleaned is None:
-            # The shore affine still places the sheet. A spline through a
-            # duplicate or collinear set does not.
-            if _affine_is_usable(affine):
-                use_method = "affine"
-            else:
-                return "failed", None, reject
-        else:
-            use_gcps = cleaned
+        use_gcps = cleaned
     tif_path = out_dir / tif_name
     try:
         if use_method == "affine" and affine is not None:

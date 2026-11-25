@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from fishy_pipeline.states.wi import contours
 from fishy_pipeline.states.wi.depth_tag import (
+    JOIN_GAP_MIN_M,
     JOIN_MAX_ANGLE_DEG,
     Label,
     Line,
@@ -85,6 +86,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=20,
             snap_m=5,
+            join_gap_m=0,
         )
         self.assertEqual(assignment.interval_ft, 5)
         self.assertEqual(_depths(assignment), [5, 10])
@@ -99,7 +101,7 @@ class AssignDepthTest(unittest.TestCase):
             Line(coords=_box(10, 10, 90, 90), closed=True),
             Line(coords=_box(30, 30, 70, 70), closed=True),
         ]
-        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5, interval_ft=5)
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5, interval_ft=5, join_gap_m=0)
         self.assertEqual(assignment.interval_ft, 5)
         self.assertEqual(_depths(assignment), [5, 10])
         self.assertFalse(any(line.needs_review for line in assignment.features))
@@ -107,7 +109,7 @@ class AssignDepthTest(unittest.TestCase):
 
     def test_unlabeled_rings_without_an_interval_stay_in_review(self):
         rings = [Line(coords=_box(10, 10, 90, 90), closed=True)]
-        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5)
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5, join_gap_m=0)
         self.assertIsNone(assignment.interval_ft)
         self.assertIn("interval_unknown", assignment.reasons)
         tagged = [line for line in assignment.features if line.source != "hydro"]
@@ -125,6 +127,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=8,
             snap_m=5,
+            join_gap_m=0,
         )
         by_depth = {line.depth_ft: line for line in assignment.features if line.source != "hydro"}
         self.assertFalse(by_depth[5].needs_review)
@@ -140,7 +143,7 @@ class AssignDepthTest(unittest.TestCase):
             Label(x=50, y=10, depth_ft=20, confidence=0.9),
             Label(x=50, y=90, depth_ft=20, confidence=0.9),
         ]
-        assignment = assign_depths([ring], labels, _shore(), max_depth_ft=40, snap_m=5)
+        assignment = assign_depths([ring], labels, _shore(), max_depth_ft=40, snap_m=5, join_gap_m=0)
         tagged = next(line for line in assignment.features if line.source == "label")
         self.assertTrue(tagged.needs_review)
         self.assertEqual(tagged.reason, "label_conflict")
@@ -154,7 +157,7 @@ class AssignDepthTest(unittest.TestCase):
             Label(x=10, y=70, depth_ft=10, confidence=0.9),
             Label(x=90, y=50, depth_ft=15, confidence=0.4),
         ]
-        assignment = assign_depths([ring], labels, _shore(), max_depth_ft=40, snap_m=5)
+        assignment = assign_depths([ring], labels, _shore(), max_depth_ft=40, snap_m=5, join_gap_m=0)
         tagged = next(line for line in assignment.features if line.source == "label")
         self.assertEqual(tagged.depth_ft, 10)
         self.assertFalse(tagged.needs_review)
@@ -171,6 +174,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=30,
             snap_m=5,
+            join_gap_m=0,
         )
         self.assertEqual(_depths(assignment), [10, 10])
         self.assertEqual(assignment.interval_ft, 10)
@@ -186,6 +190,7 @@ class AssignDepthTest(unittest.TestCase):
             parts,
             max_depth_ft=30,
             snap_m=5,
+            join_gap_m=0,
         )
         self.assertIn("island_unlabeled", assignment.reasons)
         collar_tag = next(line for line in assignment.features if line.reason == "island_unlabeled")
@@ -205,6 +210,7 @@ class AssignDepthTest(unittest.TestCase):
             parts,
             max_depth_ft=30,
             snap_m=5,
+            join_gap_m=0,
         )
         tagged = next(line for line in assignment.features if line.source == "label")
         self.assertEqual(tagged.depth_ft, 5)
@@ -219,6 +225,7 @@ class AssignDepthTest(unittest.TestCase):
             parts,
             max_depth_ft=30,
             snap_m=5,
+            join_gap_m=0,
         )
         self.assertEqual(_depths(assignment), [])
         self.assertFalse(point_in_water(50, 50, parts))
@@ -233,6 +240,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=20,
             snap_m=3,
+            join_gap_m=0,
         )
         self.assertEqual(_depths(assignment), [5])
 
@@ -244,6 +252,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=40,
             snap_m=5,
+            join_gap_m=0,
         )
         tagged = next(line for line in assignment.features if line.source == "label")
         self.assertEqual(tagged.depth_ft, 10)
@@ -262,6 +271,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=40,
             snap_m=5,
+            join_gap_m=0,
         )
         inner_tag = next(line for line in assignment.features if line.depth_ft == 5)
         self.assertTrue(inner_tag.needs_review)
@@ -275,6 +285,7 @@ class AssignDepthTest(unittest.TestCase):
             _shore(),
             max_depth_ft=40,
             snap_m=5,
+            join_gap_m=0,
         )
         self.assertEqual(_depths(assignment), [])
         self.assertIn("interval_unknown", assignment.reasons)
@@ -288,6 +299,7 @@ class GeoJsonTest(unittest.TestCase):
             _shore(),
             max_depth_ft=20,
             snap_m=5,
+            join_gap_m=0,
         )
         collection = features_to_geojson(
             assignment.features,
@@ -560,6 +572,7 @@ class MeterSheetTest(unittest.TestCase):
             shore,
             max_depth_ft=10.3 * 0.3048,
             snap_m=8,
+            join_gap_m=0,
         )
         converted = assignment_to_feet(assignment)
         self.assertEqual(converted.interval_ft, 6.56)
@@ -832,23 +845,34 @@ class CarriedIntervalMergeTest(unittest.TestCase):
 
 
 class StrokeJoinTest(unittest.TestCase):
-    def test_aligned_gap_joins_and_keeps_the_labeled_depth(self):
+    def test_aligned_gap_joins_when_both_sides_share_a_depth(self):
         left = Line(coords=((20, 50), (40, 50), (55, 50)), closed=False)
         right = Line(coords=((68, 50), (90, 50), (110, 50)), closed=False)
         assignment = assign_depths(
             [left, right],
-            [Label(x=40, y=50, depth_ft=10, confidence=0.9)],
+            [
+                Label(x=40, y=50, depth_ft=10, confidence=0.9),
+                Label(x=90, y=50, depth_ft=10, confidence=0.9),
+            ],
             _shore(),
             max_depth_ft=40,
             snap_m=5,
             join_gap_m=20,
         )
-        self.assertEqual(assignment.unassigned_count, 0)
-        self.assertNotIn("unassigned_fragment", assignment.reasons)
         tagged = [line for line in assignment.features if line.source == "label"]
         self.assertEqual(len(tagged), 1)
         self.assertEqual(tagged[0].depth_ft, 10)
+        self.assertFalse(tagged[0].closed)
         self.assertGreater(len(tagged[0].coords), 4)
+        unlabeled_partner = join_open_strokes(
+            [left, right],
+            [Label(x=40, y=50, depth_ft=10, confidence=0.9)],
+            _shore(),
+            max_gap_m=20,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(unlabeled_partner), 2)
 
     def test_a_corner_and_a_depth_conflict_stay_apart(self):
         east = Line(coords=((20, 50), (40, 50)), closed=False)
@@ -875,8 +899,8 @@ class StrokeJoinTest(unittest.TestCase):
         self.assertEqual(len(conflicted), 2)
 
     def test_joining_does_not_invent_a_depth_for_unlabeled_strokes(self):
-        left = Line(coords=((20, 40), (40, 40)), closed=False)
-        right = Line(coords=((50, 40), (70, 40)), closed=False)
+        left = Line(coords=((0, 40), (45, 40)), closed=False)
+        right = Line(coords=((55, 40), (100, 40)), closed=False)
         assignment = assign_depths(
             [left, right],
             [],
@@ -885,13 +909,124 @@ class StrokeJoinTest(unittest.TestCase):
             snap_m=5,
             join_gap_m=20,
         )
-        self.assertEqual(assignment.unassigned_count, 1)
+        self.assertEqual(assignment.unassigned_count, 2)
         self.assertTrue(all(line.depth_ft is None or line.source == "hydro" for line in assignment.features))
+        ten = Line(coords=((10, 50), (28, 50)), closed=False)
+        middle = Line(coords=((40, 50), (58, 50)), closed=False)
+        twenty = Line(coords=((70, 50), (88, 50)), closed=False)
+        chain = assign_depths(
+            [ten, middle, twenty],
+            [
+                Label(x=20, y=50, depth_ft=10, confidence=0.9),
+                Label(x=80, y=50, depth_ft=20, confidence=0.9),
+            ],
+            _shore(),
+            max_depth_ft=40,
+            snap_m=5,
+            join_gap_m=20,
+        )
+        self.assertEqual(len(join_open_strokes(
+            [ten, middle, twenty],
+            [
+                Label(x=20, y=50, depth_ft=10, confidence=0.9),
+                Label(x=80, y=50, depth_ft=20, confidence=0.9),
+            ],
+            _shore(),
+            max_gap_m=20,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )), 3)
+        depths = _depths(chain)
+        self.assertEqual(depths, [10, 20])
+        self.assertNotIn("propagated", [line.source for line in chain.features])
+        outer = Line(coords=_box(5, 5, 95, 95), closed=True)
+        labeled = Line(coords=_box(18, 18, 82, 82), closed=True)
+        almost = Line(
+            coords=((35, 35), (65, 35), (65, 65), (35, 65), (35, 41)),
+            closed=False,
+        )
+        loop = Line(coords=((10, 10), (40, 10), (40, 40), (10, 40), (10, 16)), closed=False)
+        joined = join_open_strokes(
+            [loop],
+            [Label(x=25, y=10, depth_ft=10, confidence=0.9)],
+            _shore(),
+            max_gap_m=20,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(joined), 1)
+        self.assertFalse(joined[0].closed)
+        closed_ring = assign_depths(
+            [outer, labeled, almost],
+            [
+                Label(x=6, y=50, depth_ft=10, confidence=0.9),
+                Label(x=18, y=50, depth_ft=20, confidence=0.9),
+            ],
+            _shore(),
+            max_depth_ft=40,
+            snap_m=5,
+            join_gap_m=20,
+        )
+        self.assertFalse(any(line.closed and line.source == "propagated" for line in closed_ring.features))
+        self.assertNotIn(30, _depths(closed_ring))
+
+    def test_a_chord_across_a_peninsula_does_not_join(self):
+        # The notch between y=40 and y=60, x>40, is land. The chord crosses it.
+        shore = [
+            WaterPart(
+                exterior=(
+                    (0, 0),
+                    (100, 0),
+                    (100, 40),
+                    (40, 40),
+                    (40, 60),
+                    (100, 60),
+                    (100, 100),
+                    (0, 100),
+                )
+            )
+        ]
+        lower = Line(coords=((45, 20), (45, 32)), closed=False)
+        upper = Line(coords=((45, 80), (45, 68)), closed=False)
+        labels = [
+            Label(x=45, y=26, depth_ft=10, confidence=0.9),
+            Label(x=45, y=74, depth_ft=10, confidence=0.9),
+        ]
+        parted = join_open_strokes(
+            [lower, upper],
+            labels,
+            shore,
+            max_gap_m=40,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(parted), 2)
+        full = join_open_strokes(
+            [lower, upper],
+            labels,
+            _shore(),
+            max_gap_m=40,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(full), 1)
 
     def test_pixel_gap_stays_inside_the_global_caps(self):
         self.assertEqual(join_gap_m_for_pixel(0.2), 8.0)
         self.assertAlmostEqual(join_gap_m_for_pixel(1.0), 22.0)
         self.assertEqual(join_gap_m_for_pixel(4.0), 35.0)
+        self.assertEqual(join_gap_m_for_pixel(0), JOIN_GAP_MIN_M)
+        self.assertEqual(join_gap_m_for_pixel(float("nan")), JOIN_GAP_MIN_M)
+
+    def test_assign_depths_requires_an_explicit_gap(self):
+        with self.assertRaises(TypeError):
+            assign_depths(
+                [Line(coords=((0, 0), (10, 0)), closed=False)],
+                [],
+                _shore(),
+                max_depth_ft=10,
+                snap_m=5,
+            )
 
 
 if __name__ == "__main__":
