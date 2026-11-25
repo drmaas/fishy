@@ -52,13 +52,20 @@ from fishy_pipeline.states.wi.register import (
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
-from fishy_pipeline.states.wi.raster import select_sheet_pages
+from fishy_pipeline.states.wi.raster import LETTER_LONG_INCHES, select_sheet_pages
 from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
 from fishy_pipeline.states.wi.shoreline import (
+    MAX_ROAD_STRAIGHTNESS,
     MIN_FIGURE_SPAN,
+    NEATLINE_FRAME_BOUNDARY,
+    NEATLINE_MIN_STRAIGHTNESS,
+    NEATLINE_SPAN,
+    cleanup_shore_ring,
     extract_shoreline,
     extract_shoreline_figures,
     interior_ink_fraction,
+    _ring_boxiness,
+    _ring_straightness,
 )
 from fishy_pipeline.states.wi.wbic import normalize_wbic
 
@@ -373,7 +380,7 @@ def _maybe_keep_all_pages(
         project = warp.affine.apply if warp.method == "affine" else warp.tps.apply
         mapped.append([project(col, row) for col, row in sheet["ring"]])
     combined = union_polygon_iou(mapped, list(hydro_ring))
-    if combined >= max(singles) + 0.03:
+    if combined >= max(singles) + 0.02:
         return unique
     return sheets
 
@@ -497,7 +504,10 @@ def _georeference_entry(
             sheet["gate_iou"] = min(sheet["registration"].iou, full_iou)
         else:
             sheet["gate_iou"] = sheet["registration"].iou
-    primary = max(sheets, key=lambda sheet: sheet["gate_iou"])
+    # A low-resolution page stays in the minimum. DPI is not a duplicate test,
+    # and dropping the scan is what used to lift a letter page across the gate.
+    # The headline fit is the sheet that set that minimum.
+    primary = _headline_sheet(sheets)
     registration = primary["registration"]
     shoreline = primary["ring"]
     chosen_raster = primary["page"]
@@ -763,6 +773,33 @@ def _georeference_reviewed(
 
 # A shore with at least this much of its boundary on the page edge is a partial sheet.
 _PARTIAL_CUT = 0.08
+# Figures below this interior ink share are not bathymetry enclosures (roads, neatline boxes).
+MIN_BASIN_INK = 0.008
+# After registration, mapped footprint span versus hydro span must stay in this band.
+MIN_HYDRO_SPAN_RATIO = 0.38
+MAX_HYDRO_SPAN_RATIO = 1.85
+# Sheet-filling enclosures with modest ink are often roads plus neatline, not the lake.
+LARGE_RING_SPAN = 0.72
+LARGE_RING_MIN_INK = 0.12
+# Below the near-gate band, ink breaks ties this close. A wider gap is a
+# different ring (shore versus road enclosure), so overlap wins.
+_ANCHOR_IOU_BAND = 0.10
+# A contoured basin is several times a blank section cell. The cell must not win.
+_BASIN_AREA_MULTIPLE = 3.0
+# Doclink PDFs append a letter citation page. Rendered at the request DPI it
+# looks sharp, but it is a few lines of type, not a map sheet. A large sheet
+# can be this light and still be the map.
+_CITATION_DARK_FRACTION = 0.012
+# A legend, scale, or north arrow is a small near-rectangle with almost no
+# depth ink. An oval and a dammed basin are less rectangular, and a basin that
+# covers more of the sheet is not a legend even when one side is a straight dam.
+_LEGEND_MAX_INK = 0.03
+_LEGEND_MAX_AREA = 0.08
+_LEGEND_MIN_BOXINESS = 0.90
+# A ring under this share of the page still takes the hydro span check.
+# Nine percent of the page, and six percent with ink just over the legend cap,
+# used to skip that check once overlap reached 0.68.
+_SMALL_RING_AREA = 0.12
 
 
 def _score_sheet_pages(
@@ -776,49 +813,354 @@ def _score_sheet_pages(
     page_error: str | None = None
     for page_raster in page_rasters:
         image = read_png(page_raster)
-        image_area = float(image.width * image.height)
-        candidates: list[dict] = []
-        for figure in extract_shoreline_figures(image):
-            if len(figure.ring) < 12:
-                continue
-            if _span_fraction(figure.ring, image.width, image.height) < max(MIN_FIGURE_SPAN, 0.18):
-                continue
-            area = abs(_polygon_area(figure.ring))
-            if area < 0.03 * image_area or area > 0.72 * image_area:
-                continue
-            try:
-                registration = register_shoreline(
-                    list(figure.ring),
-                    list(hydro_ring),
-                    gcp_count,
-                    on_frame=list(figure.on_frame),
-                )
-            except Exception as error:
-                page_error = str(error)[:500]
-                continue
-            candidates.append(
-                {
-                    "page": page_raster,
-                    "registration": registration,
-                    "ring": list(figure.ring),
-                    "area": area,
-                    "cut_fraction": _flag_fraction(figure.on_frame),
-                    "ink": interior_ink_fraction(image, figure.ring),
-                    "image": image,
-                }
+        candidates, error = _collect_page_candidates(
+            image,
+            page_raster,
+            hydro_ring,
+            gcp_count,
+        )
+        if error is not None:
+            page_error = error
+        candidates.extend(
+            _spur_cleaned_candidates(
+                candidates,
+                image=image,
+                hydro_ring=hydro_ring,
+                gcp_count=gcp_count,
+                page=page_raster,
             )
+        )
+        candidates = _drop_margin_enclosures(candidates)
         picked = _pick_page_basins(candidates, hydro_ring)
         for row in picked:
             sheets.append({key: row[key] for key in row if key not in {"image"}})
     return sheets, page_error
 
 
+def _collect_page_candidates(
+    image,
+    page: Path,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+) -> tuple[list[dict], str | None]:
+    """Score every figure. A lone blank oval stays; it does not beat an inked basin."""
+    figures = extract_shoreline_figures(image)
+    page_error: str | None = None
+
+    def consider(keep_margin: bool) -> list[dict]:
+        nonlocal page_error
+        found: list[dict] = []
+        for figure in figures:
+            try:
+                row = _score_ring(
+                    image,
+                    list(figure.ring),
+                    list(figure.on_frame),
+                    hydro_ring=hydro_ring,
+                    gcp_count=gcp_count,
+                    page=page,
+                    _keep_margin=keep_margin,
+                )
+            except Exception as error:
+                page_error = str(error)[:500]
+                continue
+            if row is not None:
+                found.append(row)
+        return found
+
+    candidates = consider(False)
+    if not candidates:
+        candidates = consider(True)
+    return candidates, page_error
+
+
+def _margin_enclosure(area_fraction: float, ink: float) -> bool:
+    """A small outline with almost no depth ink. Overlap does not make it the shore."""
+    return area_fraction < _LEGEND_MAX_AREA and ink < MIN_BASIN_INK
+
+
+def _rejects_low_ink(
+    area_fraction: float,
+    ink: float,
+    iou: float | None,
+    *,
+    keep_margin: bool = False,
+) -> bool:
+    """True when low ink removes the ring.
+
+    Rings smaller than ``_LEGEND_MAX_AREA`` keep that rejection no matter how
+    well they overlap. A larger ring still gets the near-gate waiver. Passing
+    ``keep_margin`` retains a blank outline only when the page has no other figure.
+    """
+    if _margin_enclosure(area_fraction, ink):
+        return not keep_margin
+    if iou is None:
+        return False
+    return ink < MIN_BASIN_INK and iou < NEAR_GATE_IOU
+
+
+def _row_area_fraction(row: dict) -> float | None:
+    image = row.get("image")
+    area = row.get("area")
+    if image is None or area is None:
+        return None
+    denom = float(image.width * image.height)
+    if denom <= 0:
+        return None
+    return float(area) / denom
+
+
+def _drop_margin_enclosures(candidates: list[dict]) -> list[dict]:
+    """Drop a small low-ink outline when a much larger inked basin is on the page.
+
+    A blank cell is dropped even when its overlap is higher. A small ring whose
+    overlap reaches the near-gate band stays when the larger basin does not:
+    that ring is the lake. Overlap below the band does not save the outline.
+    """
+    basins: list[dict] = []
+    fractions: list[float | None] = []
+    for row in candidates:
+        fraction = _row_area_fraction(row)
+        fractions.append(fraction)
+        ink = float(row.get("ink") or 0.0)
+        if fraction is not None and fraction >= _LEGEND_MAX_AREA and ink >= MIN_BASIN_INK:
+            basins.append(row)
+    if not basins:
+        return list(candidates)
+    basin_fractions = [float(_row_area_fraction(row) or 0.0) for row in basins]
+    basin_overlap = max(float(row["registration"].iou) for row in basins)
+    kept: list[dict] = []
+    for row, fraction in zip(candidates, fractions, strict=True):
+        ink = float(row.get("ink") or 0.0)
+        if fraction is None:
+            kept.append(row)
+            continue
+        larger = any(
+            basin >= max(_LEGEND_MAX_AREA, fraction * _BASIN_AREA_MULTIPLE) for basin in basin_fractions
+        )
+        if not larger:
+            kept.append(row)
+            continue
+        if _margin_enclosure(fraction, ink):
+            continue
+        # Trout's north-arrow enclosure is 3.5% of the page with ink 0.021.
+        # It is above the blank-cell floor and still not the basin.
+        small_low_ink = fraction < _LEGEND_MAX_AREA and ink < _LEGEND_MAX_INK
+        if small_low_ink:
+            overlap = float(row["registration"].iou)
+            if overlap >= NEAR_GATE_IOU and basin_overlap < NEAR_GATE_IOU:
+                kept.append(row)
+                continue
+            continue
+        kept.append(row)
+    return kept or list(candidates)
+
+
+def _legend_box(
+    ring: list[tuple[float, float]],
+    ink: float,
+    straight: float,
+    *,
+    area_fraction: float,
+) -> bool:
+    """A map legend or north arrow, not a shoreline.
+
+    Every branch requires a small footprint and a near-rectangular outline.
+    An oval pond and a basin closed by one straight dam stay eligible. An
+    affine fit can still stretch a real legend onto the hydro polygon, so a
+    high IoU does not make the box the shore.
+    """
+    if area_fraction >= _LEGEND_MAX_AREA or ink >= _LEGEND_MAX_INK:
+        return False
+    if _ring_boxiness(ring) < _LEGEND_MIN_BOXINESS:
+        return False
+    if straight >= 0.80 and ink < 0.012:
+        return True
+    if straight >= 0.40 and ink < _LEGEND_MAX_INK:
+        return True
+    return ink < 0.012
+
+
+def _score_ring(
+    image,
+    ring: list[tuple[float, float]],
+    on_frame: list[bool] | tuple[bool, ...] | None,
+    *,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+    page: Path,
+    _allow_spur_cleanup: bool = True,
+    _keep_margin: bool = False,
+) -> dict | None:
+    """One figure that is allowed to compete, or None when it is not a shore."""
+    if len(ring) < 12:
+        return None
+    flags = list(on_frame) if on_frame is not None else [False] * len(ring)
+    if len(flags) != len(ring):
+        flags = [False] * len(ring)
+    if _span_fraction(ring, image.width, image.height) < max(MIN_FIGURE_SPAN, 0.18):
+        return None
+    cut_fraction = _flag_fraction(flags)
+    if _false_shore_ring(ring, image.width, image.height, cut_fraction):
+        return None
+    area = abs(_polygon_area(ring))
+    image_area = float(image.width * image.height)
+    if area < 0.03 * image_area or area > 0.72 * image_area:
+        return None
+    ink = interior_ink_fraction(image, ring)
+    straight = _ring_straightness(ring)
+    area_fraction = area / image_area if image_area else 0.0
+    if _legend_box(ring, ink, straight, area_fraction=area_fraction):
+        return None
+    # A high overlap used to waive this for every ring. A blank section cell
+    # then beat the contoured basin. Small rings keep the ink rejection.
+    # ``_keep_margin`` is only for a page whose sole figure is that outline.
+    if _rejects_low_ink(area_fraction, ink, iou=None, keep_margin=_keep_margin):
+        return None
+    registration = register_shoreline(list(ring), list(hydro_ring), gcp_count, on_frame=flags)
+    if _rejects_low_ink(area_fraction, ink, registration.iou, keep_margin=_keep_margin):
+        return None
+    if not _hydro_footprint_matches(
+        registration,
+        list(ring),
+        hydro_ring,
+        cut_fraction=cut_fraction,
+        area_fraction=area_fraction,
+        ink=ink,
+    ):
+        return None
+    span = _span_fraction(list(ring), image.width, image.height)
+    # Spur cleanup runs before this rejection. Otherwise a shore with an
+    # out-and-back road is dropped, and the cleanup never sees it.
+    road_rejection = (
+        straight >= MAX_ROAD_STRAIGHTNESS and ink < 0.02 and registration.iou < NEAR_GATE_IOU
+    )
+    if road_rejection and _allow_spur_cleanup and cut_fraction < _PARTIAL_CUT:
+        best: dict | None = None
+        for cleaned in cleanup_shore_ring(list(ring)):
+            try:
+                alt = _score_ring(
+                    image,
+                    cleaned,
+                    None,
+                    hydro_ring=hydro_ring,
+                    gcp_count=gcp_count,
+                    page=page,
+                    _allow_spur_cleanup=False,
+                )
+            except Exception:
+                continue
+            if alt is None:
+                continue
+            if best is None or alt["registration"].iou > best["registration"].iou:
+                best = alt
+        return best
+    if road_rejection:
+        return None
+    if span > LARGE_RING_SPAN and ink < LARGE_RING_MIN_INK and registration.iou < NEAR_GATE_IOU:
+        return None
+    return {
+        "page": page,
+        "registration": registration,
+        "ring": list(ring),
+        "area": area,
+        "cut_fraction": cut_fraction,
+        "ink": ink,
+        "image": image,
+    }
+
+
+def _spur_cleaned_candidates(
+    candidates: list[dict],
+    *,
+    image,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+    page: Path,
+) -> list[dict]:
+    """Re-score every closed ring after thin road spurs are opened off.
+
+    Cleanup is not reserved for the current overlap winner. A spurred shore
+    that lost to another ring still gets the spur removed. A cleaned ring is
+    kept only when its overlap rises by at least 0.02, so a same-score box is
+    not substituted.
+    """
+    closed = [row for row in candidates if row["cut_fraction"] < _PARTIAL_CUT]
+    cleaned: list[dict] = []
+    for seed in closed:
+        base_iou = seed["registration"].iou
+        for ring in cleanup_shore_ring(seed["ring"]):
+            try:
+                row = _score_ring(
+                    image,
+                    ring,
+                    None,
+                    hydro_ring=hydro_ring,
+                    gcp_count=gcp_count,
+                    page=page,
+                )
+            except Exception:
+                continue
+            if row is None or row["registration"].iou < base_iou + 0.02:
+                continue
+            cleaned.append(row)
+    return cleaned
+
+
+def _publish_gate(row: dict, hydro_ring: list[tuple[float, float]]) -> float:
+    """Score a candidate the way the lake gate will: partials use the full hydro."""
+    iou = float(row["registration"].iou)
+    if float(row.get("cut_fraction") or 0.0) < _PARTIAL_CUT:
+        return iou
+    cached = row.get("_full_iou")
+    if cached is None:
+        registration = row["registration"]
+        project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+        mapped = [project(col, line) for col, line in row["ring"]]
+        cached = polygon_iou(mapped, list(hydro_ring))
+        row["_full_iou"] = cached
+    return min(iou, float(cached))
+
+
+def _anchor_ink_area(row: dict) -> tuple[float, float]:
+    """Near-gate rank: interior ink, then how much of the page the ring covers."""
+    ink = float(row.get("ink") or 0.0)
+    fraction = _row_area_fraction(row)
+    if fraction is None:
+        return ink, 0.0
+    return ink, float(fraction)
+
+
+def _choose_anchor(candidates: list[dict], hydro_ring: list[tuple[float, float]]) -> dict:
+    """Above 0.74, ink and area decide only inside a tenth of overlap.
+
+    A wider gap keeps the higher score. Big Muskellunge's 0.902 spline stays
+    ahead of a 0.779 affine ring. Allequash's 0.022 gap still picks the inkier
+    ring. Below the band, a wide overlap gap still wins.
+    """
+    candidates = _drop_margin_enclosures(candidates)
+    scored = [(_publish_gate(row, hydro_ring), row) for row in candidates]
+    above = [pair for pair in scored if pair[0] >= NEAR_GATE_IOU]
+    if above:
+        best_gate = max(pair[0] for pair in above)
+        close = [pair for pair in above if best_gate - pair[0] <= _ANCHOR_IOU_BAND]
+        if len(close) > 1:
+            return max(close, key=lambda pair: _anchor_ink_area(pair[1]))[1]
+        return max(above, key=lambda pair: pair[0])[1]
+    best_gate = max(pair[0] for pair in scored)
+    band = [pair for pair in scored if best_gate - pair[0] < _ANCHOR_IOU_BAND]
+    return max(band, key=lambda pair: (_figure_quality(pair[1]), pair[0]))[1]
+
+
 def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, float]]) -> list[dict]:
     """Keep one or more disjoint basin figures when their union helps overlap."""
     if not candidates:
         return []
-    ranked = sorted(candidates, key=lambda row: (-row["registration"].iou, -row.get("ink", 0.0)))
-    anchor = ranked[0]
+    anchor = _choose_anchor(candidates, hydro_ring)
+    ranked = [anchor] + sorted(
+        (row for row in candidates if row is not anchor),
+        key=lambda row: -row["registration"].iou,
+    )
     kept = [anchor]
     if len(ranked) < 2:
         return kept
@@ -833,6 +1175,7 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
 
     anchor_ring = mapped_rings([anchor])[0]
     span = _centroid_span(anchor_ring)
+    anchor_iou = anchor["registration"].iou
     for candidate in ranked[1:5]:
         dist = _centroid_distance(anchor_ring, mapped_rings([candidate])[0])
         if dist < 0.12 * span:
@@ -843,10 +1186,11 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
         # nudge the union score upward.
         if candidate_hydro < 0.30:
             continue
+        if candidate["registration"].iou < max(0.35, anchor_iou - 0.25):
+            continue
         union = union_polygon_iou(mapped_rings([anchor, candidate]), list(hydro_ring))
         if union < candidate_hydro:
             continue
-        anchor_iou = anchor["registration"].iou
         gain = union >= anchor_iou + 0.05
         completes = anchor_iou >= NEAR_GATE_IOU and union >= anchor_iou
         if gain or completes:
@@ -869,16 +1213,54 @@ def _centroid_distance(left: list[tuple[float, float]], right: list[tuple[float,
     return math.hypot(lx - rx, ly - ry)
 
 
+def _affine_overlap(sheet: dict) -> float:
+    return float(sheet["registration"].affine_iou)
+
+
+def _published_overlap(sheet: dict) -> float:
+    """The score the lake gate reads: ``Registration.iou``."""
+    return float(sheet["registration"].iou)
+
+
+def _closed_sheets_to_keep(unique: list[dict]) -> list[dict]:
+    """Rank closed sibling sheets by affine overlap.
+
+    Keep every sheet whose affine overlap clears the publish cutoff. When one
+    sheet clears on the affine and another still clears on its published score,
+    keep both. When no affine clears, keep every sheet whose published score
+    clears. Two or more of those queue the lake. The highest affine is the
+    fallback only when no published score clears.
+    """
+    cleared = [sheet for sheet in unique if _affine_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
+    if len(cleared) > 1:
+        return cleared
+    if len(cleared) == 1:
+        siblings = [
+            sheet
+            for sheet in unique
+            if sheet not in cleared and _published_overlap(sheet) >= DEFAULT_IOU_THRESHOLD
+        ]
+        if siblings:
+            return [*cleared, *siblings]
+        return cleared
+    published = [sheet for sheet in unique if _published_overlap(sheet) >= DEFAULT_IOU_THRESHOLD]
+    if published:
+        return published
+    return [max(unique, key=_affine_overlap)]
+
+
 def _select_lake_sheets(
     sheets: list[dict],
     page_rasters: list[Path],
 ) -> tuple[list[dict], list[Path]]:
-    """Keep every page when any sheet is cut. Collapse only an all-closed set.
+    """Keep every page when any sheet is cut. Closed siblings rank by affine.
 
-    A closed shore on every page is one lake drawn more than once. The best of
-    those is enough. A cut or partial score on any page means the document does
-    not show one complete shore, so every other large page stays in the gate,
-    including a page that produced no shoreline.
+    A cut or partial score on any page means the document does not show one
+    complete shore, so every other large page stays in the gate, including a
+    page that produced no shoreline. Closed sheets are ranked by affine overlap.
+    Every closed sheet whose affine overlap clears 0.75 stays, and a sibling
+    whose published score also clears stays with it so the multi-sheet queue
+    can run. When no affine clears, every published score at or above 0.75 stays.
     """
     if not sheets:
         return [], []
@@ -899,8 +1281,12 @@ def _select_lake_sheets(
     if _pages_complement_sheets(unique):
         missed = [page for page in page_rasters if page not in by_page]
         return unique, missed
-    best = max(sheets, key=lambda sheet: sheet["registration"].iou)
-    return [best], []
+    kept = _closed_sheets_to_keep(unique)
+    if len(kept) > 1:
+        kept_pages = {sheet["page"] for sheet in kept}
+        missed = [page for page in page_rasters if page not in kept_pages]
+        return kept, missed
+    return kept, []
 
 
 def _pages_complement_sheets(sheets: list[dict]) -> bool:
@@ -934,7 +1320,52 @@ def _figure_quality(sheet: dict) -> float:
     """Favor real lake ink over long road-like enclosures with weak overlap."""
     iou = sheet["registration"].iou
     ink = float(sheet.get("ink", 0.0))
-    return iou * (0.22 + min(ink, 0.28))
+    return iou * (0.15 + min(ink, 0.40))
+
+
+def _false_shore_ring(
+    ring: tuple[tuple[float, float], ...] | list[tuple[float, float]],
+    width: int,
+    height: int,
+    cut_fraction: float,
+) -> bool:
+    span = _span_fraction(list(ring), width, height)
+    if span < NEATLINE_SPAN or cut_fraction < NEATLINE_FRAME_BOUNDARY:
+        return False
+    if _ring_straightness(list(ring)) >= NEATLINE_MIN_STRAIGHTNESS:
+        return True
+    return span >= 0.92 and cut_fraction >= 0.45
+
+
+def _hydro_footprint_matches(
+    registration,
+    pixel_ring: list[tuple[float, float]],
+    hydro_ring: list[tuple[float, float]],
+    *,
+    cut_fraction: float = 0.0,
+    area_fraction: float | None = None,
+    ink: float | None = None,
+) -> bool:
+    # A blank cell, a 9% ring, or a 6% ring with ink just over the legend cap
+    # can be stretched onto the lake and clear 0.68. That overlap does not skip
+    # the span check. Callers that omit the area keep the old shortcut.
+    margin = (
+        area_fraction is not None
+        and ink is not None
+        and _margin_enclosure(area_fraction, ink)
+    )
+    small = area_fraction is not None and area_fraction < _SMALL_RING_AREA
+    if registration.iou >= 0.68 and not margin and not small:
+        return True
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, row) for col, row in pixel_ring]
+    hydro_span = _centroid_span(list(hydro_ring))
+    mapped_span = _centroid_span(mapped)
+    if hydro_span <= 0:
+        return True
+    ratio = mapped_span / hydro_span
+    min_ratio = 0.22 if cut_fraction >= _PARTIAL_CUT else MIN_HYDRO_SPAN_RATIO
+    return min_ratio <= ratio <= MAX_HYDRO_SPAN_RATIO
 
 
 def _prefer_sheet(new: dict, old: dict) -> bool:
@@ -948,12 +1379,20 @@ def _prefer_sheet(new: dict, old: dict) -> bool:
     return _figure_quality(new) > _figure_quality(old)
 
 
+def _headline_sheet(sheets: list[dict]) -> dict:
+    """The sheet whose gate is the lake minimum. Its fit is the headline."""
+    return min(sheets, key=lambda sheet: float(sheet["gate_iou"]))
+
+
 def _public_sheet(sheet: dict) -> dict:
     registration = sheet["registration"]
     row = {
         "page": sheet["page"].name,
         "iou": round(sheet.get("gate_iou", registration.iou), 6),
         "footprint_iou": round(registration.iou, 6),
+        "affine_iou": round(registration.affine_iou, 6),
+        "tps_iou": round(registration.tps_iou, 6),
+        "method": registration.method,
         "rotation_deg": round(registration.rotation_deg, 3),
         "cut_fraction": round(sheet["cut_fraction"], 4),
     }
@@ -1121,23 +1560,89 @@ def _reasons(
     return sorted(found, key=lambda name: order[name])
 
 
+def _sampled_dark_fraction(image) -> float:
+    total = image.width * image.height
+    if total <= 0:
+        return 1.0
+    rgb = image.rgb
+    dark = 0
+    seen = 0
+    for index in range(0, total, 7):
+        offset = index * 3
+        if (rgb[offset] + rgb[offset + 1] + rgb[offset + 2]) // 3 < 128:
+            dark += 1
+        seen += 1
+    if seen == 0:
+        return 1.0
+    return dark / seen
+
+
+def _is_citation_raster(path: Path, *, long_inches: float | None = None) -> bool:
+    """True when a page is a doclink citation, not a bathymetry sheet.
+
+    A citation is letter-size type. A large sheet stays even when the ink is
+    light, and a light page that still holds a lake-scale figure stays too.
+    Low ink by itself is not enough: Sparkling's map is a light sheet, and a
+    sparser sheet in the rest of the catalog can fall under the darkness cutoff.
+    """
+    try:
+        image = read_png(path)
+    except (OSError, ValueError):
+        return False
+    if image.width * image.height < 64:
+        return False
+    if _sampled_dark_fraction(image) >= _CITATION_DARK_FRACTION:
+        return False
+    if long_inches is not None and long_inches > LETTER_LONG_INCHES:
+        return False
+    if extract_shoreline_figures(image):
+        return False
+    if long_inches is None:
+        return True
+    return long_inches <= LETTER_LONG_INCHES
+
+
+def _page_long_inches(page: dict) -> float | None:
+    pixels = page.get("pixels")
+    dpi = page.get("dpi")
+    if not isinstance(pixels, (list, tuple)) or len(pixels) < 2 or not dpi:
+        return None
+    try:
+        dpi_value = float(dpi)
+    except (TypeError, ValueError):
+        return None
+    if dpi_value <= 0:
+        return None
+    return max(float(pixels[0]), float(pixels[1])) / dpi_value
+
+
 def _page_rasters(entry: dict, raster: Path) -> list[Path]:
     """Map-sheet pages for this row. A single raster stays a one-item list."""
     raw_pages = entry.get("raster_pages")
-    pages: list[Path] = []
+    described: list[tuple[Path, float | None]] = []
     if isinstance(raw_pages, list):
-        described = [item for item in raw_pages if isinstance(item, dict)]
+        items = [item for item in raw_pages if isinstance(item, dict)]
         bare = [item for item in raw_pages if not isinstance(item, dict)]
-        for item in select_sheet_pages(described):
+        for item in select_sheet_pages(items):
             path = item.get("path")
             if path and Path(str(path)).is_file():
-                pages.append(Path(str(path)))
+                described.append((Path(str(path)), _page_long_inches(item)))
         for item in bare:
             if item and Path(str(item)).is_file():
-                pages.append(Path(str(item)))
-    if not pages:
-        pages = [raster]
-    return pages
+                described.append((Path(str(item)), None))
+    if not described:
+        described = [(raster, None)]
+    large = [path for path, long_inches in described if long_inches is not None and long_inches > LETTER_LONG_INCHES]
+    maps: list[Path] = []
+    for path, long_inches in described:
+        # The only large sheet is the map, even when its ink is sparse.
+        if len(large) == 1 and path in large:
+            maps.append(path)
+            continue
+        if _is_citation_raster(path, long_inches=long_inches):
+            continue
+        maps.append(path)
+    return maps or [path for path, _long_inches in described]
 
 
 def _warp(

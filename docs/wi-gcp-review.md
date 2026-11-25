@@ -1,6 +1,6 @@
 # Wisconsin bathymetry GCP review
 
-Automatic shoreline registration is the default. Human control points stay the fallback when a sheet still misses the 0.85 IoU gate. The gate itself is unchanged.
+Automatic shoreline registration is the default. Human control points stay the fallback when a sheet still misses the publish IoU gate (`DEFAULT_IOU_THRESHOLD`, currently 0.75).
 
 ## How auto-registration works
 
@@ -8,7 +8,9 @@ Sheets are often rotated, and rotation is not limited to quarter turns. Initiali
 
 The shoreline is the water inside the heavy outer line. Small gaps in that line are closed. When the line runs off the page, the page edge (and a detected neatline, when there is one) closes the polygon. Vertices on that edge are marked as frame, not shore.
 
-A sheet that shows only part of the lake is matched on its own. The page-edge cut is left out of the correspondence, and the footprint score is recorded. The publish gate also requires that mapped ring to cover the full hydro polygon, so a fragment of one basin cannot clear 0.85 on footprint overlap alone. Each sheet is reported with its own IoU and rotation. The lake-level gate is `min(per-sheet gate_iou)`; partial sheets use the worse of footprint IoU and full-hydro coverage. The combined IoU is the union of the placed sheets against the hydro polygon and is diagnostic only—it does not clear the gate or relax multi-sheet queueing. Catalog multi-sheet lakes (different map keys) still fail closed unless every scored sheet clears 0.85. When more than one page of the same document clears the gate, each passing page is warped and the row stays in review, because contour tracing reads one warped raster. A PDF whose pages are all closed shores keeps the best page. A document shared by several WBICs is still queued as `shared_sheet`.
+A low-resolution scan stays in the lake minimum. DPI does not remove a page, and a sharp letter page is not added back to outrank that scan. A letter-size page with almost no ink and no lake-scale figure is a citation and is left out. A large sheet stays even when the ink is light, and so does the only large sheet on the document. A legend or north arrow is a small near-rectangle with almost no depth ink. An oval shore and a basin closed by a straight dam stay eligible. A long straight run is still removed when it is a section line. When deleting that run would open a basin, including a line that spans the page, only the pixels that seal that basin are kept.
+
+A sheet that shows only part of the lake is matched on its own. The page-edge cut is left out of the correspondence, and the footprint score is recorded. The publish gate also requires that mapped ring to cover the full hydro polygon, so a fragment of one basin cannot clear the gate on footprint overlap alone. Each sheet is reported with its own IoU and rotation. The lake-level gate is `min(per-sheet gate_iou)`; partial sheets use the worse of footprint IoU and full-hydro coverage. The combined IoU is the union of the placed sheets against the hydro polygon and is diagnostic only—it does not clear the gate or relax multi-sheet queueing. Catalog multi-sheet lakes (different map keys) still fail closed unless every scored sheet clears `DEFAULT_IOU_THRESHOLD`. When more than one page of the same document clears the gate, each passing page is warped and the row stays in review, because contour tracing reads one warped raster. A document shared by several WBICs is still queued as `shared_sheet`.
 
 `georef/results.json` records `rotation_deg`, `sheets` (page, IoU, rotation, cut fraction), and `combined_iou` when more than one sheet was placed. Review the per-lake IoUs before changing the gate.
 
@@ -61,7 +63,7 @@ curl -s http://127.0.0.1:8765/api/lakes | python -m json.tool
 4. Repeat until you have four to six pairs.
 5. Save. The file is written to `pipeline/data/wi/gcps/<wbic>.json` and is meant to be committed.
 
-The preview IoU updates after four points and shows whether it meets the 0.85 publish gate. Re-run georef after saving:
+The preview IoU updates after four points and shows whether it meets the publish gate (`DEFAULT_IOU_THRESHOLD`). Re-run georef after saving:
 
 ```bash
 PYTHONPATH=pipeline .venv/bin/python -m fishy_pipeline --state wi georef \
@@ -75,4 +77,4 @@ When a committed GCP file exists, georef uses it instead of the automatic shorel
 
 Contour depths use committed label lists under `pipeline/data/wi/labels/<wbic>.json` (sheet pixel, value, unit, confidence). EasyOCR is optional (`--ocr-fallback` on contours only).
 
-A lake is publishable only when georef is `auto` with no blocking queue reasons, IoU ≥ 0.85, and traced depths match the recorded label set. Everything else stays `needs_review`.
+A lake is publishable only when georef is `auto` with no blocking queue reasons, IoU ≥ `DEFAULT_IOU_THRESHOLD`, and traced depths match the recorded label set. Everything else stays `needs_review`.

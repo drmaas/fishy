@@ -29,6 +29,9 @@ def select_sheet_pages(pages: list[dict]) -> list[dict]:
 
     Devils Lake is scanned on letter pages, so letter pages stay when every
     page is letter. A notes page is not chosen over the bathymetry sheet.
+    A sharp letter page is not added back when the sheet scan is under 300 dpi.
+    That scan is the bathymetry. Resolution does not make the letter page a
+    second copy of it.
     """
     longs = [_page_long_inches(page) for page in pages]
     if any(value is not None and value > LETTER_LONG_INCHES for value in longs):
