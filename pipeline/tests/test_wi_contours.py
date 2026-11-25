@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fishy_pipeline.states.wi import contours
 from fishy_pipeline.states.wi.depth_tag import (
@@ -22,6 +24,8 @@ from fishy_pipeline.states.wi.depth_tag import (
 )
 from fishy_pipeline.states.wi.hydro import load_hydro_geometries
 from fishy_pipeline.states.wi.raster import fit_page_zoom, max_render_pixels
+from fishy_pipeline.states.wi.recorded_labels import labels_for_trace
+from fishy_pipeline.states.wi.register import Affine, GroundControlPoint
 from fishy_pipeline.states.wi.trace import (
     blank_text_boxes,
     bridge_label_gaps,
@@ -581,6 +585,101 @@ class RenderCapTest(unittest.TestCase):
         )
         self.assertTrue(within_cap)
         self.assertAlmostEqual(actual_dpi, 72.0)
+
+
+class RecordedLabelPageTest(unittest.TestCase):
+    def test_labels_apply_only_on_the_digitized_page(self):
+        body = {
+            "page": "0980900a-p0.png",
+            "unit": "ft",
+            "labels": [{"pixel": [10.0, 10.0], "value": 5, "confidence": 0.9}],
+        }
+        gcps = [
+            GroundControlPoint(pixel=0.0, line=0.0, easting=0.0, northing=0.0),
+            GroundControlPoint(pixel=20.0, line=0.0, easting=20.0, northing=0.0),
+            GroundControlPoint(pixel=0.0, line=20.0, easting=0.0, northing=20.0),
+        ]
+        affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+        transform = (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        with patch("fishy_pipeline.states.wi.recorded_labels.load_recorded_labels", return_value=body):
+            matched, _boxes, _texts, _unit = labels_for_trace(
+                "0980900",
+                gcps=gcps,
+                method="affine",
+                affine=affine,
+                geotransform=transform,
+                clipped_width=50,
+                clipped_height=50,
+                page="0980900a-p0.png",
+            )
+            other, other_boxes, _texts, _unit = labels_for_trace(
+                "0980900",
+                gcps=gcps,
+                method="affine",
+                affine=affine,
+                geotransform=transform,
+                clipped_width=50,
+                clipped_height=50,
+                page="0980900a-p1.png",
+            )
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(other, [])
+        self.assertEqual(other_boxes, [])
+
+    def test_every_kept_warp_is_traced_with_its_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = []
+            for name in ("0980900a-p0.png", "0980900a-p1.png"):
+                path = root / f"{name}.tif"
+                path.write_bytes(b"tif")
+                paths.append(path)
+            item = {
+                "wbic": "0980900",
+                "map_key": "0980900a",
+                "qa_status": "auto",
+                "iou": 0.91,
+                "reasons": [],
+                "warp_source": "auto",
+                "paths": {
+                    "warps": [
+                        {"page": "0980900a-p0.png", "status": "ok", "path": str(paths[0]), "gcps": str(root / "a.json")},
+                        {"page": "0980900a-p1.png", "status": "ok", "path": str(paths[1]), "gcps": str(root / "b.json")},
+                    ]
+                },
+            }
+            seen: list[str | None] = []
+
+            def fake_trace(*_args, **kwargs):
+                seen.append(kwargs.get("page"))
+                return {
+                    "qa_status": "auto" if kwargs.get("page") == "0980900a-p0.png" else "needs_review",
+                    "reasons": [] if kwargs.get("page") == "0980900a-p0.png" else ["label_page_mismatch"],
+                    "depths_ft": [5],
+                    "interval_ft": 5,
+                    "label_count": 1 if kwargs.get("page") == "0980900a-p0.png" else 0,
+                    "labels_applied": kwargs.get("page") == "0980900a-p0.png",
+                    "recorded_labels": True,
+                    "label_source": "recorded" if kwargs.get("page") == "0980900a-p0.png" else "none",
+                    "unassigned_count": 0,
+                    "path": str(root / "piece.geojson"),
+                    "_features": [],
+                }
+
+            with patch("fishy_pipeline.states.wi.contours._trace_sheet", side_effect=fake_trace):
+                result = contours._trace_item(
+                    item,
+                    entry={"max_depth_ft": 20},
+                    geometry=SimpleNamespace(parts=[object()]),
+                    work_dir=root,
+                    ocr_fallback=False,
+                    compare_ocr=False,
+                )
+        self.assertEqual(seen, ["0980900a-p0.png", "0980900a-p1.png"])
+        self.assertEqual(result["qa_status"], "needs_review")
+        self.assertEqual(result["sheet_count"], 2)
+        self.assertTrue(result["sheets"][0]["labels_applied"])
+        self.assertFalse(result["sheets"][1]["labels_applied"])
 
 
 if __name__ == "__main__":

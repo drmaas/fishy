@@ -1321,7 +1321,7 @@ class FailClosedGateTest(unittest.TestCase):
             pages,
         )
         self.assertEqual([sheet["page"].name for sheet in kept], ["a.png"])
-        self.assertEqual(missed, [])
+        self.assertEqual([page.name for page in missed], ["b.png"])
 
     def test_fence_closed_sheets_queue_as_multi_sheet(self):
         # Sheet 1's spline is 0.822 and its affine is 0.674. Sheet 2's spline
@@ -1388,7 +1388,7 @@ class FailClosedGateTest(unittest.TestCase):
         other = _tps_sheet(0.60, 0.70, "low.png", ring)
         pages = [Path("clear.png"), Path("low.png")]
         kept, missed = georef._select_lake_sheets([clearing, other], pages)
-        self.assertEqual(missed, [])
+        self.assertEqual([page.name for page in missed], ["low.png"])
         self.assertEqual([sheet["page"].name for sheet in kept], ["clear.png"])
         self.assertGreaterEqual(kept[0]["registration"].iou, DEFAULT_IOU_THRESHOLD)
 
@@ -1405,6 +1405,78 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertEqual(public["tps_iou"], 0.77)
         self.assertEqual(public["method"], "tps")
         self.assertEqual(public["iou"], 0.77)
+
+    def test_missed_page_scores_zero_and_queues_multi_sheet(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        sheet = _sheet(0.91, 0.0, "a.png", ring=list(hydro))
+        sheet["gate_iou"] = 0.91
+        iou, queue = georef._stitch_gate([sheet], hydro, [Path("b.png")], DEFAULT_IOU_THRESHOLD)
+        self.assertEqual(iou, 0.0)
+        self.assertTrue(queue)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=iou < DEFAULT_IOU_THRESHOLD,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=queue,
+        )
+        self.assertEqual(iou, 0.0)
+        self.assertIn("multi_sheet", reasons)
+        self.assertEqual("needs_review" if reasons else "auto", "needs_review")
+
+    def test_kept_sheet_under_the_gate_is_not_auto(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        strong = _sheet(0.88, 0.0, "a.png", ring=list(hydro))
+        weak = _sheet(0.70, 0.0, "b.png", ring=list(hydro))
+        for sheet in (strong, weak):
+            sheet["gate_iou"] = sheet["registration"].iou
+        iou, queue = georef._stitch_gate([strong, weak], hydro, [], DEFAULT_IOU_THRESHOLD)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=iou < DEFAULT_IOU_THRESHOLD,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=queue,
+        )
+        self.assertAlmostEqual(iou, 0.70)
+        self.assertTrue(reasons)
+        self.assertEqual("needs_review" if reasons else "auto", "needs_review")
+
+    def test_two_rings_on_the_hydro_publish_at_the_minimum(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _sheet(0.91, 0.0, "a.png", ring=list(hydro))
+        second = _sheet(
+            0.82,
+            0.0,
+            "b.png",
+            ring=[(2.0, 2.0), (98.0, 2.0), (98.0, 78.0), (2.0, 78.0)],
+        )
+        for sheet in (first, second):
+            sheet["gate_iou"] = sheet["registration"].iou
+        iou, queue = georef._stitch_gate([first, second], hydro, [], DEFAULT_IOU_THRESHOLD)
+        placed = [georef._mapped_ring(sheet) for sheet in (first, second)]
+        union = union_polygon_iou(placed, hydro)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=iou < DEFAULT_IOU_THRESHOLD,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=queue,
+        )
+        self.assertFalse(queue)
+        self.assertAlmostEqual(iou, min(sheet["gate_iou"] for sheet in (first, second)))
+        self.assertGreater(union, iou)
+        self.assertEqual(reasons, [])
+        self.assertEqual("needs_review" if reasons else "auto", "auto")
 
     def test_validated_stitch_publishes_on_the_minimum(self):
         hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
@@ -2400,6 +2472,27 @@ class RoadCenterlineTest(unittest.TestCase):
             roads._polylines_from_esri(payload),
             [[(545000.0, 510000.0), (545100.0, 510020.0)]],
         )
+
+    def test_failed_page_returns_no_roads(self):
+        def query(_envelope, _offset, _timeout):
+            query.calls += 1
+            if query.calls == 1:
+                return {
+                    "features": [
+                        {"geometry": {"paths": [[[500000.0, 400000.0], [500100.0, 400000.0]]]}},
+                    ],
+                    "exceededTransferLimit": True,
+                }
+            raise TimeoutError("next page failed")
+
+        query.calls = 0
+        ring = [(500000.0, 400000.0), (510000.0, 400000.0), (510000.0, 410000.0)]
+        with patch("fishy_pipeline.states.wi.roads._query_roads", side_effect=query):
+            self.assertEqual(roads.fetch_road_centerlines(ring), [])
+
+    def test_gain_is_rejected_when_the_seal_was_cleared(self):
+        self.assertFalse(georef._keep_road_trace(0.46, 0.60, 0, cleared_seal=True))
+        self.assertTrue(georef._keep_road_trace(0.46, 0.60, 0, cleared_seal=False))
 
     def test_unchanged_overlap_keeps_the_first_registration(self):
         # Trout's replacement scored the same and stacked two control points.

@@ -65,12 +65,13 @@ def fetch_road_centerlines(
         try:
             payload = _query_roads(envelope, offset, timeout)
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-            return lines
+            # A short page leaves the set incomplete. Return nothing.
+            return []
         lines.extend(_polylines_from_esri(payload))
         if not payload.get("exceededTransferLimit"):
-            break
+            return lines
         offset += _PAGE_SIZE
-    return lines
+    return []
 
 
 def pixel_from_map(affine: Affine, easting: float, northing: float) -> tuple[float, float]:

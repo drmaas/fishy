@@ -72,6 +72,7 @@ from fishy_pipeline.states.wi.shoreline import (
     NEATLINE_SPAN,
     cleanup_shore_ring,
     clear_projected_casings,
+    cleared_hits_basin_seal,
     extract_shoreline,
     extract_shoreline_figures,
     interior_ink_fraction,
@@ -549,38 +550,16 @@ def _georeference_entry(
         preview_rings.append([project_sheet(col, row) for col, row in sheet["ring"]])
     if len(preview_rings) > 1:
         combined_preview = union_polygon_iou(preview_rings, hydro_ring)
-    if missed_pages:
-        gate_iou = 0.0
-        stitch_score = None
-    else:
-        gate_iou = min(sheet["gate_iou"] for sheet in sheets)
-        stitch_score = _validated_stitch_score(sheets, hydro_ring, iou_threshold) if len(sheets) > 1 else None
-    several_pages_passed = sum(1 for sheet in sheets if sheet["gate_iou"] >= iou_threshold) > 1
-    # combined_iou stays diagnostic. A multi-page document leaves the queue
-    # only when the placed rings were validated and the minimum still clears.
-    stitch_publishes = stitch_score is not None and stitch_score >= iou_threshold and not missed_pages
-    queue_unvalidated_stitch = several_pages_passed and not stitch_publishes
+    # combined_preview stays diagnostic. The gate below does not read it.
+    iou, queue_unvalidated_stitch = _stitch_gate(sheets, hydro_ring, missed_pages, iou_threshold)
     affine_iou = round(registration.affine_iou, 6)
     tps_iou = round(registration.tps_iou, 6)
-    iou = round(gate_iou, 6)
-    low_iou = gate_iou < iou_threshold
+    low_iou = iou < iou_threshold
     gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
     out_dir.mkdir(parents=True, exist_ok=True)
     gcp_path = out_dir / "gcps.json"
     shore_path = out_dir / "shoreline.geojson"
-    _write_json(
-        gcp_path,
-        {
-            "crs": WI_CRS,
-            "wbic": wbic,
-            "map_key": map_key,
-            "gcps": gcp_dicts,
-            "affine": registration.affine.as_dict(),
-            "method": registration.method,
-            "source": "auto",
-            "rotation_deg": round(registration.rotation_deg, 3),
-        },
-    )
+    _write_json(gcp_path, _gcp_body(wbic, map_key, registration, page=chosen_raster.name))
     project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
     mapped = [project(col, row) for col, row in shoreline]
     _write_json(
@@ -609,7 +588,17 @@ def _georeference_entry(
             affine=reg.affine.as_dict(),
             tif_name=tif_name,
         )
-        warp_rows.append({"page": sheet["page"].name, "status": status, "path": str(path) if path else None})
+        sheet_gcp = gcp_path if sheet is primary else out_dir / f"gcps-{sheet['page'].stem}.json"
+        if sheet is not primary:
+            _write_json(sheet_gcp, _gcp_body(wbic, map_key, reg, page=sheet["page"].name))
+        warp_rows.append(
+            {
+                "page": sheet["page"].name,
+                "status": status,
+                "path": str(path) if path else None,
+                "gcps": str(sheet_gcp),
+            }
+        )
         if sheet is primary:
             warp_status, warped_path, warp_error = status, path, error
         elif status == "failed" and warp_status != "failed":
@@ -923,14 +912,59 @@ def _collect_page_candidates(
     return candidates, page_error
 
 
-def _keep_road_trace(old_iou: float, new_iou: float, outline_hit: int) -> bool:
+def _stitch_gate(
+    sheets: list[dict],
+    hydro_ring: list[tuple[float, float]],
+    missed_pages: list,
+    iou_threshold: float,
+) -> tuple[float, bool]:
+    """Published IoU and whether an unvalidated stitch queues the lake.
+
+    ``combined_iou`` is not an argument. A missed page scores 0 and queues.
+    A kept sheet under ``iou_threshold`` does not publish. Two rings that sit
+    on the hydro at or above the threshold publish at the minimum sheet score.
+    """
+    if missed_pages or not sheets:
+        gate_iou = 0.0
+        stitch_score = None
+    else:
+        gate_iou = min(float(sheet["gate_iou"]) for sheet in sheets)
+        stitch_score = _validated_stitch_score(sheets, hydro_ring, iou_threshold) if len(sheets) > 1 else None
+    several_pages_passed = sum(1 for sheet in sheets if float(sheet.get("gate_iou", 0.0)) >= iou_threshold) > 1
+    stitch_publishes = stitch_score is not None and stitch_score >= iou_threshold and not missed_pages
+    queue_unvalidated_stitch = bool(missed_pages) or (several_pages_passed and not stitch_publishes)
+    return round(gate_iou, 6), queue_unvalidated_stitch
+
+
+def _gcp_body(wbic: str, map_key: str, registration, *, page: str) -> dict:
+    return {
+        "crs": WI_CRS,
+        "wbic": wbic,
+        "map_key": map_key,
+        "page": page,
+        "gcps": [gcp.as_dict() for gcp in registration.gcps],
+        "affine": registration.affine.as_dict(),
+        "method": registration.method,
+        "source": "auto",
+        "rotation_deg": round(registration.rotation_deg, 3),
+    }
+
+
+def _keep_road_trace(
+    old_iou: float,
+    new_iou: float,
+    outline_hit: int,
+    *,
+    cleared_seal: bool = False,
+) -> bool:
     """True when the road-cleared trace should replace the first registration.
 
-    A gain of 0.002 is a different shore. A drop no larger than 0.08 is kept
-    only when the clear actually removed ink from the traced outline, so a
-    road that was the false shore can still win. A tie keeps the first fit.
+    A gain of 0.002 is a different shore only when the clear did not remove
+    the first ring's seal. Opening that seal can raise the overlap without
+    removing a road. A drop no larger than 0.08 is kept when the clear hit
+    the traced outline. A tie keeps the first fit.
     """
-    if new_iou >= old_iou + 0.002:
+    if new_iou >= old_iou + 0.002 and not cleared_seal:
         return True
     if outline_hit >= 12 and new_iou + 0.08 >= old_iou and new_iou <= old_iou - 0.002:
         return True
@@ -976,6 +1010,7 @@ def _apply_vector_road_mask(
     if cleared <= 0:
         return picked
     outline_hit = _ring_pixels_cleared(before, mask, image.width, image.height, anchor.get("ring") or [])
+    cleared_seal = cleared_hits_basin_seal(before, mask, image.width, image.height)
     candidates, _error = _collect_page_candidates(
         image,
         page,
@@ -995,7 +1030,11 @@ def _apply_vector_road_mask(
     candidates = _drop_margin_enclosures(candidates)
     new_picked = _pick_page_basins(candidates, hydro_ring)
     new_iou = max((float(row["registration"].iou) for row in new_picked), default=None)
-    accept = new_iou is not None and bool(new_picked) and _keep_road_trace(old_iou, new_iou, outline_hit)
+    accept = (
+        new_iou is not None
+        and bool(new_picked)
+        and _keep_road_trace(old_iou, new_iou, outline_hit, cleared_seal=cleared_seal)
+    )
     if not accept or new_iou is None:
         for row in picked:
             row["road_pixels_cleared"] = cleared
@@ -1489,18 +1528,17 @@ def _select_lake_sheets(
     Every closed sheet whose affine overlap clears 0.75 stays, and a sibling
     whose published score also clears stays with it, including when two or
     more affines already cleared. When no affine clears, every published score
-    at or above 0.75 stays.
+    at or above 0.75 stays. A raster that is not in the kept set is missed.
     """
     if not sheets:
-        return [], []
+        return [], list(page_rasters)
     partial = [sheet for sheet in sheets if sheet["cut_fraction"] >= _PARTIAL_CUT]
     if partial:
-        scored = {sheet["page"] for sheet in sheets}
-        missed = [page for page in page_rasters if page not in scored]
-        return list(sheets), missed
+        return list(sheets), _pages_not_kept(sheets, page_rasters)
     if len(page_rasters) <= 1 or len(sheets) <= 1:
         best = max(sheets, key=lambda sheet: sheet["registration"].iou)
-        return [best], []
+        kept = [best]
+        return kept, _pages_not_kept(kept, page_rasters)
     by_page: dict[Path, dict] = {}
     for sheet in sheets:
         current = by_page.get(sheet["page"])
@@ -1508,14 +1546,15 @@ def _select_lake_sheets(
             by_page[sheet["page"]] = sheet
     unique = list(by_page.values())
     if _pages_complement_sheets(unique):
-        missed = [page for page in page_rasters if page not in by_page]
-        return unique, missed
+        return unique, _pages_not_kept(unique, page_rasters)
     kept = _closed_sheets_to_keep(unique)
-    if len(kept) > 1:
-        kept_pages = {sheet["page"] for sheet in kept}
-        missed = [page for page in page_rasters if page not in kept_pages]
-        return kept, missed
-    return kept, []
+    return kept, _pages_not_kept(kept, page_rasters)
+
+
+def _pages_not_kept(kept: list[dict], page_rasters: list[Path]) -> list[Path]:
+    """Rasters that are not in the kept sheet set."""
+    kept_pages = {sheet["page"] for sheet in kept}
+    return [page for page in page_rasters if page not in kept_pages]
 
 
 def _pages_complement_sheets(sheets: list[dict]) -> bool:

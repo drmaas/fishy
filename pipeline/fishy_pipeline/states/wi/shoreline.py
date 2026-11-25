@@ -1356,10 +1356,15 @@ def _mask_cased_roads(
                     doomed[y * width + x] = 1
     if not paired or not any(doomed):
         return
-    # Keep only the casing pixels that are the shore itself: they touch the
-    # water and the outside. A road across the water touches water on both
-    # sides, so it is not that seal, and clearing it joins the basin.
-    protect = _casing_seal_pixels(width, height, doomed, outside, holes[0])
+    # Keep the casing pixels that close any basin. A road across the water
+    # touches water on both sides, so it is not that seal, and clearing it
+    # joins the basin. Protecting only the largest hole opens the other one.
+    protect = bytearray(width * height)
+    for hole in holes:
+        part = _casing_seal_pixels(width, height, doomed, outside, hole)
+        for index, flag in enumerate(part):
+            if flag:
+                protect[index] = 1
     for index, flag in enumerate(doomed):
         if flag and not protect[index]:
             mask[index] = 0
@@ -1397,6 +1402,32 @@ def _casing_seal_pixels(
         if touches_hole and touches_outside:
             protect[index] = 1
     return protect
+
+
+def cleared_hits_basin_seal(
+    before: bytearray,
+    after: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    """True when a cleared pixel was the seal of any enclosed basin.
+
+    The first shore is that seal. A later trace can score higher after the
+    basin opens, and that gain is not a road removal.
+    """
+    if width < 8 or height < 8 or len(before) != width * height or len(after) != width * height:
+        return False
+    doomed = bytearray(width * height)
+    for index, (was_ink, still_ink) in enumerate(zip(before, after, strict=True)):
+        if was_ink and not still_ink:
+            doomed[index] = 1
+    if not any(doomed):
+        return False
+    outside = _outside_mask(before, width, height)
+    for hole in _contained_holes(before, width, height, outside):
+        if any(_casing_seal_pixels(width, height, doomed, outside, hole)):
+            return True
+    return False
 
 
 def clear_projected_casings(
