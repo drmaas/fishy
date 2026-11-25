@@ -8,11 +8,14 @@ from unittest.mock import patch
 
 from fishy_pipeline.states.wi import contours
 from fishy_pipeline.states.wi.depth_tag import (
+    JOIN_MAX_ANGLE_DEG,
     Label,
     Line,
     WaterPart,
     TaggedLine,
     assign_depths,
+    join_gap_m_for_pixel,
+    join_open_strokes,
     assignment_to_feet,
     cutline_collection,
     features_to_geojson,
@@ -826,6 +829,69 @@ class CarriedIntervalMergeTest(unittest.TestCase):
         self.assertNotIn("recorded_depth_missing", result["reasons"])
         self.assertNotIn("no_contour_lines", result["reasons"])
         self.assertEqual(result["qa_status"], "needs_review")
+
+
+class StrokeJoinTest(unittest.TestCase):
+    def test_aligned_gap_joins_and_keeps_the_labeled_depth(self):
+        left = Line(coords=((20, 50), (40, 50), (55, 50)), closed=False)
+        right = Line(coords=((68, 50), (90, 50), (110, 50)), closed=False)
+        assignment = assign_depths(
+            [left, right],
+            [Label(x=40, y=50, depth_ft=10, confidence=0.9)],
+            _shore(),
+            max_depth_ft=40,
+            snap_m=5,
+            join_gap_m=20,
+        )
+        self.assertEqual(assignment.unassigned_count, 0)
+        self.assertNotIn("unassigned_fragment", assignment.reasons)
+        tagged = [line for line in assignment.features if line.source == "label"]
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0].depth_ft, 10)
+        self.assertGreater(len(tagged[0].coords), 4)
+
+    def test_a_corner_and_a_depth_conflict_stay_apart(self):
+        east = Line(coords=((20, 50), (40, 50)), closed=False)
+        north = Line(coords=((48, 50), (48, 80)), closed=False)
+        parted = join_open_strokes(
+            [east, north],
+            [],
+            _shore(),
+            max_gap_m=20,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(parted), 2)
+        deep = Line(coords=((20, 20), (40, 20)), closed=False)
+        deeper = Line(coords=((52, 20), (80, 20)), closed=False)
+        conflicted = join_open_strokes(
+            [deep, deeper],
+            [Label(x=30, y=20, depth_ft=10, confidence=0.9), Label(x=70, y=20, depth_ft=20, confidence=0.9)],
+            _shore(),
+            max_gap_m=20,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(conflicted), 2)
+
+    def test_joining_does_not_invent_a_depth_for_unlabeled_strokes(self):
+        left = Line(coords=((20, 40), (40, 40)), closed=False)
+        right = Line(coords=((50, 40), (70, 40)), closed=False)
+        assignment = assign_depths(
+            [left, right],
+            [],
+            _shore(),
+            max_depth_ft=30,
+            snap_m=5,
+            join_gap_m=20,
+        )
+        self.assertEqual(assignment.unassigned_count, 1)
+        self.assertTrue(all(line.depth_ft is None or line.source == "hydro" for line in assignment.features))
+
+    def test_pixel_gap_stays_inside_the_global_caps(self):
+        self.assertEqual(join_gap_m_for_pixel(0.2), 8.0)
+        self.assertAlmostEqual(join_gap_m_for_pixel(1.0), 22.0)
+        self.assertEqual(join_gap_m_for_pixel(4.0), 35.0)
 
 
 if __name__ == "__main__":

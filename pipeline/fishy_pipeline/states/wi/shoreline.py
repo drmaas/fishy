@@ -29,6 +29,11 @@ that opens the basin onto the page.
 affine, with road centerlines inverse-projected into the sheet. A narrow pair
 of ink lines beside that centerline is cleared. A single shore line is left
 in place. The straight-pair detector above still runs on the first trace.
+
+``clear_cartographic_lines`` runs on every sheet after that. It clears long
+straight ink that shares the sheet grid: dashed or slightly rotated section
+lines, the neatline, and border ticks. Georef keeps the new trace only when
+the overlap rises and an irregular basin stays sealed.
 """
 
 from __future__ import annotations
@@ -66,6 +71,24 @@ NEATLINE_SPAN = 0.88
 NEATLINE_FRAME_BOUNDARY = 0.12
 # Neatlines are nearly straight; irregular lake shores can share the span band.
 NEATLINE_MIN_STRAIGHTNESS = 0.40
+# A PLSS line or neatline crosses a real share of the sheet. 12% is under the
+# 14% axis-aligned run clear, so a line that is only nearly horizontal still
+# qualifies, and a short straight beach does not.
+CARTO_MIN_FRACTION = 0.12
+# Section lines share a grid angle. 6° keeps a scanned PLSS stroke and drops a
+# shore that is straight for only part of a bay.
+CARTO_ANGLE_DEG = 6.0
+# Dashed section ink breaks. A gap under 4% of the long side, within 2.5 work
+# pixels of the same line, is still one stroke.
+CARTO_GAP_FRACTION = 0.04
+CARTO_LATERAL_PX = 2.5
+# Crossings add side ink. A shore that depth lines leave along its length does not.
+CARTO_MAX_SIDE_FRACTION = 0.30
+# Ticks are stubs on the neatline: longer than a speck, shorter than a shore.
+CARTO_TICK_MIN_PX = 4
+CARTO_TICK_MAX_FRACTION = 0.045
+# A hole this straight is a section cell or a frame, not a lake basin.
+CARTO_CELL_STRAIGHTNESS = 0.72
 
 
 def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
@@ -2097,3 +2120,456 @@ def _ring_span(ring: tuple[tuple[float, float], ...] | list[tuple[float, float]]
     xs = [point[0] for point in ring]
     ys = [point[1] for point in ring]
     return max(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def clear_cartographic_lines(mask: bytearray, width: int, height: int) -> tuple[int, bool]:
+    """Clear PLSS lines, neatline strokes, and grid ticks on ``mask``.
+
+    Detection runs on the shoreline work grid and is the same for every sheet.
+    A long straight stroke counts when it shares the sheet's grid angle and
+    either spans opposite borders or has a parallel companion. Dashed pieces
+    of one line are joined first. A tick is a short stub on the neatline.
+
+    Returns how many source pixels were cleared, and whether an irregular
+    basin (not a section cell) opened onto the page. The caller keeps the
+    previous trace when that flag is set.
+    """
+    if width < 24 or height < 24 or len(mask) != width * height:
+        return 0, False
+    small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_MAX_SIDE)
+    before = bytearray(small)
+    frame = _detect_frame(small, small_w, small_h)
+    doomed = _cartographic_pixels(small, small_w, small_h, frame)
+    if not any(doomed):
+        return 0, False
+    # A shore that crosses the line is ink off the line. Keep that pixel so
+    # the basin does not open at the crossing. The rest of the line goes.
+    _keep_crossing_pixels(small, doomed, small_w, small_h)
+    _protect_short_irregular_seals(small, small_w, small_h, doomed)
+    for index, flag in enumerate(doomed):
+        if flag:
+            small[index] = 0
+    opened = irregular_basin_opened(before, small, small_w, small_h)
+    cleared = 0
+    if factor == 1:
+        mask[:] = small
+        return sum(1 for was, now in zip(before, small, strict=True) if was and not now), opened
+    for y in range(small_h):
+        row = y * small_w
+        for x in range(small_w):
+            index = row + x
+            if before[index] and not small[index]:
+                y0 = y * factor
+                x0 = x * factor
+                for yy in range(y0, min(height, y0 + factor)):
+                    dest = yy * width
+                    for xx in range(x0, min(width, x0 + factor)):
+                        if mask[dest + xx]:
+                            mask[dest + xx] = 0
+                            cleared += 1
+    return cleared, opened
+
+
+def irregular_basin_opened(
+    before: bytearray,
+    after: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    """True when a cleared pixel connected an irregular hole to the page.
+
+    A section cell is a straight hole. Opening one joins the lake. An
+    irregular hole that reaches the page border was a real basin seal.
+    """
+    if width < 8 or height < 8 or len(before) != width * height or len(after) != width * height:
+        return False
+    if not any(was and not now for was, now in zip(before, after, strict=True)):
+        return False
+    outside = _outside_mask(before, width, height)
+    holes = _contained_holes(before, width, height, outside)
+    if not holes:
+        return False
+    opened = _outside_mask(after, width, height)
+    for hole in holes:
+        if not any(opened[index] for index in hole):
+            continue
+        if _hole_straightness(hole, width, height) >= CARTO_CELL_STRAIGHTNESS:
+            continue
+        return True
+    return False
+
+
+def _cartographic_pixels(
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+) -> bytearray:
+    doomed = bytearray(width * height)
+    long_side = max(width, height)
+    min_len = max(10, int(0.06 * long_side))
+    chains = _straight_ink_chains(mask, width, height, min_len)
+    groups = _collinear_groups(chains, max(4.0, CARTO_GAP_FRACTION * long_side))
+    if frame is not None:
+        _mark_frame_stroke(doomed, width, height, frame)
+    if not groups and not any(doomed):
+        _mark_ticks(doomed, mask, width, height, frame, chains)
+        return doomed
+    grid = _dominant_grid_angle(groups)
+    min_group = CARTO_MIN_FRACTION * long_side
+    chosen: list[int] = []
+    for index, group in enumerate(groups):
+        if grid is None or _fold_dist(group["fold"], grid) > math.radians(CARTO_ANGLE_DEG):
+            continue
+        if group["length"] < min_group:
+            continue
+        if _group_side_fraction(group, mask, width, height) > CARTO_MAX_SIDE_FRACTION:
+            continue
+        if _group_spans_opposite(group, width, height, frame) or _has_parallel_companion(groups, index):
+            chosen.append(index)
+    for index in chosen:
+        for chain in groups[index]["chains"]:
+            for x, y in chain:
+                doomed[y * width + x] = 1
+    _mark_ticks(doomed, mask, width, height, frame, chains)
+    return doomed
+
+
+def _collinear_groups(
+    chains: list[list[tuple[int, int]]],
+    gap_max: float,
+) -> list[dict]:
+    """Union dashed pieces that lie on one straight line."""
+    parent = list(range(len(chains)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    metrics = [_chain_metrics(chain) for chain in chains]
+    for left in range(len(chains)):
+        for right in range(left + 1, len(chains)):
+            if _chains_collinear(metrics[left], metrics[right], gap_max):
+                parent[find(left)] = find(right)
+    buckets: dict[int, list[int]] = {}
+    for index in range(len(chains)):
+        buckets.setdefault(find(index), []).append(index)
+    groups: list[dict] = []
+    for members in buckets.values():
+        member_chains = [chains[index] for index in members]
+        length = sum(metrics[index]["length"] for index in members)
+        # The longest piece sets the line angle. A short dash must not rotate it.
+        lead = max(members, key=lambda index: metrics[index]["length"])
+        groups.append(
+            {
+                "chains": member_chains,
+                "length": length,
+                "fold": metrics[lead]["fold"],
+                "origin": metrics[lead]["origin"],
+                "direction": metrics[lead]["direction"],
+                "points": [point for chain in member_chains for point in chain],
+            }
+        )
+    return groups
+
+
+def _chain_metrics(chain: list[tuple[int, int]]) -> dict:
+    x0, y0 = chain[0]
+    x1, y1 = chain[-1]
+    dx = float(x1 - x0)
+    dy = float(y1 - y0)
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        direction = (1.0, 0.0)
+        length = float(len(chain))
+    else:
+        direction = (dx / length, dy / length)
+    return {
+        "length": length,
+        "origin": (float(x0), float(y0)),
+        "direction": direction,
+        "fold": _fold_grid(math.atan2(dy, dx)),
+        "points": chain,
+    }
+
+
+def _chains_collinear(left: dict, right: dict, gap_max: float) -> bool:
+    if _fold_dist(left["fold"], right["fold"]) > math.radians(CARTO_ANGLE_DEG):
+        return False
+    ox, oy = left["origin"]
+    ux, uy = left["direction"]
+    laterals = [
+        abs((x - ox) * uy - (y - oy) * ux) for x, y in (right["points"][0], right["points"][-1])
+    ]
+    if max(laterals) > CARTO_LATERAL_PX:
+        return False
+    left_along = [
+        (x - ox) * ux + (y - oy) * uy for x, y in (left["points"][0], left["points"][-1])
+    ]
+    right_along = [
+        (x - ox) * ux + (y - oy) * uy for x, y in (right["points"][0], right["points"][-1])
+    ]
+    left_lo, left_hi = min(left_along), max(left_along)
+    right_lo, right_hi = min(right_along), max(right_along)
+    gap = max(left_lo, right_lo) - min(left_hi, right_hi)
+    return gap <= gap_max
+
+
+def _fold_grid(angle: float) -> float:
+    """Line angle folded into ``[0, pi/2)``. Perpendicular strokes share a bin."""
+    half = math.pi / 2.0
+    folded = angle % half
+    if folded < 0:
+        folded += half
+    return folded
+
+
+def _fold_dist(left: float, right: float) -> float:
+    half = math.pi / 2.0
+    delta = abs(left - right) % half
+    return min(delta, half - delta)
+
+
+def _dominant_grid_angle(groups: list[dict]) -> float | None:
+    if not groups:
+        return None
+    bin_width = math.radians(CARTO_ANGLE_DEG)
+    bins: dict[int, float] = {}
+    for group in groups:
+        slot = int(group["fold"] / bin_width)
+        bins[slot] = bins.get(slot, 0.0) + group["length"]
+    slot = max(bins, key=lambda key: bins[key])
+    # The longest bin is the sheet grid. A stroke still has to sit inside the
+    # angle tolerance, so one long dam does not pull the other lines with it.
+    return (slot + 0.5) * bin_width
+
+
+def _group_side_fraction(group: dict, mask: bytearray, width: int, height: int) -> float:
+    points = group["points"]
+    if len(points) < 4:
+        return 1.0
+    ux, uy = group["direction"]
+    px, py = -uy, ux
+    step = max(1, len(points) // 40)
+    hits = 0
+    samples = 0
+    owned = set(points)
+    for x, y in points[::step]:
+        samples += 1
+        for sign in (-3, 3):
+            nx = int(round(x + px * sign))
+            ny = int(round(y + py * sign))
+            if (nx, ny) in owned or nx < 0 or ny < 0 or nx >= width or ny >= height:
+                continue
+            if mask[ny * width + nx]:
+                hits += 1
+                break
+    if samples == 0:
+        return 1.0
+    return hits / samples
+
+
+def _group_spans_opposite(
+    group: dict,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+) -> bool:
+    xs = [point[0] for point in group["points"]]
+    ys = [point[1] for point in group["points"]]
+    tol = 3
+    near_left = min(xs) <= tol or (frame is not None and min(xs) <= frame[0] + tol)
+    near_right = max(xs) >= width - 1 - tol or (frame is not None and max(xs) >= frame[2] - tol)
+    near_top = min(ys) <= tol or (frame is not None and min(ys) <= frame[1] + tol)
+    near_bottom = max(ys) >= height - 1 - tol or (frame is not None and max(ys) >= frame[3] - tol)
+    return (near_left and near_right) or (near_top and near_bottom)
+
+
+def _has_parallel_companion(groups: list[dict], index: int) -> bool:
+    group = groups[index]
+    ox, oy = group["origin"]
+    ux, uy = group["direction"]
+    for other_index, other in enumerate(groups):
+        if other_index == index:
+            continue
+        if _fold_dist(group["fold"], other["fold"]) > math.radians(CARTO_ANGLE_DEG):
+            continue
+        laterals = [
+            abs((x - ox) * uy - (y - oy) * ux) for x, y in (other["points"][0], other["points"][-1])
+        ]
+        separation = min(laterals)
+        if separation < 6.0:
+            continue
+        return True
+    return False
+
+
+def _mark_frame_stroke(
+    doomed: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int],
+) -> None:
+    """The neatline itself. A two-pixel band covers a double-ruled border."""
+    left, top, right, bottom = frame
+    for x in range(max(0, left), min(width, right + 1)):
+        for band in range(-1, 2):
+            for y in (top + band, bottom + band):
+                if 0 <= y < height:
+                    doomed[y * width + x] = 1
+    for y in range(max(0, top), min(height, bottom + 1)):
+        for band in range(-1, 2):
+            for x in (left + band, right + band):
+                if 0 <= x < width:
+                    doomed[y * width + x] = 1
+
+
+def _mark_ticks(
+    doomed: bytearray,
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+    chains: list[list[tuple[int, int]]],
+) -> None:
+    """Short strokes that leave the neatline and stop. A shore does not stop there."""
+    long_side = max(width, height)
+    max_len = max(CARTO_TICK_MIN_PX + 1, int(CARTO_TICK_MAX_FRACTION * long_side))
+    for chain in chains:
+        if not (CARTO_TICK_MIN_PX <= len(chain) <= max_len):
+            continue
+        ends = (chain[0], chain[-1])
+        border = [end for end in ends if _on_sheet_border(end[0], end[1], width, height, frame)]
+        if len(border) != 1:
+            continue
+        dx = chain[-1][0] - chain[0][0]
+        dy = chain[-1][1] - chain[0][1]
+        if math.hypot(dx, dy) < CARTO_TICK_MIN_PX:
+            continue
+        anchor = border[0]
+        # The stub has to leave the border, not run along it.
+        if anchor[0] <= 3 or anchor[0] >= width - 4 or (frame and (abs(anchor[0] - frame[0]) <= 3 or abs(anchor[0] - frame[2]) <= 3)):
+            if abs(dx) > abs(dy):
+                continue
+        else:
+            if abs(dy) > abs(dx):
+                continue
+        for x, y in chain:
+            if mask[y * width + x]:
+                doomed[y * width + x] = 1
+
+
+def _on_sheet_border(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None,
+) -> bool:
+    if x <= 3 or y <= 3 or x >= width - 4 or y >= height - 4:
+        return True
+    if frame is None:
+        return False
+    left, top, right, bottom = frame
+    on_horizontal = (abs(y - top) <= 3 or abs(y - bottom) <= 3) and left - 3 <= x <= right + 3
+    on_vertical = (abs(x - left) <= 3 or abs(x - right) <= 3) and top - 3 <= y <= bottom + 3
+    return on_horizontal or on_vertical
+
+
+def _keep_crossing_pixels(mask: bytearray, doomed: bytearray, width: int, height: int) -> None:
+    keep = bytearray(width * height)
+    for index, flag in enumerate(doomed):
+        if not flag or not mask[index]:
+            continue
+        y, x = divmod(index, width)
+        for dy in (-1, 0, 1):
+            yy = y + dy
+            if yy < 0 or yy >= height:
+                continue
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                xx = x + dx
+                if xx < 0 or xx >= width:
+                    continue
+                neighbor = yy * width + xx
+                if mask[neighbor] and not doomed[neighbor]:
+                    keep[index] = 1
+                    break
+    for index, flag in enumerate(keep):
+        if flag:
+            doomed[index] = 0
+
+
+def _protect_short_irregular_seals(
+    mask: bytearray,
+    width: int,
+    height: int,
+    doomed: bytearray,
+) -> None:
+    """Keep a short straight shore. A section line is longer than this and stays doomed."""
+    if not any(doomed):
+        return
+    outside = _outside_mask(mask, width, height)
+    holes = _contained_holes(mask, width, height, outside)
+    limit = CARTO_MIN_FRACTION * max(width, height)
+    for hole in holes:
+        if _hole_straightness(hole, width, height) >= CARTO_CELL_STRAIGHTNESS:
+            continue
+        seal = _seal_pixels_for_hole(mask, width, height, doomed, outside, hole)
+        for component in _mask_components(seal, width, height):
+            if len(component) >= limit:
+                continue
+            for index in component:
+                doomed[index] = 0
+
+
+def _hole_straightness(hole: list[int], width: int, height: int) -> float:
+    filled = bytearray(width * height)
+    for index in hole:
+        filled[index] = 1
+    ring = _trace_outer(filled, width, height)
+    if len(ring) < 8:
+        return 0.0
+    return _ring_straightness(ring)
+
+
+def _seal_pixels_for_hole(
+    mask: bytearray,
+    width: int,
+    height: int,
+    doomed: bytearray,
+    outside: bytearray,
+    hole: list[int],
+) -> bytearray:
+    """Doomed pixels of this hole that also reach the page through doomed ink."""
+    protect = bytearray(width * height)
+    if not hole or not any(doomed):
+        return protect
+    hole_mask = bytearray(width * height)
+    for index in hole:
+        hole_mask[index] = 1
+    opened = _outside_mask(mask, width, height, also_passable=doomed)
+    if not any(opened[index] for index in hole):
+        return protect
+    candidates: list[int] = []
+    for index, flag in enumerate(doomed):
+        if not flag:
+            continue
+        y, x = divmod(index, width)
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < width and 0 <= ny < height and hole_mask[ny * width + nx]:
+                candidates.append(index)
+                break
+    reachable = _doomed_reaching_outside(doomed, width, height, outside)
+    for index in candidates:
+        if reachable[index]:
+            protect[index] = 1
+    return protect
+
+
+def _mask_components(mask: bytearray, width: int, height: int) -> list[list[int]]:
+    _labels, components = _label_components(mask, width, height)
+    return components

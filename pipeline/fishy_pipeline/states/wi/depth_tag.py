@@ -28,6 +28,17 @@ ISLAND_LAND_FRACTION = 0.35
 # A second depth is a conflict when it is at least half the winning count and not a single stray.
 LABEL_CONFLICT_RATIO = 0.5
 INSIDE_FRACTION = 0.5
+# A printed break (a numeral, a tick, or a section stroke) is a few pixels on
+# the sheet. 22 px is just past the 18 px self-closure in the tracer and under
+# the 28 px label snap, so the next contour, which sits off to the side, does
+# not meet. The meter cap is the short-fragment length: a longer bridge would
+# connect two separate lines.
+JOIN_GAP_PX = 22.0
+JOIN_GAP_MIN_M = 8.0
+JOIN_GAP_MAX_M = 35.0
+# Tangents and the gap chord must agree. 25° admits a gentle curve across a
+# short break and rejects a cove corner or a jump to the next depth.
+JOIN_MAX_ANGLE_DEG = 25.0
 
 
 @dataclass(frozen=True)
@@ -253,6 +264,203 @@ def assignment_to_feet(assignment: Assignment) -> Assignment:
     )
 
 
+def join_gap_m_for_pixel(pixel_size_m: float) -> float:
+    """Ground gap for ``JOIN_GAP_PX`` at this sheet's pixel size, clamped."""
+    if not math.isfinite(pixel_size_m) or pixel_size_m <= 0:
+        return JOIN_GAP_MAX_M
+    return min(JOIN_GAP_MAX_M, max(JOIN_GAP_MIN_M, pixel_size_m * JOIN_GAP_PX))
+
+
+def join_open_strokes(
+    lines: list[Line],
+    labels: list[Label],
+    parts: list[WaterPart],
+    *,
+    max_gap_m: float,
+    max_angle_deg: float,
+    snap_m: float,
+) -> list[Line]:
+    """Join open contour ends that continue each other.
+
+    Each end joins at most once. The gap and both outward tangents have to
+    agree, and labeled depths have to be the same depth when both ends have
+    one. A section line is not a contour and is left alone. Closing a ring
+    does not write a depth; later propagation still has to earn it.
+    """
+    if max_gap_m <= 0 or max_angle_deg <= 0 or len(lines) < 1:
+        return list(lines)
+    snapped = _snap_labels(lines, labels, snap_m)
+    depths: list[int | None] = []
+    blocked: list[bool] = []
+    for index, line in enumerate(lines):
+        summary = _label_summary(snapped.get(index, []))
+        if summary is None:
+            depths.append(None)
+            blocked.append(False)
+        else:
+            depth, _confidence, conflict = summary
+            depths.append(depth)
+            blocked.append(conflict)
+    open_ids = [
+        index
+        for index, line in enumerate(lines)
+        if not line.closed and len(line.coords) >= 2 and not _is_section_line(line, parts)
+    ]
+    links: dict[tuple[int, int], tuple[int, int]] = {}
+    candidates: list[tuple[float, float, int, int, int, int]] = []
+    for left_pos, left in enumerate(open_ids):
+        for right in open_ids[left_pos:]:
+            ends = ((0, 1),) if left == right else ((0, 0), (0, 1), (1, 0), (1, 1))
+            for left_end, right_end in ends:
+                if left == right and left_end == right_end:
+                    continue
+                gap, angle = _join_cost(lines[left].coords, left_end, lines[right].coords, right_end)
+                if gap > max_gap_m or angle > max_angle_deg:
+                    continue
+                if not _depths_agree(depths[left], blocked[left], depths[right], blocked[right]):
+                    continue
+                candidates.append((gap, angle, left, left_end, right, right_end))
+    candidates.sort()
+    used: set[tuple[int, int]] = set()
+    for _gap, _angle, left, left_end, right, right_end in candidates:
+        if (left, left_end) in used or (right, right_end) in used:
+            continue
+        links[(left, left_end)] = (right, right_end)
+        links[(right, right_end)] = (left, left_end)
+        used.add((left, left_end))
+        used.add((right, right_end))
+    consumed: set[int] = set()
+    output: list[Line | None] = [None] * len(lines)
+
+    def _store(index: int) -> None:
+        if index in consumed:
+            return
+        merged, members = _walk_joined(lines, links, index)
+        if len(members) == 1 and not merged.closed:
+            return
+        output[min(members)] = merged
+        consumed.update(members)
+
+    for index in open_ids:
+        if index in consumed:
+            continue
+        if links.get((index, 0)) == (index, 1):
+            _store(index)
+            continue
+        linked = ((index, 0) in links, (index, 1) in links)
+        if linked == (False, False):
+            continue
+        # Start at a free end so a middle piece is not emitted twice.
+        if linked == (True, True):
+            continue
+        _store(index)
+    for index in open_ids:
+        # A loop has no free end. One start walks it and the rest are consumed.
+        if index not in consumed and (index, 0) in links and (index, 1) in links:
+            _store(index)
+    result: list[Line] = []
+    for index, line in enumerate(lines):
+        if index in consumed and output[index] is None:
+            continue
+        result.append(output[index] if output[index] is not None else line)
+    return result
+
+
+def _depths_agree(
+    left: int | None,
+    left_blocked: bool,
+    right: int | None,
+    right_blocked: bool,
+) -> bool:
+    if left_blocked or right_blocked:
+        return False
+    if left is None or right is None:
+        return True
+    return left == right
+
+
+def _join_cost(
+    left: tuple[tuple[float, float], ...],
+    left_end: int,
+    right: tuple[tuple[float, float], ...],
+    right_end: int,
+) -> tuple[float, float]:
+    a = left[0] if left_end == 0 else left[-1]
+    b = right[0] if right_end == 0 else right[-1]
+    chord = (b[0] - a[0], b[1] - a[1])
+    gap = math.hypot(chord[0], chord[1])
+    out_a = _outward(left, left_end)
+    out_b = _outward(right, right_end)
+    angle = max(_angle_deg(out_a, chord), _angle_deg(out_b, (-chord[0], -chord[1])))
+    return gap, angle
+
+
+def _outward(coords: tuple[tuple[float, float], ...], end: int) -> tuple[float, float]:
+    if end == 0:
+        x1, y1 = coords[0]
+        x2, y2 = coords[1]
+    else:
+        x1, y1 = coords[-1]
+        x2, y2 = coords[-2]
+    return (x1 - x2, y1 - y2)
+
+
+def _angle_deg(left: tuple[float, float], right: tuple[float, float]) -> float:
+    llen = math.hypot(left[0], left[1])
+    rlen = math.hypot(right[0], right[1])
+    if llen < 1e-9 or rlen < 1e-9:
+        return 180.0
+    cos = (left[0] * right[0] + left[1] * right[1]) / (llen * rlen)
+    cos = max(-1.0, min(1.0, cos))
+    return math.degrees(math.acos(cos))
+
+
+def _walk_joined(
+    lines: list[Line],
+    links: dict[tuple[int, int], tuple[int, int]],
+    start: int,
+) -> tuple[Line, set[int]]:
+    if links.get((start, 0)) == (start, 1) or links.get((start, 1)) == (start, 0):
+        return Line(coords=lines[start].coords, closed=True), {start}
+    # Enter at the free end so the walk leaves through the joined end.
+    if (start, 0) not in links:
+        enter = 0
+    elif (start, 1) not in links:
+        enter = 1
+    else:
+        enter = 0
+    coords = _emit_from(lines[start].coords, enter)
+    members = {start}
+    line_index = start
+    leave = 1 - enter
+    closed = False
+    guard = 0
+    while (line_index, leave) in links and guard <= len(lines) + 1:
+        guard += 1
+        nxt, nxt_enter = links[(line_index, leave)]
+        if nxt == start:
+            closed = True
+            break
+        if nxt in members:
+            break
+        piece = _emit_from(lines[nxt].coords, nxt_enter)
+        if coords and piece and coords[-1] == piece[0]:
+            coords.extend(piece[1:])
+        else:
+            coords.extend(piece)
+        members.add(nxt)
+        line_index = nxt
+        leave = 1 - nxt_enter
+    return Line(coords=tuple(coords), closed=closed), members
+
+
+def _emit_from(coords: tuple[tuple[float, float], ...], enter: int) -> list[tuple[float, float]]:
+    points = list(coords)
+    if enter == 1:
+        points.reverse()
+    return points
+
+
 def assign_depths(
     lines: list[Line],
     labels: list[Label],
@@ -261,6 +469,8 @@ def assign_depths(
     max_depth_ft: float | None,
     snap_m: float,
     interval_ft: int | None = None,
+    join_gap_m: float | None = None,
+    join_angle_deg: float = JOIN_MAX_ANGLE_DEG,
 ) -> Assignment:
     """Tag lines and add the hydro shoreline as depth 0.
 
@@ -271,6 +481,16 @@ def assign_depths(
     """
     if snap_m <= 0:
         raise ValueError("snap distance must be positive")
+    gap_m = JOIN_GAP_MAX_M if join_gap_m is None else join_gap_m
+    if gap_m > 0 and lines:
+        lines = join_open_strokes(
+            lines,
+            labels,
+            parts,
+            max_gap_m=gap_m,
+            max_angle_deg=join_angle_deg,
+            snap_m=snap_m,
+        )
     kept = [line for line in lines if _mostly_inside(line, parts)]
     kept = [line for line in kept if not _is_section_line(line, parts)]
     snapped = _snap_labels(kept, labels, snap_m)

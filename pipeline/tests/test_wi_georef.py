@@ -14,12 +14,14 @@ from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
     MAX_ANISOTROPY,
     Affine,
+    GroundControlPoint,
     Registration,
     ThinPlateSpline,
     anisotropy,
     fit_affine,
     fit_similarity,
     polygon_iou,
+    prepare_control_points,
     register_shoreline,
     union_polygon_iou,
 )
@@ -29,6 +31,7 @@ from fishy_pipeline.states.wi.shoreline import (
     MAX_ROAD_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
+    clear_cartographic_lines,
     clear_projected_casings,
     extract_shoreline,
     extract_shoreline_candidates,
@@ -2520,6 +2523,105 @@ class RoadCenterlineTest(unittest.TestCase):
         column, row = roads.pixel_from_map(affine, east, north)
         self.assertAlmostEqual(column, 30.0)
         self.assertAlmostEqual(row, 40.0)
+
+
+class CartographicLineTest(unittest.TestCase):
+    def test_section_line_across_a_lake_is_cleared_and_the_basin_stays_shut(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        lake = [(40, 36), (78, 24), (118, 40), (132, 78), (96, 112), (48, 104), (28, 70)]
+        _mask_polyline(mask, width, lake, close=True)
+        for y in range(height):
+            mask[y * width + 100] = 1
+        cleared, opened = clear_cartographic_lines(mask, width, height)
+        self.assertGreater(cleared, 20)
+        self.assertFalse(opened)
+        self.assertEqual(mask[70 * width + 100], 0)
+        self.assertEqual(mask[36 * width + 40], 1)
+
+    def test_opening_an_irregular_shore_is_reported(self):
+        width, height = 180, 120
+        mask = bytearray(width * height)
+        for x in range(width):
+            mask[8 * width + x] = 1
+        left = [(36, 28), (40, 48), (34, 70), (42, 90)]
+        right = [(150, 90), (158, 70), (148, 48), (154, 28)]
+        ring = left + [(42, 100), (154, 100)] + right
+        _mask_polyline(mask, width, ring, close=True)
+        _cleared, opened = clear_cartographic_lines(mask, width, height)
+        self.assertTrue(opened)
+
+
+class ControlPointTest(unittest.TestCase):
+    def test_shared_map_coordinate_is_dropped_and_the_affine_fits(self):
+        points = [
+            GroundControlPoint(0, 0, 500000, 300000),
+            GroundControlPoint(100, 0, 500100, 300000),
+            GroundControlPoint(100, 80, 500100, 300080),
+            GroundControlPoint(0, 80, 500000, 300080),
+            GroundControlPoint(40, 10, 500100, 300080),
+        ]
+        prepared = prepare_control_points(points)
+        self.assertTrue(prepared.usable)
+        self.assertEqual(prepared.dropped, 1)
+        self.assertEqual(len(prepared.points), 4)
+        affine = fit_affine(
+            [(point.pixel, point.line) for point in prepared.points],
+            [(point.easting, point.northing) for point in prepared.points],
+        )
+        for point in prepared.points:
+            easting, northing = affine.apply(point.pixel, point.line)
+            self.assertLess(math.hypot(easting - point.easting, northing - point.northing), 1e-3)
+
+    def test_too_few_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 1, 1),
+                GroundControlPoint(5, 1, 1, 1),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        self.assertIsNotNone(prepared.reason)
+        assert prepared.reason is not None
+        self.assertTrue(prepared.reason.startswith("degenerate control points"))
+        self.assertIn("1 remain", prepared.reason)
+
+    def test_collinear_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(10, 0, 10, 0),
+                GroundControlPoint(30, 0, 30, 0),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("collinear", prepared.reason)
+
+    def test_outlier_residual_is_dropped_and_a_consistent_set_is_not(self):
+        square = [
+            GroundControlPoint(0, 0, 0, 0),
+            GroundControlPoint(100, 0, 100, 0),
+            GroundControlPoint(100, 100, 100, 100),
+            GroundControlPoint(0, 100, 0, 100),
+        ]
+        consistent = prepare_control_points(square)
+        self.assertTrue(consistent.usable)
+        self.assertEqual(consistent.dropped, 0)
+        wild = prepare_control_points(square + [GroundControlPoint(50, 50, 50, 5000)])
+        self.assertTrue(wild.usable)
+        self.assertEqual(len(wild.points), 4)
+        self.assertNotIn(5000, [point.northing for point in wild.points])
+
+
+def _mask_polyline(mask: bytearray, width: int, ring: list[tuple[int, int]], *, close: bool) -> None:
+    points = list(ring)
+    if close:
+        points = points + [points[0]]
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        for x, y in _bresenham(x1, y1, x2, y2):
+            if 0 <= x < width and 0 <= y < len(mask) // width:
+                mask[y * width + x] = 1
 
 
 if __name__ == "__main__":

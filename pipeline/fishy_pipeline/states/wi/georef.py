@@ -52,13 +52,15 @@ from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
 from fishy_pipeline.states.wi.register import (
     DEFAULT_GCP_COUNT,
+    GroundControlPoint,
     polygon_iou,
+    prepare_control_points,
     register_shoreline,
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
 from fishy_pipeline.states.wi.raster import LETTER_LONG_INCHES, select_sheet_pages
-from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
+from fishy_pipeline.states.wi.register import registration_from_reviewed
 from fishy_pipeline.states.wi.roads import (
     fetch_road_centerlines,
     project_roads_to_pixels,
@@ -71,6 +73,7 @@ from fishy_pipeline.states.wi.shoreline import (
     NEATLINE_MIN_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
+    clear_cartographic_lines,
     clear_projected_casings,
     cleared_hits_basin_seal,
     extract_shoreline,
@@ -94,6 +97,7 @@ _REASON_ORDER = (
     "shoreline_not_found",
     "registration_error",
     "warp_failed",
+    "degenerate_gcps",
 )
 
 
@@ -610,8 +614,9 @@ def _georeference_entry(
         multi_sheet=multi_sheet,
         shoreline_found=True,
         registration_error=False,
-        warp_failed=warp_status == "failed",
+        warp_failed=warp_status == "failed" and not _is_degenerate_gcp_error(warp_error),
         several_pages_passed=queue_unvalidated_stitch,
+        degenerate_gcps=_is_degenerate_gcp_error(warp_error),
     )
     public_sheets = [_public_sheet(sheet) for sheet in sheets]
     for page in missed_pages:
@@ -705,6 +710,8 @@ def _georeference_reviewed(
     try:
         registration = registration_from_reviewed(shoreline, list(water.ring), gcps, method=method)
     except Exception as error:
+        message = str(error)[:500]
+        degenerate = _is_degenerate_gcp_error(message)
         return _unscored(
             base,
             reasons=_reasons(
@@ -713,14 +720,15 @@ def _georeference_reviewed(
                 low_iou=False,
                 multi_sheet=multi_sheet,
                 shoreline_found=True,
-                registration_error=True,
+                registration_error=not degenerate,
                 warp_failed=False,
+                degenerate_gcps=degenerate,
             ),
             hydrotype=hydrotype,
             waterbody_name=waterbody_name,
             multi_sheet=multi_sheet,
             flowage=flowage,
-            error=str(error)[:500],
+            error=message,
         )
     gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
     iou = round(registration.iou, 6)
@@ -764,7 +772,8 @@ def _georeference_reviewed(
         multi_sheet=multi_sheet,
         shoreline_found=True,
         registration_error=False,
-        warp_failed=warp_status == "failed",
+        warp_failed=warp_status == "failed" and not _is_degenerate_gcp_error(warp_error),
+        degenerate_gcps=_is_degenerate_gcp_error(warp_error),
     )
     return {
         **base,
@@ -826,6 +835,11 @@ _LEGEND_MIN_BOXINESS = 0.90
 # Nine percent of the page, and six percent with ink just over the legend cap,
 # used to skip that check once overlap reached 0.68.
 _SMALL_RING_AREA = 0.12
+# Wiping a sheet grid re-fits the same shore by a few hundredths. On the
+# synthetic fixture that lifts a deliberate mismatch from 0.719 to 0.758 and
+# across the publish cutoff. 0.05 is a different shore, so a smaller move
+# keeps the first registration.
+_CARTO_MIN_GAIN = 0.05
 
 
 def _score_sheet_pages(
@@ -867,6 +881,14 @@ def _score_sheet_pages(
                 hydro_ring,
                 gcp_count,
                 road_lines,
+                picked,
+            )
+        if picked:
+            picked = _apply_cartographic_mask(
+                image,
+                page_raster,
+                hydro_ring,
+                gcp_count,
                 picked,
             )
         for row in picked:
@@ -1048,6 +1070,70 @@ def _apply_vector_road_mask(
         row["road_mask_accepted"] = True
         row["road_iou_before"] = old_iou
         row["road_iou_after"] = new_iou
+    return new_picked
+
+
+def _apply_cartographic_mask(
+    image,
+    page: Path,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+    picked: list[dict],
+) -> list[dict]:
+    """Clear grid lines, then keep the new shore only when overlap rises.
+
+    The first registration stays when the clear opens an irregular basin or
+    the weakest kept ring rises by less than ``_CARTO_MIN_GAIN``. A second
+    ring that scores well must not hide one that falls. A grid wipe can nudge
+    the same shore by a few hundredths; that is not a new shore.
+    """
+    old_iou = min(float(row["registration"].iou) for row in picked)
+    try:
+        mask = _dark_mask(image)
+        _clear_cased_roads(mask, image.width, image.height)
+        cleared, opened = clear_cartographic_lines(mask, image.width, image.height)
+    except (OSError, ValueError, ZeroDivisionError):
+        return picked
+    if cleared <= 0 or opened:
+        for row in picked:
+            row["cartographic_pixels_cleared"] = cleared
+            row["cartographic_mask_accepted"] = False
+            row["cartographic_basin_opened"] = opened
+        return picked
+    candidates, _error = _collect_page_candidates(
+        image,
+        page,
+        hydro_ring,
+        gcp_count,
+        mask,
+    )
+    candidates.extend(
+        _spur_cleaned_candidates(
+            candidates,
+            image=image,
+            hydro_ring=hydro_ring,
+            gcp_count=gcp_count,
+            page=page,
+        )
+    )
+    candidates = _drop_margin_enclosures(candidates)
+    new_picked = _pick_page_basins(candidates, hydro_ring)
+    new_iou = min((float(row["registration"].iou) for row in new_picked), default=None)
+    accept = new_iou is not None and bool(new_picked) and new_iou >= old_iou + _CARTO_MIN_GAIN
+    if not accept or new_iou is None:
+        for row in picked:
+            row["cartographic_pixels_cleared"] = cleared
+            row["cartographic_mask_accepted"] = False
+            row["cartographic_basin_opened"] = False
+            if new_iou is not None:
+                row["cartographic_iou_after"] = new_iou
+        return picked
+    for row in new_picked:
+        row["cartographic_pixels_cleared"] = cleared
+        row["cartographic_mask_accepted"] = True
+        row["cartographic_basin_opened"] = False
+        row["cartographic_iou_before"] = old_iou
+        row["cartographic_iou_after"] = new_iou
     return new_picked
 
 
@@ -1669,6 +1755,13 @@ def _public_sheet(sheet: dict) -> dict:
     if sheet.get("road_pixels_cleared"):
         row["road_pixels_cleared"] = int(sheet["road_pixels_cleared"])
         row["road_mask_accepted"] = bool(sheet.get("road_mask_accepted"))
+    if sheet.get("cartographic_pixels_cleared"):
+        row["cartographic_pixels_cleared"] = int(sheet["cartographic_pixels_cleared"])
+        row["cartographic_mask_accepted"] = bool(sheet.get("cartographic_mask_accepted"))
+        if "cartographic_basin_opened" in sheet:
+            row["cartographic_basin_opened"] = bool(sheet["cartographic_basin_opened"])
+        if sheet.get("cartographic_iou_after") is not None:
+            row["cartographic_iou_after"] = round(float(sheet["cartographic_iou_after"]), 6)
     return row
 
 
@@ -1807,6 +1900,7 @@ def _reasons(
     registration_error: bool,
     warp_failed: bool,
     several_pages_passed: bool = False,
+    degenerate_gcps: bool = False,
 ) -> list[str]:
     found = []
     if flowage:
@@ -1827,6 +1921,8 @@ def _reasons(
     _ = multi_sheet
     if warp_failed:
         found.append("warp_failed")
+    if degenerate_gcps:
+        found.append("degenerate_gcps")
     order = {name: index for index, name in enumerate(_REASON_ORDER)}
     return sorted(found, key=lambda name: order[name])
 
@@ -1916,6 +2012,43 @@ def _page_rasters(entry: dict, raster: Path) -> list[Path]:
     return maps or [path for path, _long_inches in described]
 
 
+def _is_degenerate_gcp_error(error: str | None) -> bool:
+    return bool(error) and error.startswith("degenerate control points")
+
+
+def _affine_is_usable(affine: dict[str, float] | None) -> bool:
+    if not affine:
+        return False
+    try:
+        values = [float(affine[key]) for key in ("a", "b", "tx", "c", "d", "ty")]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not all(math.isfinite(value) for value in values):
+        return False
+    determinant = values[0] * values[4] - values[1] * values[3]
+    return abs(determinant) >= 1e-12
+
+
+def _prepared_gcp_dicts(gcps: list[dict]) -> tuple[list[dict] | None, str | None]:
+    points: list[GroundControlPoint] = []
+    for item in gcps:
+        try:
+            points.append(
+                GroundControlPoint(
+                    pixel=float(item["pixel"]),
+                    line=float(item["line"]),
+                    easting=float(item["easting"]),
+                    northing=float(item["northing"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    prepared = prepare_control_points(points)
+    if not prepared.usable:
+        return None, prepared.reason or "degenerate control points"
+    return [point.as_dict() for point in prepared.points], None
+
+
 def _warp(
     *,
     raster: Path,
@@ -1928,9 +2061,22 @@ def _warp(
 ) -> tuple[str, Path | None, str | None]:
     if not gdal_available:
         return "unavailable", None, None
+    use_method = method
+    use_gcps = gcps
+    if method != "affine":
+        cleaned, reject = _prepared_gcp_dicts(gcps)
+        if cleaned is None:
+            # The shore affine still places the sheet. A spline through a
+            # duplicate or collinear set does not.
+            if _affine_is_usable(affine):
+                use_method = "affine"
+            else:
+                return "failed", None, reject
+        else:
+            use_gcps = cleaned
     tif_path = out_dir / tif_name
     try:
-        if method == "affine" and affine is not None:
+        if use_method == "affine" and affine is not None:
             staged = out_dir / f"{Path(tif_name).stem}-affine.tif"
             _run(gdal_translate_affine_args(str(raster), str(staged), affine))
             # -dstalpha matches the spline warp: black ink stays a color, not nodata.
@@ -1949,7 +2095,7 @@ def _warp(
             )
         else:
             vrt_path = out_dir / f"{Path(tif_name).stem}.vrt"
-            _run(gdal_translate_gcp_args(str(raster), str(vrt_path), gcps))
+            _run(gdal_translate_gcp_args(str(raster), str(vrt_path), use_gcps))
             _run(gdalwarp_tps_args(str(vrt_path), str(tif_path)))
     except RuntimeError as error:
         return "failed", None, str(error)[:500]

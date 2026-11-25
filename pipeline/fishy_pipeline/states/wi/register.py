@@ -34,6 +34,21 @@ ROTATION_STEP_DEG = 6
 MAX_ANISOTROPY = 1.40
 # A frame edge this long, relative to the ring, is a sheet cut.
 _PARTIAL_CUT_FRACTION = 0.08
+# Two control points closer than this in map meters are one ground location.
+# 1 m is under the spacing of shore samples on a 24K lake and still merges a
+# hydro vertex that two pixels snapped to.
+GCP_MAP_EPS_M = 1.0
+# Pixel twins closer than this are one sample. Shore control points are spread
+# around the ring, so 1.5 px does not merge a real pair.
+GCP_PIXEL_EPS = 1.5
+# An outlier has to beat both a multiple of the median residual and a share of
+# the control cloud. A consistent fit stays inside both.
+GCP_OUTLIER_MEDIAN_FACTOR = 8.0
+GCP_OUTLIER_SPAN_FRACTION = 0.15
+# Smaller pixel spread over the larger. Below this the points do not determine
+# an affine: they are collinear or piled on one spot.
+GCP_MIN_SPREAD_RATIO = 1.0e-3
+GCP_MIN_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -50,6 +65,23 @@ class GroundControlPoint:
             "easting": self.easting,
             "northing": self.northing,
         }
+
+
+@dataclass(frozen=True)
+class PreparedControl:
+    """Control points after duplicate, outlier, and degeneracy checks.
+
+    ``reason`` is set when fewer than three non-collinear points remain. The
+    caller fails closed instead of warping that set.
+    """
+
+    points: tuple[GroundControlPoint, ...]
+    dropped: int
+    reason: str | None
+
+    @property
+    def usable(self) -> bool:
+        return self.reason is None
 
 
 @dataclass(frozen=True)
@@ -332,6 +364,116 @@ def _register_closed(
     )
 
 
+def prepare_control_points(gcps: list[GroundControlPoint]) -> PreparedControl:
+    """Drop duplicate, near-coincident, and outlier control points.
+
+    The same rules run for every warp. Near-coincident pixel coordinates or
+    near-coincident map coordinates are one observation. A residual that is
+    many times the median and a large share of the cloud is dropped. The set
+    is unusable when fewer than three non-collinear points remain.
+    """
+    finite = [
+        gcp
+        for gcp in gcps
+        if all(math.isfinite(value) for value in (gcp.pixel, gcp.line, gcp.easting, gcp.northing))
+    ]
+    unique: list[GroundControlPoint] = []
+    for gcp in finite:
+        if any(_control_points_coincide(gcp, kept) for kept in unique):
+            continue
+        unique.append(gcp)
+    cleaned = _drop_outlier_controls(unique)
+    dropped = len(gcps) - len(cleaned)
+    if len(cleaned) < GCP_MIN_COUNT:
+        return PreparedControl(
+            points=tuple(cleaned),
+            dropped=dropped,
+            reason=f"degenerate control points: {len(cleaned)} remain, need {GCP_MIN_COUNT} non-collinear",
+        )
+    if _control_spread_ratio(cleaned) < GCP_MIN_SPREAD_RATIO:
+        return PreparedControl(
+            points=tuple(cleaned),
+            dropped=dropped,
+            reason="degenerate control points: collinear",
+        )
+    return PreparedControl(points=tuple(cleaned), dropped=dropped, reason=None)
+
+
+def _control_points_coincide(left: GroundControlPoint, right: GroundControlPoint) -> bool:
+    if math.hypot(left.pixel - right.pixel, left.line - right.line) <= GCP_PIXEL_EPS:
+        return True
+    return math.hypot(left.easting - right.easting, left.northing - right.northing) <= GCP_MAP_EPS_M
+
+
+def _drop_outlier_controls(points: list[GroundControlPoint]) -> list[GroundControlPoint]:
+    """Drop a point the other points cannot predict.
+
+    Leave-one-out keeps one wild residual from pulling the fit and hiding
+    itself. A consistent set predicts each held-out point inside the limit,
+    so a normal warp does not lose a control point.
+    """
+    if len(points) < GCP_MIN_COUNT + 1:
+        return points
+    worst: int | None = None
+    worst_residual = 0.0
+    for index in range(len(points)):
+        others = points[:index] + points[index + 1 :]
+        if len(others) < GCP_MIN_COUNT:
+            continue
+        try:
+            affine = fit_affine(
+                [(point.pixel, point.line) for point in others],
+                [(point.easting, point.northing) for point in others],
+            )
+        except ValueError:
+            continue
+        other_residuals = []
+        for point in others:
+            easting, northing = affine.apply(point.pixel, point.line)
+            other_residuals.append(math.hypot(easting - point.easting, northing - point.northing))
+        other_residuals.sort()
+        median = other_residuals[len(other_residuals) // 2]
+        xs = [point.easting for point in others]
+        ys = [point.northing for point in others]
+        span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        limit = max(GCP_OUTLIER_MEDIAN_FACTOR * median, GCP_OUTLIER_SPAN_FRACTION * span, 1.0)
+        held = points[index]
+        easting, northing = affine.apply(held.pixel, held.line)
+        residual = math.hypot(easting - held.easting, northing - held.northing)
+        if residual > limit and residual > worst_residual:
+            worst = index
+            worst_residual = residual
+    if worst is None:
+        return points
+    kept = points[:worst] + points[worst + 1 :]
+    if len(kept) <= GCP_MIN_COUNT:
+        return kept
+    return _drop_outlier_controls(kept)
+
+
+def _control_spread_ratio(points: list[GroundControlPoint]) -> float:
+    count = len(points)
+    if count < 2:
+        return 0.0
+    cx = sum(point.pixel for point in points) / count
+    cy = sum(point.line for point in points) / count
+    xx = yy = xy = 0.0
+    for point in points:
+        dx = point.pixel - cx
+        dy = point.line - cy
+        xx += dx * dx
+        yy += dy * dy
+        xy += dx * dy
+    trace = xx + yy
+    det = xx * yy - xy * xy
+    disc = math.sqrt(max(0.0, trace * trace / 4.0 - det))
+    major = trace / 2.0 + disc
+    minor = trace / 2.0 - disc
+    if major <= 1e-12:
+        return 0.0
+    return max(0.0, minor) / major
+
+
 def registration_from_reviewed(
     pixel_ring: list[tuple[float, float]],
     hydro_ring: list[tuple[float, float]],
@@ -340,6 +482,10 @@ def registration_from_reviewed(
     method: str = "tps",
 ) -> Registration:
     """Score a shoreline using human-placed control points."""
+    prepared = prepare_control_points(gcps)
+    if not prepared.usable:
+        raise ValueError(prepared.reason or "degenerate control points")
+    gcps = list(prepared.points)
     if len(gcps) < 3:
         raise ValueError("reviewed registration needs at least 3 GCPs")
     sources = [(gcp.pixel, gcp.line) for gcp in gcps]
@@ -421,10 +567,14 @@ def _registration_from_affine(
         snap_limit=max(affine_error * 3.0, 1.0),
         on_frame=on_frame,
     )
+    prepared = prepare_control_points(gcps)
+    gcps = list(prepared.points)
     affine_ring = [affine.apply(col, row) for col, row in pixel_ring]
     hydro_list = list(hydro_ring)
     affine_iou = _overlap(affine_ring, on_frame, hydro_list)
     try:
+        if not prepared.usable:
+            raise ValueError(prepared.reason or "degenerate control points")
         tps = fit_tps(gcps)
         tps_ring = [tps.apply(col, row) for col, row in pixel_ring]
         tps_iou = _overlap(tps_ring, on_frame, hydro_list)
