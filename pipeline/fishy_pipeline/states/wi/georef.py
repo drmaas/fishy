@@ -1083,12 +1083,14 @@ def _apply_cartographic_mask(
 ) -> list[dict]:
     """Clear grid lines, then keep the new shore only when the published score rises.
 
-    The compared values are the gate scores: a partial sheet uses the worse
-    of its registration IoU and its full-hydro IoU. The new ring has to
-    cover at least half the previous ring. A clear that opens any contained
-    hole is dropped unless the cleared pixels miss the current shore.
+    The compared value is the score ``_select_lake_sheets`` will publish:
+    the best ring on a closed page, and the minimum when any ring is partial.
+    Every old ring and every new ring has to share at least half its area
+    with the other set. Dropping a ring must not raise that minimum. A clear
+    that opens any contained hole is dropped unless the cleared pixels miss
+    the current shore.
     """
-    old_iou = min(_published_iou(row, hydro_ring) for row in picked)
+    old_iou = _carto_published_score(picked, hydro_ring)
     try:
         mask = _dark_mask(image)
         _clear_cased_roads(mask, image.width, image.height)
@@ -1125,13 +1127,8 @@ def _apply_cartographic_mask(
     )
     candidates = _drop_margin_enclosures(candidates)
     new_picked = _pick_page_basins(candidates, hydro_ring)
-    new_iou = min((_published_iou(row, hydro_ring) for row in new_picked), default=None)
-    accept = (
-        new_iou is not None
-        and bool(new_picked)
-        and new_iou >= old_iou + _CARTO_MIN_GAIN
-        and _replacement_overlaps(picked, new_picked)
-    )
+    new_iou = _carto_published_score(new_picked, hydro_ring)
+    accept = _cartographic_replacement_accepted(picked, new_picked, hydro_ring)
     if not accept or new_iou is None:
         for row in picked:
             row["cartographic_pixels_cleared"] = cleared
@@ -1793,20 +1790,67 @@ def _published_iou(row: dict, hydro_ring: list[tuple[float, float]]) -> float:
     return min(float(registration.iou), polygon_iou(mapped, list(hydro_ring)))
 
 
+def _carto_published_score(rows: list[dict], hydro_ring: list[tuple[float, float]]) -> float | None:
+    """The score ``_select_lake_sheets`` publishes for this page's rings.
+
+    A closed page keeps its best ring. When any ring is partial, every ring
+    stays in the lake minimum.
+    """
+    if not rows:
+        return None
+    scores = [_published_iou(row, hydro_ring) for row in rows]
+    if any(float(row.get("cut_fraction") or 0.0) >= _PARTIAL_CUT for row in rows):
+        return min(scores)
+    return max(scores)
+
+
 def _replacement_overlaps(old_rows: list[dict], new_rows: list[dict]) -> bool:
-    """True when every new ring covers at least half of some previous ring."""
+    """True when overlap holds in both directions at ``_CARTO_RING_OVERLAP``.
+
+    Every new ring has to cover some old ring, and every old ring has to be
+    covered by some new ring. A second figure cannot take the place of a
+    ring it does not overlap.
+    """
 
     def mapped(row: dict) -> list[tuple[float, float]]:
         registration = row["registration"]
         project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
         return [project(col, line) for col, line in row["ring"]]
 
+    def covers(ring: list[tuple[float, float]], others: list[list[tuple[float, float]]]) -> bool:
+        return any(polygon_iou(ring, other) >= _CARTO_RING_OVERLAP for other in others)
+
     old_rings = [mapped(row) for row in old_rows]
-    for row in new_rows:
-        new_ring = mapped(row)
-        if not any(polygon_iou(new_ring, old) >= _CARTO_RING_OVERLAP for old in old_rings):
+    new_rings = [mapped(row) for row in new_rows]
+    if not old_rings or not new_rings:
+        return False
+    if not all(covers(ring, old_rings) for ring in new_rings):
+        return False
+    return all(covers(ring, new_rings) for ring in old_rings)
+
+
+def _cartographic_replacement_accepted(
+    old_rows: list[dict],
+    new_rows: list[dict],
+    hydro_ring: list[tuple[float, float]],
+) -> bool:
+    """True when the clear raises the score this page will actually publish."""
+    old_score = _carto_published_score(old_rows, hydro_ring)
+    new_score = _carto_published_score(new_rows, hydro_ring)
+    if old_score is None or new_score is None:
+        return False
+    if new_score < old_score + _CARTO_MIN_GAIN:
+        return False
+    if not _replacement_overlaps(old_rows, new_rows):
+        return False
+    # Dropping a ring must not lift the minimum. That is how a weak
+    # replacement inflates a partial page.
+    if len(new_rows) < len(old_rows):
+        old_min = min(_published_iou(row, hydro_ring) for row in old_rows)
+        new_min = min(_published_iou(row, hydro_ring) for row in new_rows)
+        if new_min > old_min:
             return False
-    return bool(new_rows)
+    return True
 
 
 def _full_hydro_iou(sheet: dict, hydro_ring: list[tuple[float, float]]) -> float:
@@ -2090,14 +2134,15 @@ def _warp(
     affine: dict[str, float] | None = None,
     tif_name: str = "warped.tif",
 ) -> tuple[str, Path | None, str | None]:
+    cleaned, reject = _prepared_gcp_dicts(gcps)
+    if cleaned is None:
+        # A rejected control set fails closed with or without GDAL.
+        # It does not fall back to the affine.
+        return "failed", None, reject
     if not gdal_available:
         return "unavailable", None, None
     use_method = method
     use_gcps = gcps
-    cleaned, reject = _prepared_gcp_dicts(gcps)
-    if cleaned is None:
-        # A rejected control set does not fall back to the affine.
-        return "failed", None, reject
     if method != "affine":
         use_gcps = cleaned
     tif_path = out_dir / tif_name

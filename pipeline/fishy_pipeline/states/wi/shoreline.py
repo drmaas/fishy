@@ -2160,6 +2160,11 @@ def clear_cartographic_lines(
             after[index] = 0
     hole_opened = _contained_hole_opened(before, after, small_w, small_h)
     hits_shore = _cleared_hits_rings(doomed, small_w, small_h, factor, shore_rings or [])
+    # Doomed pixels on the passed shore are the shore, including when a gap
+    # already lets the interior leak. Crossing pixels were un-doomed above,
+    # so a section line that only crosses the shore can still be removed.
+    if shore_rings and hits_shore:
+        return 0, True
     # No ring was supplied, so a hole that opens cannot be shown to miss the shore.
     disjoint = bool(shore_rings) and not hits_shore
     if hole_opened and not disjoint:

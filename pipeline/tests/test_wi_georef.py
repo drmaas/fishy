@@ -2551,6 +2551,19 @@ class CartographicLineTest(unittest.TestCase):
         self.assertEqual(bytes(mask), before)
         self.assertEqual(mask[20 * width + 90], 1)
 
+    def test_a_gapped_rectangular_shore_survives(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        rect = [(20, 20), (160, 20), (160, 110), (20, 110)]
+        _mask_polyline(mask, width, rect, close=True)
+        mask[20 * width + 90] = 0
+        before = bytes(mask)
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[rect])
+        self.assertEqual(cleared, 0)
+        self.assertTrue(opened)
+        self.assertEqual(bytes(mask), before)
+        self.assertEqual(mask[20 * width + 40], 1)
+
     def test_a_neatline_tick_is_cleared_and_a_continuing_shore_is_not(self):
         width = height = 800
         mask = bytearray(width * height)
@@ -2576,6 +2589,44 @@ class CartographicLineTest(unittest.TestCase):
         _mask_polyline(mask, width, ring, close=True)
         _cleared, opened = clear_cartographic_lines(mask, width, height)
         self.assertTrue(opened)
+
+
+class CartographicReplacementTest(unittest.TestCase):
+    def test_a_weaker_ring_cannot_replace_a_stronger_one(self):
+        # Old rings score 0.80 on x 0-100 and 0.50 on x 200-280. The new
+        # ring scores 0.66 on the weak box. A closed page publishes 0.80,
+        # and a partial page must not raise its minimum by deleting 0.80.
+        strong = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+        weak = [(200.0, 0.0), (280.0, 0.0), (280.0, 80.0), (200.0, 80.0)]
+        hydro = [(0.0, 0.0), (280.0, 0.0), (280.0, 100.0), (0.0, 100.0)]
+        old = [_scored_ring(strong, 0.80), _scored_ring(weak, 0.50)]
+        new = [_scored_ring(weak, 0.66)]
+        self.assertAlmostEqual(georef._carto_published_score(old, hydro), 0.80)
+        self.assertFalse(georef._replacement_overlaps(old, new))
+        self.assertFalse(georef._cartographic_replacement_accepted(old, new, hydro))
+        old_partial = [_scored_ring(strong, 0.80, cut=0.2), _scored_ring(weak, 0.50, cut=0.2)]
+        new_partial = [_scored_ring(weak, 0.66, cut=0.2)]
+        self.assertFalse(georef._cartographic_replacement_accepted(old_partial, new_partial, hydro))
+
+
+def _scored_ring(ring: list[tuple[float, float]], iou: float, cut: float = 0.0) -> dict:
+    affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+    tps = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 1.0, 0.0),
+        northing_affine=(0.0, 0.0, 1.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=tps,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="affine",
+    )
+    return {"ring": ring, "registration": registration, "cut_fraction": cut}
 
 
 class ControlPointTest(unittest.TestCase):
@@ -2658,6 +2709,38 @@ class ControlPointTest(unittest.TestCase):
         self.assertTrue(wild.usable)
         self.assertEqual(len(wild.points), 4)
         self.assertNotIn(5000, [point.northing for point in wild.points])
+
+    def test_a_rejected_control_set_fails_without_gdal(self):
+        status, _path, reason = georef._warp(
+            raster=Path("missing.tif"),
+            out_dir=Path("."),
+            gcps=[
+                {"pixel": 0, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 10, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 0, "line": 10, "easting": 10, "northing": 10},
+                {"pixel": 10, "line": 10, "easting": 10, "northing": 0},
+            ],
+            gdal_available=False,
+        )
+        self.assertEqual(status, "failed")
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertTrue(reason.startswith("degenerate control points"))
+
+    def test_a_usable_set_stays_unavailable_without_gdal(self):
+        status, _path, reason = georef._warp(
+            raster=Path("missing.tif"),
+            out_dir=Path("."),
+            gcps=[
+                {"pixel": 0, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 100, "line": 0, "easting": 100, "northing": 0},
+                {"pixel": 100, "line": 100, "easting": 100, "northing": 100},
+                {"pixel": 0, "line": 100, "easting": 0, "northing": 100},
+            ],
+            gdal_available=False,
+        )
+        self.assertEqual(status, "unavailable")
+        self.assertIsNone(reason)
 
 
 def _mask_polyline(mask: bytearray, width: int, ring: list[tuple[int, int]], *, close: bool) -> None:

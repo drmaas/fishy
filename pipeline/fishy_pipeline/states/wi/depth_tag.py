@@ -39,9 +39,11 @@ JOIN_GAP_MAX_M = 35.0
 # Tangents and the gap chord must agree. 25° admits a gentle curve across a
 # short break and rejects a cove corner or a jump to the next depth.
 JOIN_MAX_ANGLE_DEG = 25.0
-# Samples along the chord are 1 m apart, finer than the shortest join, so a
-# land crossing between the two ends is not skipped.
-JOIN_CHORD_SAMPLE_M = 1.0
+# 0.25 m is finer than a 0.6 m land bar. A sample also sits just inside each
+# end, so a bar against the stroke is not skipped between the end and the
+# first interior step.
+JOIN_CHORD_SAMPLE_M = 0.25
+JOIN_CHORD_END_M = 0.05
 
 
 @dataclass(frozen=True)
@@ -408,9 +410,16 @@ def _chord_in_water(
     gap = math.hypot(end[0] - start[0], end[1] - start[1])
     if gap <= 0:
         return point_in_water(start[0], start[1], parts)
-    steps = max(2, math.ceil(gap / JOIN_CHORD_SAMPLE_M))
-    for index in range(1, steps):
-        fraction = index / steps
+    inset = min(JOIN_CHORD_END_M, gap / 2.0)
+    distances = [inset]
+    cursor = inset
+    while cursor + JOIN_CHORD_SAMPLE_M < gap - inset:
+        cursor += JOIN_CHORD_SAMPLE_M
+        distances.append(cursor)
+    if gap - inset > distances[-1]:
+        distances.append(gap - inset)
+    for distance in distances:
+        fraction = distance / gap
         x = start[0] + (end[0] - start[0]) * fraction
         y = start[1] + (end[1] - start[1]) * fraction
         if not point_in_water(x, y, parts):

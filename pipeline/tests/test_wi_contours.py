@@ -1011,6 +1011,39 @@ class StrokeJoinTest(unittest.TestCase):
         )
         self.assertEqual(len(full), 1)
 
+    def test_a_narrow_bar_just_inside_an_end_does_not_join(self):
+        # A 0.6 m island sits 0.2 m past the left end. The rest of the chord is water.
+        shore = [
+            WaterPart(
+                exterior=_box(0, 0, 100, 100),
+                holes=(((10.2, 49.0), (10.8, 49.0), (10.8, 51.0), (10.2, 51.0)),),
+            )
+        ]
+        left = Line(coords=((0, 50), (10, 50)), closed=False)
+        right = Line(coords=((30, 50), (40, 50)), closed=False)
+        labels = [
+            Label(x=5, y=50, depth_ft=10, confidence=0.9),
+            Label(x=35, y=50, depth_ft=10, confidence=0.9),
+        ]
+        parted = join_open_strokes(
+            [left, right],
+            labels,
+            shore,
+            max_gap_m=40,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(parted), 2)
+        full = join_open_strokes(
+            [left, right],
+            labels,
+            _shore(),
+            max_gap_m=40,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(full), 1)
+
     def test_pixel_gap_stays_inside_the_global_caps(self):
         self.assertEqual(join_gap_m_for_pixel(0.2), 8.0)
         self.assertAlmostEqual(join_gap_m_for_pixel(1.0), 22.0)
