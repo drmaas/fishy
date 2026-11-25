@@ -15,11 +15,20 @@ shore. In the near-gate band, ink and area decide when the overlap gap is
 within 0.10. A wider gap keeps the higher overlap.
 
 A long straight run is usually a section line or a road, and those pixels are
-cleared before tracing. A shore can be straight for a long stretch too, and a
-span-wide shore is the same kind of line. The seal test runs before either
-clear. Only the pixels whose deletion would open that basin are kept, and only
-for the basin that opens. A line that merely touches the water, and the border
-of a separate rectangle, are still removed.
+cleared before tracing. A cased road is two long parallel lines with a narrow
+white gap. Those lines are cleared too, including when they run diagonally,
+unless they are the seal of the basin. A shore can be straight for a long
+stretch, and a span-wide shore is the same kind of line. The seal test runs
+before either clear. Only the pixels whose deletion would open that basin are
+kept, and only for the basin that opens. A line that merely touches the water,
+and the border of a separate rectangle, are still removed. A road must not
+become the wall that cuts a bay off the basin, and it must not be the stroke
+that opens the basin onto the page.
+
+``clear_projected_casings`` is the second pass. Georef calls it after the
+affine, with road centerlines inverse-projected into the sheet. A narrow pair
+of ink lines beside that centerline is cleared. A single shore line is left
+in place. The straight-pair detector above still runs on the first trace.
 """
 
 from __future__ import annotations
@@ -67,7 +76,10 @@ def extract_shoreline(image: RasterImage) -> list[tuple[float, float]] | None:
     return candidates[0]
 
 
-def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, float]]]:
+def extract_shoreline_candidates(
+    image: RasterImage,
+    road_mask: bytearray | None = None,
+) -> list[list[tuple[float, float]]]:
     """The dominant enclosed shore, and the dominant ink outline when it is lake-scale.
 
     A small hole can be affine-stretched onto the hydro polygon and score a
@@ -79,7 +91,11 @@ def extract_shoreline_candidates(image: RasterImage) -> list[list[tuple[float, f
     height = image.height
     if width < 8 or height < 8:
         return []
-    mask = _dark_mask(image)
+    if road_mask is None:
+        mask = _dark_mask(image)
+        _clear_cased_roads(mask, width, height)
+    else:
+        mask = road_mask
     small, small_w, small_h, factor, frame = _trace_work_mask(mask, width, height, SHORE_MAX_SIDE)
     holes = _ranked_hole_contours(small, small_w, small_h, frame)
     rings: list[list[tuple[float, float]]] = []
@@ -925,26 +941,39 @@ class ShoreFigure:
     on_frame: tuple[bool, ...]
 
 
-def extract_shoreline_figures(image: RasterImage) -> list[ShoreFigure]:
+def extract_shoreline_figures(
+    image: RasterImage,
+    road_mask: bytearray | None = None,
+) -> list[ShoreFigure]:
     """Closed-shore candidates plus gap-closed and page-edge-cut figures.
 
     The list is small. Registration scores every figure and keeps the best
     overlap, so a tight inner contour loses to the outer shore when the outer
-    shore is actually in the list.
+    shore is actually in the list. ``road_mask`` is a dark mask that already
+    had road ink cleared. When it is omitted, the straight cased-road pass runs.
     """
+    if road_mask is None:
+        mask = _dark_mask(image)
+        _clear_cased_roads(mask, image.width, image.height)
+    else:
+        mask = road_mask
     figures: list[ShoreFigure] = []
-    for ring in extract_shoreline_candidates(image):
+    for ring in extract_shoreline_candidates(image, mask):
         figures.append(ShoreFigure(tuple((float(x), float(y)) for x, y in ring), tuple(False for _ in ring)))
-    figures.extend(_gap_closed_figures(image))
+    figures.extend(_gap_closed_figures(image, mask))
     return _dedup_figures(figures)[:8]
 
 
-def _gap_closed_figures(image: RasterImage) -> list[ShoreFigure]:
+def _gap_closed_figures(image: RasterImage, road_mask: bytearray | None = None) -> list[ShoreFigure]:
     width = image.width
     height = image.height
     if width < 8 or height < 8:
         return []
-    mask = _dark_mask(image)
+    if road_mask is None:
+        mask = _dark_mask(image)
+        _clear_cased_roads(mask, width, height)
+    else:
+        mask = road_mask
     small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_WORK_SIDE)
     frame = _detect_frame(small, small_w, small_h)
     run_len = max(8, int(0.16 * max(small_w, small_h)))
@@ -1250,6 +1279,572 @@ def _doomed_reaching_outside(
             reached[neighbor] = 1
             stack.append(neighbor)
     return reached
+
+
+# Center-to-center gap of a cased road on the work mask, in pixels.
+_ROAD_GAP_MIN = 2.0
+_ROAD_GAP_MAX = 8.0
+_ROAD_ALIGN = 0.96
+
+
+def _clear_cased_roads(mask: bytearray, width: int, height: int) -> None:
+    """Clear cased-road pixels on the source mask.
+
+    Detection runs on the shoreline work grid. A cleared work pixel clears the
+    source block it came from, so the gap-closed pass sees the same roads.
+    """
+    small, small_w, small_h, factor = _shrink_mask(mask, width, height, SHORE_MAX_SIDE)
+    frame = _detect_frame(small, small_w, small_h)
+    before = bytearray(small)
+    _mask_cased_roads(small, small_w, small_h, frame)
+    if factor == 1:
+        mask[:] = small
+        return
+    for y in range(small_h):
+        row = y * small_w
+        for x in range(small_w):
+            index = row + x
+            if not before[index] or small[index]:
+                continue
+            y0 = y * factor
+            x0 = x * factor
+            for yy in range(y0, min(height, y0 + factor)):
+                dest = yy * width
+                for xx in range(x0, min(width, x0 + factor)):
+                    mask[dest + xx] = 0
+
+
+def _mask_cased_roads(
+    mask: bytearray,
+    width: int,
+    height: int,
+    frame: tuple[int, int, int, int] | None = None,
+) -> None:
+    """Clear double-line roads. Keep a line that is the basin's only seal.
+
+    A cased road is two straight ink lines with a narrow white gap. Depth
+    contours and a single shore are not pairs, so they stay. The hydro
+    polygon is not consulted: the pair is an image pattern, and the seal test
+    decides which of those pixels still close the water.
+    """
+    if width < 24 or height < 24:
+        return
+    min_len = max(28, int(0.08 * max(width, height)))
+    chains = [
+        chain
+        for chain in _straight_ink_chains(mask, width, height, min_len)
+        if not _chain_follows_border(chain, width, height)
+    ]
+    if len(chains) < 2:
+        return
+    # No enclosed basin means the lines may be the shore. Leave them.
+    outside = _outside_mask(mask, width, height)
+    holes = _contained_holes(mask, width, height, outside)
+    if not holes:
+        return
+    doomed = bytearray(width * height)
+    paired = False
+    for index, left in enumerate(chains):
+        for right in chains[index + 1 :]:
+            if not _road_pair(left, right, mask, width, height):
+                continue
+            paired = True
+            for chain in (left, right):
+                for x, y in chain:
+                    if _on_kept_frame(x, y, frame):
+                        continue
+                    doomed[y * width + x] = 1
+    if not paired or not any(doomed):
+        return
+    # Keep the casing pixels that close any basin. A road across the water
+    # touches water on both sides, so it is not that seal, and clearing it
+    # joins the basin. Protecting only the largest hole opens the other one.
+    protect = bytearray(width * height)
+    for hole in holes:
+        part = _casing_seal_pixels(width, height, doomed, outside, hole)
+        for index, flag in enumerate(part):
+            if flag:
+                protect[index] = 1
+    for index, flag in enumerate(doomed):
+        if flag and not protect[index]:
+            mask[index] = 0
+
+
+def _casing_seal_pixels(
+    width: int,
+    height: int,
+    doomed: bytearray,
+    outside: bytearray,
+    largest_hole: list[int],
+) -> bytearray:
+    """Casing pixels that sit between the enclosed water and the outside."""
+    protect = bytearray(width * height)
+    if width < 8 or height < 8 or not any(doomed) or not largest_hole:
+        return protect
+    hole = bytearray(width * height)
+    for index in largest_hole:
+        hole[index] = 1
+    for index, flag in enumerate(doomed):
+        if not flag:
+            continue
+        y, x = divmod(index, width)
+        touches_hole = False
+        touches_outside = x == 0 or y == 0 or x == width - 1 or y == height - 1
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                touches_outside = True
+                continue
+            neighbor = ny * width + nx
+            if hole[neighbor]:
+                touches_hole = True
+            if outside[neighbor]:
+                touches_outside = True
+        if touches_hole and touches_outside:
+            protect[index] = 1
+    return protect
+
+
+def cleared_hits_basin_seal(
+    before: bytearray,
+    after: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    """True when a cleared pixel was the seal of any enclosed basin.
+
+    The first shore is that seal. A later trace can score higher after the
+    basin opens, and that gain is not a road removal.
+    """
+    if width < 8 or height < 8 or len(before) != width * height or len(after) != width * height:
+        return False
+    doomed = bytearray(width * height)
+    for index, (was_ink, still_ink) in enumerate(zip(before, after, strict=True)):
+        if was_ink and not still_ink:
+            doomed[index] = 1
+    if not any(doomed):
+        return False
+    outside = _outside_mask(before, width, height)
+    for hole in _contained_holes(before, width, height, outside):
+        if any(_casing_seal_pixels(width, height, doomed, outside, hole)):
+            return True
+    return False
+
+
+def clear_projected_casings(
+    mask: bytearray,
+    width: int,
+    height: int,
+    polylines: list[list[tuple[float, float]]],
+    *,
+    search: float = 48.0,
+) -> int:
+    """Clear narrow ink pairs beside projected road centerlines.
+
+    ``polylines`` are in source pixels. A pair is two thin ink runs separated
+    by a white gap of a few pixels. One run, the usual shore stroke, stays.
+    Pixels that are the only seal of an enclosed basin stay too. Returns how
+    many ink pixels were cleared.
+    """
+    if width < 16 or height < 16 or not polylines or search < 2:
+        return 0
+    doomed = bytearray(width * height)
+    for line in polylines:
+        _mark_casing_along(mask, width, height, line, doomed, search)
+    if not any(doomed):
+        return 0
+    outside = _outside_mask(mask, width, height)
+    holes = _contained_holes(mask, width, height, outside)
+    protect = bytearray(width * height)
+    # A road that splits the basin makes two holes. Each shore crossing is a
+    # seal. Keeping only the largest hole opens the other side onto the page.
+    for hole in holes:
+        part = _casing_seal_pixels(width, height, doomed, outside, hole)
+        for index, flag in enumerate(part):
+            if flag:
+                protect[index] = 1
+    cleared = 0
+    for index, flag in enumerate(doomed):
+        if not flag or protect[index] or not mask[index]:
+            continue
+        # A shore or contour that crosses the casing is ink we are not marking
+        # as the pair. Leave the crossing pixel so the basin stays closed.
+        if _touches_kept_ink(mask, doomed, width, height, index):
+            continue
+        mask[index] = 0
+        cleared += 1
+    return cleared
+
+
+def _touches_kept_ink(
+    mask: bytearray,
+    doomed: bytearray,
+    width: int,
+    height: int,
+    index: int,
+) -> bool:
+    y, x = divmod(index, width)
+    for dy in (-1, 0, 1):
+        yy = y + dy
+        if yy < 0 or yy >= height:
+            continue
+        for dx in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            xx = x + dx
+            if xx < 0 or xx >= width:
+                continue
+            neighbor = yy * width + xx
+            if mask[neighbor] and not doomed[neighbor]:
+                return True
+    return False
+
+
+def _mark_casing_along(
+    mask: bytearray,
+    width: int,
+    height: int,
+    line: list[tuple[float, float]],
+    doomed: bytearray,
+    search: float,
+) -> None:
+    samples = _resample_polyline(line, 1.0)
+    if len(samples) < 2:
+        return
+    gap_min = 2
+    gap_max = 14
+    for index in range(len(samples)):
+        x, y = samples[index]
+        if index + 1 < len(samples):
+            dx = samples[index + 1][0] - x
+            dy = samples[index + 1][1] - y
+        else:
+            dx = x - samples[index - 1][0]
+            dy = y - samples[index - 1][1]
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+        nx, ny = -dy / length, dx / length
+        half = int(search)
+        ink = [
+            _probe_ink(mask, width, height, x + nx * offset, y + ny * offset)
+            for offset in range(-half, half + 1)
+        ]
+        runs: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(ink):
+            if not ink[cursor]:
+                cursor += 1
+                continue
+            end = cursor
+            while end < len(ink) and ink[end]:
+                end += 1
+            if 1 <= end - cursor <= 8:
+                runs.append((cursor, end))
+            cursor = end
+        best: tuple[int, int, int, int] | None = None
+        best_key: tuple[int, int] | None = None
+        for left, right in zip(runs, runs[1:], strict=False):
+            gap = right[0] - left[1]
+            if gap < gap_min or gap > gap_max:
+                continue
+            left_off = ((left[0] + left[1] - 1) / 2.0) - half
+            right_off = ((right[0] + right[1] - 1) / 2.0) - half
+            center = (left_off + right_off) / 2.0
+            # Snap to the casing nearest the projected line. A first affine that
+            # still follows the road can miss the ink by tens of meters.
+            if abs(center) > search * 0.9:
+                continue
+            key = (int(abs(center) * 10), gap)
+            if best_key is None or key < best_key:
+                best_key = key
+                best = (left[0], left[1], right[0], right[1])
+        if best is None:
+            continue
+        left_start, left_end, right_start, right_end = best
+        for slot in _casing_slots(left_start, left_end, left_side=True):
+            _mark_ink(mask, doomed, width, height, x + nx * (slot - half), y + ny * (slot - half))
+        for slot in _casing_slots(right_start, right_end, left_side=False):
+            _mark_ink(mask, doomed, width, height, x + nx * (slot - half), y + ny * (slot - half))
+
+
+def _casing_slots(start: int, end: int, *, left_side: bool) -> range:
+    """The outer one or two pixels of a run. A shore stuck to the gap stays."""
+    thickness = end - start
+    if thickness <= 2:
+        return range(start, end)
+    if left_side:
+        return range(start, start + 2)
+    return range(end - 2, end)
+
+
+def _resample_polyline(
+    line: list[tuple[float, float]],
+    step: float,
+) -> list[tuple[float, float]]:
+    if len(line) < 2 or step <= 0:
+        return []
+    samples = [line[0]]
+    previous = line[0]
+    carry = 0.0
+    for nxt in line[1:]:
+        dx = nxt[0] - previous[0]
+        dy = nxt[1] - previous[1]
+        dist = math.hypot(dx, dy)
+        if dist < 1e-9:
+            previous = nxt
+            continue
+        ux, uy = dx / dist, dy / dist
+        traveled = carry
+        while traveled + step <= dist + 1e-9:
+            traveled += step
+            if traveled <= dist + 1e-6:
+                samples.append((previous[0] + ux * traveled, previous[1] + uy * traveled))
+        carry = dist - traveled
+        previous = nxt
+    return samples
+
+
+def _probe_ink(mask: bytearray, width: int, height: int, x: float, y: float) -> bool:
+    ix = int(round(x))
+    iy = int(round(y))
+    if ix < 0 or iy < 0 or ix >= width or iy >= height:
+        return False
+    return bool(mask[iy * width + ix])
+
+
+def _mark_ink(
+    mask: bytearray,
+    doomed: bytearray,
+    width: int,
+    height: int,
+    x: float,
+    y: float,
+) -> None:
+    ix = int(round(x))
+    iy = int(round(y))
+    if ix < 0 or iy < 0 or ix >= width or iy >= height:
+        return
+    index = iy * width + ix
+    if mask[index]:
+        doomed[index] = 1
+
+
+def _straight_ink_chains(
+    mask: bytearray,
+    width: int,
+    height: int,
+    min_len: int,
+) -> list[list[tuple[int, int]]]:
+    """Long, nearly straight ink chains. A bend starts a new chain."""
+    visited = bytearray(width * height)
+    chains: list[list[tuple[int, int]]] = []
+    for start in range(width * height):
+        if not mask[start] or visited[start]:
+            continue
+        y, x = divmod(start, width)
+        chain = _grow_straight_chain(mask, visited, width, height, x, y)
+        for cx, cy in chain:
+            visited[cy * width + cx] = 1
+        if len(chain) >= min_len and _chain_is_straight(chain, min_len):
+            chains.append(chain)
+    return chains
+
+
+def _grow_straight_chain(
+    mask: bytearray,
+    visited: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+) -> list[tuple[int, int]]:
+    """Walk ink both ways until the line bends or the ink stops."""
+    forward = _walk_ink(mask, visited, width, height, x, y, None)
+    heading = None
+    if len(forward) >= 2:
+        heading = (forward[0][0] - forward[1][0], forward[0][1] - forward[1][1])
+    backward = _walk_ink(mask, visited, width, height, x, y, heading, blocked=forward)
+    if len(backward) <= 1:
+        return forward
+    return list(reversed(backward[1:])) + forward
+
+
+def _walk_ink(
+    mask: bytearray,
+    visited: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    heading: tuple[int, int] | None,
+    blocked: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    local = {(x, y)}
+    if blocked:
+        local.update(blocked)
+    chain = [(x, y)]
+    hx, hy = heading if heading is not None else (0, 0)
+    while True:
+        nxt = _next_ink_step(mask, visited, width, height, chain[-1][0], chain[-1][1], hx, hy, local)
+        if nxt is None:
+            return chain
+        nx, ny, dx, dy = nxt
+        if len(chain) >= 6:
+            ax = chain[-1][0] - chain[0][0]
+            ay = chain[-1][1] - chain[0][1]
+            along = ax * dx + ay * dy
+            if along <= 0:
+                return chain
+            scale = math.hypot(dx, dy) * math.hypot(hx, hy)
+            if scale > 0 and (dx * hx + dy * hy) < 0.45 * scale:
+                return chain
+        chain.append((nx, ny))
+        local.add((nx, ny))
+        if len(chain) >= 4:
+            px, py = chain[-4]
+            hx, hy = nx - px, ny - py
+        else:
+            hx, hy = dx, dy
+
+
+_INK_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
+def _next_ink_step(
+    mask: bytearray,
+    visited: bytearray,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    hx: int,
+    hy: int,
+    local: set[tuple[int, int]],
+) -> tuple[int, int, int, int] | None:
+    best: tuple[int, int, int, int] | None = None
+    best_score = 0.34
+    hlen = math.hypot(hx, hy)
+    for dx, dy in _INK_STEPS:
+        nx = x + dx
+        ny = y + dy
+        if nx < 0 or ny < 0 or nx >= width or ny >= height:
+            continue
+        if (nx, ny) in local or visited[ny * width + nx] or not mask[ny * width + nx]:
+            continue
+        if hlen < 1e-6:
+            score = 1.0
+        else:
+            score = (dx * hx + dy * hy) / (math.hypot(dx, dy) * hlen)
+        if score > best_score:
+            best_score = score
+            best = (nx, ny, dx, dy)
+    if best is not None:
+        return best
+    if hlen >= 1e-6:
+        return None
+    for dx, dy in _INK_STEPS:
+        nx = x + dx
+        ny = y + dy
+        if nx < 0 or ny < 0 or nx >= width or ny >= height:
+            continue
+        if (nx, ny) in local or visited[ny * width + nx] or not mask[ny * width + nx]:
+            continue
+        return (nx, ny, dx, dy)
+    return None
+
+
+def _chain_is_straight(chain: list[tuple[int, int]], min_len: int) -> bool:
+    x0, y0 = chain[0]
+    x1, y1 = chain[-1]
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.hypot(dx, dy)
+    if length < min_len * 0.75:
+        return False
+    worst = 0.0
+    for x, y in chain:
+        worst = max(worst, abs((x - x0) * dy - (y - y0) * dx) / length)
+    return worst <= 2.25
+
+
+def _road_pair(
+    left: list[tuple[int, int]],
+    right: list[tuple[int, int]],
+    mask: bytearray,
+    width: int,
+    height: int,
+) -> bool:
+    """True when the chains are parallel, close, overlapping, and white between."""
+    if not _chains_parallel(left, right):
+        return False
+    gap = _chain_gap(left, right, mask, width, height)
+    if gap is None:
+        return False
+    median, samples, ink_hits = gap
+    if not (_ROAD_GAP_MIN <= median <= _ROAD_GAP_MAX):
+        return False
+    if samples < 4:
+        return False
+    return ink_hits / samples <= 0.35
+
+
+def _chain_follows_border(chain: list[tuple[int, int]], width: int, height: int) -> bool:
+    """A neatline or the page edge is not a road casing."""
+    hits = 0
+    for x, y in chain:
+        if x <= 2 or y <= 2 or x >= width - 3 or y >= height - 3:
+            hits += 1
+    return hits / len(chain) >= 0.5
+
+
+def _chains_parallel(left: list[tuple[int, int]], right: list[tuple[int, int]]) -> bool:
+    ax = left[-1][0] - left[0][0]
+    ay = left[-1][1] - left[0][1]
+    bx = right[-1][0] - right[0][0]
+    by = right[-1][1] - right[0][1]
+    la = math.hypot(ax, ay)
+    lb = math.hypot(bx, by)
+    if la < 1 or lb < 1:
+        return False
+    return abs(ax * bx + ay * by) / (la * lb) >= _ROAD_ALIGN
+
+
+def _chain_gap(
+    left: list[tuple[int, int]],
+    right: list[tuple[int, int]],
+    mask: bytearray,
+    width: int,
+    height: int,
+) -> tuple[float, int, int] | None:
+    """Median distance, overlap sample count, and how many gap samples are ink."""
+    x0, y0 = right[0]
+    bx = right[-1][0] - x0
+    by = right[-1][1] - y0
+    length_sq = bx * bx + by * by
+    if length_sq <= 0:
+        return None
+    length = math.sqrt(length_sq)
+    casing = set(left)
+    casing.update(right)
+    step = max(1, len(left) // 24)
+    distances: list[float] = []
+    ink_hits = 0
+    for x, y in left[::step]:
+        t = ((x - x0) * bx + (y - y0) * by) / length_sq
+        if t < -0.02 or t > 1.02:
+            continue
+        dist = abs((x - x0) * by - (y - y0) * bx) / length
+        distances.append(dist)
+        mid_x = int(round((x + x0 + t * bx) / 2))
+        mid_y = int(round((y + y0 + t * by) / 2))
+        if (mid_x, mid_y) in casing:
+            continue
+        if 0 <= mid_x < width and 0 <= mid_y < height and mask[mid_y * width + mid_x]:
+            ink_hits += 1
+    if len(distances) < 4:
+        return None
+    distances.sort()
+    return distances[len(distances) // 2], len(distances), ink_hits
 
 
 def _clear_long_runs(

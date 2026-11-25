@@ -3,12 +3,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from fishy_pipeline.states.wi import contours
 from fishy_pipeline.states.wi.depth_tag import (
     Label,
     Line,
     WaterPart,
+    TaggedLine,
     assign_depths,
     assignment_to_feet,
     cutline_collection,
@@ -22,6 +25,8 @@ from fishy_pipeline.states.wi.depth_tag import (
 )
 from fishy_pipeline.states.wi.hydro import load_hydro_geometries
 from fishy_pipeline.states.wi.raster import fit_page_zoom, max_render_pixels
+from fishy_pipeline.states.wi.recorded_labels import labels_for_trace
+from fishy_pipeline.states.wi.register import Affine, GroundControlPoint
 from fishy_pipeline.states.wi.trace import (
     blank_text_boxes,
     bridge_label_gaps,
@@ -85,6 +90,25 @@ class AssignDepthTest(unittest.TestCase):
         self.assertTrue(all(line.confidence >= 0.8 for line in labeled))
         shore = [line for line in assignment.features if line.source == "hydro"]
         self.assertEqual([line.depth_ft for line in shore], [0])
+
+    def test_carried_interval_steps_rings_that_have_no_labels(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5, interval_ft=5)
+        self.assertEqual(assignment.interval_ft, 5)
+        self.assertEqual(_depths(assignment), [5, 10])
+        self.assertFalse(any(line.needs_review for line in assignment.features))
+        self.assertNotIn("interval_unknown", assignment.reasons)
+
+    def test_unlabeled_rings_without_an_interval_stay_in_review(self):
+        rings = [Line(coords=_box(10, 10, 90, 90), closed=True)]
+        assignment = assign_depths(rings, [], _shore(), max_depth_ft=40, snap_m=5)
+        self.assertIsNone(assignment.interval_ft)
+        self.assertIn("interval_unknown", assignment.reasons)
+        tagged = [line for line in assignment.features if line.source != "hydro"]
+        self.assertTrue(all(line.needs_review for line in tagged))
 
     def test_unlabeled_rings_propagate_until_max_depth(self):
         rings = [
@@ -581,6 +605,227 @@ class RenderCapTest(unittest.TestCase):
         )
         self.assertTrue(within_cap)
         self.assertAlmostEqual(actual_dpi, 72.0)
+
+
+class RecordedLabelPageTest(unittest.TestCase):
+    def test_labels_apply_only_on_the_digitized_page(self):
+        body = {
+            "page": "0980900a-p0.png",
+            "unit": "ft",
+            "labels": [{"pixel": [10.0, 10.0], "value": 5, "confidence": 0.9}],
+        }
+        gcps = [
+            GroundControlPoint(pixel=0.0, line=0.0, easting=0.0, northing=0.0),
+            GroundControlPoint(pixel=20.0, line=0.0, easting=20.0, northing=0.0),
+            GroundControlPoint(pixel=0.0, line=20.0, easting=0.0, northing=20.0),
+        ]
+        affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+        transform = (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        with patch("fishy_pipeline.states.wi.recorded_labels.load_recorded_labels", return_value=body):
+            matched, _boxes, _texts, _unit = labels_for_trace(
+                "0980900",
+                gcps=gcps,
+                method="affine",
+                affine=affine,
+                geotransform=transform,
+                clipped_width=50,
+                clipped_height=50,
+                page="0980900a-p0.png",
+            )
+            other, other_boxes, _texts, _unit = labels_for_trace(
+                "0980900",
+                gcps=gcps,
+                method="affine",
+                affine=affine,
+                geotransform=transform,
+                clipped_width=50,
+                clipped_height=50,
+                page="0980900a-p1.png",
+            )
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(other, [])
+        self.assertEqual(other_boxes, [])
+
+    def test_every_kept_warp_is_traced_with_its_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = []
+            for name in ("0980900a-p0.png", "0980900a-p1.png"):
+                path = root / f"{name}.tif"
+                path.write_bytes(b"tif")
+                paths.append(path)
+            item = {
+                "wbic": "0980900",
+                "map_key": "0980900a",
+                "qa_status": "auto",
+                "iou": 0.91,
+                "reasons": [],
+                "warp_source": "auto",
+                "paths": {
+                    "warps": [
+                        {"page": "0980900a-p0.png", "status": "ok", "path": str(paths[0]), "gcps": str(root / "a.json")},
+                        {"page": "0980900a-p1.png", "status": "ok", "path": str(paths[1]), "gcps": str(root / "b.json")},
+                    ]
+                },
+            }
+            seen: list[str | None] = []
+
+            def fake_trace(*_args, **kwargs):
+                seen.append(kwargs.get("page"))
+                return {
+                    "qa_status": "auto" if kwargs.get("page") == "0980900a-p0.png" else "needs_review",
+                    "reasons": [] if kwargs.get("page") == "0980900a-p0.png" else ["label_page_mismatch"],
+                    "depths_ft": [5],
+                    "interval_ft": 5,
+                    "label_count": 1 if kwargs.get("page") == "0980900a-p0.png" else 0,
+                    "labels_applied": kwargs.get("page") == "0980900a-p0.png",
+                    "recorded_labels": True,
+                    "label_source": "recorded" if kwargs.get("page") == "0980900a-p0.png" else "none",
+                    "unassigned_count": 0,
+                    "path": str(root / "piece.geojson"),
+                    "_features": [],
+                }
+
+            with patch("fishy_pipeline.states.wi.contours._trace_sheet", side_effect=fake_trace):
+                result = contours._trace_item(
+                    item,
+                    entry={"max_depth_ft": 20},
+                    geometry=SimpleNamespace(parts=[object()]),
+                    work_dir=root,
+                    ocr_fallback=False,
+                    compare_ocr=False,
+                )
+        self.assertEqual(seen, ["0980900a-p0.png", "0980900a-p1.png"])
+        self.assertEqual(result["qa_status"], "needs_review")
+        self.assertEqual(result["sheet_count"], 2)
+        self.assertTrue(result["sheets"][0]["labels_applied"])
+        self.assertFalse(result["sheets"][1]["labels_applied"])
+
+
+class CarriedIntervalMergeTest(unittest.TestCase):
+    def _donor(self) -> dict:
+        return {
+            "wbic": "0980900",
+            "page": "0980900a-p0.png",
+            "qa_status": "auto",
+            "labels_applied": True,
+            "label_page_rejected": False,
+            "interval_ft": 5,
+            "depths_ft": [0, 5, 10],
+            "reasons": [],
+            "unassigned_count": 0,
+            "_features": [],
+            "label_count": 2,
+            "recorded_labels": True,
+            "label_source": "recorded",
+        }
+
+    def _rejected(self, *, reasons: list[str], lines: list[Line], max_depth: float) -> dict:
+        return {
+            "wbic": "0980900",
+            "page": "0980900a-p1.png",
+            "qa_status": "needs_review",
+            "labels_applied": False,
+            "label_page_rejected": True,
+            "interval_ft": None,
+            "depths_ft": [0],
+            "reasons": reasons,
+            "unassigned_count": 0,
+            "_features": [],
+            "_lines": lines,
+            "_assign_labels": [],
+            "_parts": _shore(),
+            "_assign_max": max_depth,
+            "_snap_m": 5.0,
+            "max_depth_ft": max_depth,
+            "label_count": 0,
+            "recorded_labels": True,
+            "label_source": "none",
+        }
+
+    def _merge(self, pieces: list[dict]):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "fishy_pipeline.states.wi.contours.publish_gate",
+                return_value=(True, "auto", []),
+            ) as gate:
+                result = contours._merge_sheet_traces(
+                    {
+                        "wbic": "0980900",
+                        "map_key": "0980900a",
+                        "iou": 0.91,
+                        "georef_qa_status": "auto",
+                        "georef_reasons": [],
+                        "warp_source": "auto",
+                    },
+                    pieces,
+                    out_dir=Path(tmp),
+                    entry={"max_depth_ft": 40},
+                )
+        return result, gate
+
+    def test_rejected_page_takes_the_label_interval_and_the_gate_runs_once(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        donor = self._donor()
+        other = self._rejected(
+            reasons=["interval_unknown", "recorded_depth_missing", "no_contour_lines"],
+            lines=rings,
+            max_depth=40,
+        )
+        contours._carry_label_interval([donor, other])
+        self.assertEqual(other["qa_status"], "auto")
+        self.assertEqual(other["depths_ft"], [0, 5, 10])
+        self.assertEqual(other["reasons"], [])
+        result, gate = self._merge([donor, other])
+        self.assertEqual(gate.call_count, 1)
+        self.assertEqual(gate.call_args.kwargs["depths_ft"], [5, 10])
+        self.assertEqual(result["qa_status"], "auto")
+        self.assertNotIn("recorded_depth_missing", result["reasons"])
+        self.assertNotIn("no_contour_lines", result["reasons"])
+
+    def test_ambiguous_carried_rings_stay_in_review(self):
+        rings = [
+            Line(coords=_box(10, 10, 90, 90), closed=True),
+            Line(coords=_box(30, 30, 70, 70), closed=True),
+        ]
+        other = self._rejected(reasons=["interval_unknown"], lines=rings, max_depth=8)
+        contours._carry_label_interval([self._donor(), other])
+        self.assertEqual(other["qa_status"], "needs_review")
+        self.assertTrue(any(line.needs_review for line in other["_features"] if line.depth_ft))
+        result, _gate = self._merge([self._donor(), other])
+        self.assertEqual(result["qa_status"], "needs_review")
+
+    def test_missing_interval_does_not_copy_label_rejection_reasons(self):
+        donor = self._donor()
+        donor["interval_ft"] = None
+        donor["_features"] = [
+            TaggedLine(
+                coords=_box(10, 10, 90, 90),
+                closed=True,
+                depth_ft=5,
+                interval_ft=None,
+                confidence=0.9,
+                needs_review=False,
+                reason=None,
+                source="label",
+            )
+        ]
+        other = self._rejected(
+            reasons=["interval_unknown", "recorded_depth_missing", "no_contour_lines"],
+            lines=[Line(coords=_box(10, 10, 90, 90), closed=True)],
+            max_depth=40,
+        )
+        contours._carry_label_interval([donor, other])
+        self.assertIsNone(other["interval_ft"])
+        result, gate = self._merge([donor, other])
+        self.assertEqual(gate.call_count, 1)
+        self.assertIn("interval_unknown", result["reasons"])
+        self.assertNotIn("recorded_depth_missing", result["reasons"])
+        self.assertNotIn("no_contour_lines", result["reasons"])
+        self.assertEqual(result["qa_status"], "needs_review")
 
 
 if __name__ == "__main__":

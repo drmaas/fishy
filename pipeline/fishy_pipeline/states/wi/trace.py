@@ -372,6 +372,7 @@ def trace_sheet(
     wbic: str | None = None,
     sheet_gcp_path: Path | None = None,
     ocr_fallback: bool = False,
+    page: str | None = None,
 ) -> TracedSheet:
     """Inpaint recorded labels when present, optionally OCR, then trace lines in map coordinates."""
     prepared = _cap_raster(raster_path, work_dir / "trace-raster.tif")
@@ -407,6 +408,7 @@ def trace_sheet(
             geotransform=transform,
             clipped_width=width,
             clipped_height=height,
+            page=page,
         )
     if not labels_px and ocr_fallback:
         labels_px, boxes, texts = _ocr_labels(rgb, width, height)

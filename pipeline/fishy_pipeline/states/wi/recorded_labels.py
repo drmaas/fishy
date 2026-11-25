@@ -63,6 +63,21 @@ def project_pixel(
     raise ValueError("cannot project sheet pixel without a warp model")
 
 
+def label_page_matches(body: dict, page: str | None) -> bool:
+    """True when the label file was digitized on ``page``.
+
+    A file that names a page does not apply to a different raster. Projecting
+    those pixels through another sheet's control points puts the depths on the
+    wrong warp.
+    """
+    recorded = body.get("page")
+    if not isinstance(recorded, str) or not recorded.strip():
+        return page is None
+    if page is None:
+        return False
+    return Path(recorded).name == Path(page).name
+
+
 def labels_for_trace(
     wbic: str,
     *,
@@ -72,12 +87,15 @@ def labels_for_trace(
     geotransform: tuple[float, ...],
     clipped_width: int,
     clipped_height: int,
+    page: str | None = None,
 ) -> tuple[list[tuple[float, float, float, float]], list[tuple[int, int, int, int]], list[str], str]:
     """Return label centers in clipped pixels, inpaint boxes, and sheet unit."""
     body = load_recorded_labels(wbic)
     if body is None:
         return [], [], [], "ft"
     unit = label_file_unit(body)
+    if not label_page_matches(body, page):
+        return [], [], [], unit
     tps = fit_tps(gcps) if method == "tps" and len(gcps) >= 3 else None
     labels_px: list[tuple[float, float, float, float]] = []
     boxes: list[tuple[int, int, int, int]] = []
