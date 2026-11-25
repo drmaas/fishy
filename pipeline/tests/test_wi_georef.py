@@ -24,13 +24,16 @@ from fishy_pipeline.states.wi.register import (
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi import register as wi_register
+from fishy_pipeline.states.wi import roads
 from fishy_pipeline.states.wi.shoreline import (
     MAX_ROAD_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
+    clear_projected_casings,
     extract_shoreline,
     extract_shoreline_candidates,
     extract_shoreline_figures,
+    _dark_mask,
     _has_reversal,
     _hole_shore_pixels,
     _ring_boxiness,
@@ -609,6 +612,48 @@ class ShorelineTest(unittest.TestCase):
         self.assertLess(min(north_ys), 90)
         # The bay is cut by the sheet edge, so the trace reaches that edge.
         self.assertGreater(max(north_ys), height - 4)
+
+    def test_projected_casing_joins_the_basin(self):
+        # The centerline sits between the two ink lines. The pair is cleared
+        # and the shore spans both sides of the road.
+        width, height = 240, 180
+        rgb = bytearray([255]) * (width * height * 3)
+        lake = [(36, 40), (108, 28), (196, 46), (204, 108), (150, 148), (64, 140), (28, 90)]
+        _ink_polyline(rgb, width, lake, close=True)
+        _ink_polyline(rgb, width, [(118, 6), (118, 172)], close=False)
+        _ink_polyline(rgb, width, [(124, 6), (124, 172)], close=False)
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        mask = _dark_mask(image)
+        cleared = clear_projected_casings(
+            mask,
+            width,
+            height,
+            [[(121.0, 8.0), (121.0, 170.0)]],
+            search=20.0,
+        )
+        self.assertGreater(cleared, 40)
+        rings = extract_shoreline_candidates(image, mask)
+        self.assertGreaterEqual(len(rings), 1)
+        xs = [point[0] for point in rings[0]]
+        self.assertLess(min(xs), 70)
+        self.assertGreater(max(xs), 170)
+
+    def test_projected_centerline_leaves_a_single_shore_stroke(self):
+        width, height = 180, 120
+        rgb = bytearray([255]) * (width * height * 3)
+        _ink_polyline(rgb, width, [(40, 20), (150, 20), (150, 90), (40, 90)], close=True)
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        mask = _dark_mask(image)
+        before = bytearray(mask)
+        cleared = clear_projected_casings(
+            mask,
+            width,
+            height,
+            [[(40.0, 20.0), (150.0, 20.0)]],
+            search=12.0,
+        )
+        self.assertEqual(cleared, 0)
+        self.assertEqual(mask, before)
 
 
 def _ink_block(rgb: bytearray, width: int, height: int, x: int, y: int) -> None:
@@ -1243,6 +1288,32 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png"})
         self.assertEqual([page.name for page in missed], ["c.png"])
 
+    def test_third_published_sheet_stays_when_two_affines_clear(self):
+        # Two sheets clear on the affine. A third clears only on its published
+        # score. Leaving it out used to mark the page missing and zero the lake.
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _tps_sheet(0.91, 0.88, "a.png", ring)
+        second = _tps_sheet(0.86, 0.80, "b.png", ring)
+        third = _tps_sheet(0.82, 0.61, "c.png", ring)
+        pages = [Path("a.png"), Path("b.png"), Path("c.png")]
+        kept, missed = georef._select_lake_sheets([first, second, third], pages)
+        self.assertEqual(missed, [])
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png", "c.png"})
+        for sheet in kept:
+            sheet["gate_iou"] = sheet["registration"].iou
+        gate = 0.0 if missed else min(sheet["gate_iou"] for sheet in kept)
+        self.assertGreaterEqual(gate, DEFAULT_IOU_THRESHOLD)
+
+    def test_page_under_both_cutoffs_stays_missing_beside_two_affines(self):
+        ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _tps_sheet(0.91, 0.88, "a.png", ring)
+        second = _tps_sheet(0.86, 0.80, "b.png", ring)
+        weak = _tps_sheet(0.40, 0.55, "c.png", ring)
+        pages = [Path("a.png"), Path("b.png"), Path("c.png")]
+        kept, missed = georef._select_lake_sheets([first, second, weak], pages)
+        self.assertEqual({sheet["page"].name for sheet in kept}, {"a.png", "b.png"})
+        self.assertEqual([page.name for page in missed], ["c.png"])
+
     def test_closed_pages_collapse_to_the_best_sheet(self):
         pages = [Path("a.png"), Path("b.png")]
         kept, missed = georef._select_lake_sheets(
@@ -1334,6 +1405,66 @@ class FailClosedGateTest(unittest.TestCase):
         self.assertEqual(public["tps_iou"], 0.77)
         self.assertEqual(public["method"], "tps")
         self.assertEqual(public["iou"], 0.77)
+
+    def test_validated_stitch_publishes_on_the_minimum(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _sheet(0.91, 0.0, "a.png", ring=list(hydro))
+        second = _sheet(
+            0.82,
+            0.0,
+            "b.png",
+            ring=[(2.0, 2.0), (98.0, 2.0), (98.0, 78.0), (2.0, 78.0)],
+        )
+        for sheet in (first, second):
+            sheet["gate_iou"] = sheet["registration"].iou
+        score = georef._validated_stitch_score([first, second], hydro, DEFAULT_IOU_THRESHOLD)
+        self.assertIsNotNone(score)
+        assert score is not None
+        self.assertGreaterEqual(score, DEFAULT_IOU_THRESHOLD)
+        self.assertAlmostEqual(score, min(sheet["gate_iou"] for sheet in (first, second)))
+        several = True
+        queue = several and not (score >= DEFAULT_IOU_THRESHOLD)
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=False,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=queue,
+        )
+        self.assertEqual(reasons, [])
+
+    def test_misplaced_sheet_does_not_validate_the_stitch(self):
+        hydro = [(0.0, 0.0), (100.0, 0.0), (100.0, 80.0), (0.0, 80.0)]
+        first = _sheet(0.91, 0.0, "a.png", ring=list(hydro))
+        first["gate_iou"] = 0.91
+        far = [(1000.0, 1000.0), (1100.0, 1000.0), (1100.0, 1080.0), (1000.0, 1080.0)]
+        second = _sheet(0.88, 0.0, "b.png", ring=far)
+        second["gate_iou"] = 0.88
+        self.assertIsNone(georef._validated_stitch_score([first, second], hydro, DEFAULT_IOU_THRESHOLD))
+        reasons = georef._reasons(
+            flowage=False,
+            shared_sheet=False,
+            low_iou=False,
+            multi_sheet=False,
+            shoreline_found=True,
+            registration_error=False,
+            warp_failed=False,
+            several_pages_passed=True,
+        )
+        self.assertEqual(reasons, ["multi_sheet"])
+
+    def test_union_does_not_validate_a_sheet_under_the_gate(self):
+        hydro = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        left = [(0.0, 0.0), (95.0, 0.0), (95.0, 100.0), (0.0, 100.0)]
+        right = [(105.0, 0.0), (200.0, 0.0), (200.0, 100.0), (105.0, 100.0)]
+        sheets = [_sheet(0.72, 0.0, "p0.png", ring=left), _sheet(0.90, 0.0, "p1.png", ring=right)]
+        for sheet in sheets:
+            sheet["gate_iou"] = sheet["registration"].iou
+        self.assertGreaterEqual(union_polygon_iou([left, right], hydro), DEFAULT_IOU_THRESHOLD)
+        self.assertIsNone(georef._validated_stitch_score(sheets, hydro, DEFAULT_IOU_THRESHOLD))
 
     def test_several_passing_pages_are_queued_and_each_is_warped(self):
         first = _sheet(0.92, 0.0, "north.png")
@@ -2250,6 +2381,42 @@ class CliTest(unittest.TestCase):
         self.assertEqual(good["qa_status"], "auto")
         self.assertTrue(queue["items"])
         self.assertEqual(queue["crs"], "EPSG:3071")
+
+
+class RoadCenterlineTest(unittest.TestCase):
+    def test_synthetic_box_does_not_request_roads(self):
+        with patch("fishy_pipeline.states.wi.roads.urllib.request.urlopen") as opened:
+            lines = roads.fetch_road_centerlines([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)])
+        self.assertEqual(lines, [])
+        opened.assert_not_called()
+
+    def test_parses_esri_paths(self):
+        payload = {
+            "features": [
+                {"geometry": {"paths": [[[545000.0, 510000.0], [545100.0, 510020.0]]]}},
+            ]
+        }
+        self.assertEqual(
+            roads._polylines_from_esri(payload),
+            [[(545000.0, 510000.0), (545100.0, 510020.0)]],
+        )
+
+    def test_unchanged_overlap_keeps_the_first_registration(self):
+        # Trout's replacement scored the same and stacked two control points.
+        self.assertFalse(georef._keep_road_trace(0.577481, 0.577481, outline_hit=40))
+        self.assertFalse(georef._keep_road_trace(0.462462, 0.463000, outline_hit=0))
+
+    def test_road_trace_replaces_when_overlap_moves(self):
+        self.assertTrue(georef._keep_road_trace(0.46, 0.50, outline_hit=0))
+        self.assertTrue(georef._keep_road_trace(0.65, 0.60, outline_hit=12))
+        self.assertFalse(georef._keep_road_trace(0.65, 0.50, outline_hit=12))
+
+    def test_inverse_affine_roundtrip(self):
+        affine = Affine(a=2.0, b=0.4, tx=500000.0, c=-0.2, d=-1.5, ty=400000.0)
+        east, north = affine.apply(30.0, 40.0)
+        column, row = roads.pixel_from_map(affine, east, north)
+        self.assertAlmostEqual(column, 30.0)
+        self.assertAlmostEqual(row, 40.0)
 
 
 if __name__ == "__main__":

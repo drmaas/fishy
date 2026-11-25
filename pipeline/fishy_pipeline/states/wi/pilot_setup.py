@@ -215,6 +215,7 @@ def run_pilot_setup(args: argparse.Namespace) -> None:
         manifest_path=manifest_path,
         hydro_path=hydro_path,
         work_dir=work_dir,
+        fetch_roads=True,
     )
     print("pilot setup complete", flush=True)
     print(
