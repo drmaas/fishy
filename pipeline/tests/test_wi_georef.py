@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import json
 import math
+import random
 import subprocess
 import tempfile
 import unittest
@@ -46,6 +47,7 @@ from fishy_pipeline.states.wi.shoreline import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "fixtures" / "wi-georef" / "known-transform.json"
+SAMPLE_PATH = ROOT / "fixtures" / "wi-georef" / "sample-9288.json"
 
 
 def _by_pair(results: dict) -> dict[tuple[str, str], dict]:
@@ -2812,6 +2814,90 @@ class ControlPointTest(unittest.TestCase):
         )
         self.assertEqual(status, "unavailable")
         self.assertIsNone(reason)
+
+
+class Sample9288FixtureTest(unittest.TestCase):
+    """The 40-lake no-regression claim is only reproducible while this file agrees with itself.
+
+    Nothing else reads ``fixtures/wi-georef/sample-9288.json``, so these checks
+    are what keep the committed measurement honest: the seeded selection has to
+    replay from the committed doclink list, the summary has to count the rows,
+    and no lake that passed may queue or lose score.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.body = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+    def test_the_seeded_selection_replays_from_the_committed_doclink_list(self):
+        selection = self.body["selection"]
+        doclinks = selection["doclink_wbics_sorted"]
+        pilots = set(selection["pilots"])
+        self.assertEqual(self.body["seed"], 9288)
+        self.assertEqual(doclinks, sorted(doclinks))
+        self.assertEqual(len(doclinks), len(set(doclinks)))
+        self.assertTrue(pilots <= set(doclinks))
+        candidates = sorted(wbic for wbic in doclinks if wbic not in pilots)
+        random.Random(self.body["seed"]).shuffle(candidates)
+        extras = [wbic for wbic in selection["kept"] if wbic not in pilots]
+        self.assertEqual(len(selection["kept"]), len(pilots) + len(extras))
+        self.assertEqual(candidates[: len(extras)], extras)
+
+    def test_every_kept_lake_has_a_before_and_after_row(self):
+        kept = self.body["selection"]["kept"]
+        lakes = {row["wbic"]: row for row in self.body["lakes"]}
+        self.assertEqual(sorted(lakes), sorted(kept))
+        for wbic, row in lakes.items():
+            self.assertRegex(wbic, r"^\d{7}$")
+            for side in ("before", "after"):
+                entry = row[side]
+                self.assertEqual(
+                    set(entry), {"gate_iou", "qa_status", "reasons", "warp_status"}, (wbic, side)
+                )
+                self.assertIn(entry["qa_status"], {"auto", "needs_review"}, (wbic, side))
+                self.assertIsInstance(entry["reasons"], list, (wbic, side))
+                if entry["gate_iou"] is None:
+                    # A page with no figure at all has no score and no warp.
+                    self.assertNotEqual(entry["qa_status"], "auto", (wbic, side))
+                    self.assertEqual(entry["warp_status"], "not_run", (wbic, side))
+                    continue
+                self.assertGreaterEqual(entry["gate_iou"], 0.0, (wbic, side))
+                self.assertLessEqual(entry["gate_iou"], 1.0, (wbic, side))
+
+    def test_the_summary_counts_the_rows(self):
+        summary = self.body["summary"]
+        lakes = self.body["lakes"]
+        self.assertEqual(summary["lakes"], len(lakes))
+        before = [row for row in lakes if row["before"]["qa_status"] == "auto"]
+        after = [row for row in lakes if row["after"]["qa_status"] == "auto"]
+        self.assertEqual(summary["pass_before"], len(before))
+        self.assertEqual(summary["pass_after"], len(after))
+
+    def test_no_lake_passed_before_and_queues_after(self):
+        summary = self.body["summary"]
+        self.assertEqual(summary["pass_to_queue"], [])
+        self.assertEqual(summary["passing_score_decreased"], [])
+        for row in self.body["lakes"]:
+            if row["before"]["qa_status"] != "auto":
+                continue
+            self.assertEqual(row["after"]["qa_status"], "auto", row["wbic"])
+            self.assertGreaterEqual(row["after"]["gate_iou"], row["before"]["gate_iou"], row["wbic"])
+
+    def test_the_gate_is_the_minimum_sheet_score(self):
+        self.assertIn("0.75", self.body["gate"])
+        self.assertIn("min", self.body["gate"])
+
+    def test_traced_counts_are_the_baseline_joiner(self):
+        # The earlier drop to 171 and 613 came from joins that treated a missing
+        # label as agreement. The committed counts are the baseline ones, so a
+        # contour qa_status that moved would mean the joiner changed again.
+        contours = {key: entry for key, entry in self.body["contours"].items() if key != "note"}
+        self.assertTrue(contours)
+        for wbic, entry in contours.items():
+            self.assertEqual(entry["before_unassigned"], entry["after_unassigned"], wbic)
+            self.assertEqual(entry["depths_ft"], sorted(entry["depths_ft"]), wbic)
+            self.assertEqual(entry["depths_ft"][0], 0, wbic)
+            self.assertIn(entry["qa_status"], {"auto", "needs_review"}, wbic)
 
 
 def _mask_polyline(mask: bytearray, width: int, ring: list[tuple[int, int]], *, close: bool) -> None:
