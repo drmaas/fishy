@@ -2608,6 +2608,77 @@ class CartographicReplacementTest(unittest.TestCase):
         new_partial = [_scored_ring(weak, 0.66, cut=0.2)]
         self.assertFalse(georef._cartographic_replacement_accepted(old_partial, new_partial, hydro))
 
+    def test_a_rotated_fragment_is_not_a_second_basin(self):
+        # The geometry would complete the anchor. The fragment's pose is 60°
+        # from the scan, so it is not kept. Five degrees of fit noise is.
+        hydro = [(0.0, 0.0), (300.0, 0.0), (300.0, 100.0), (0.0, 100.0)]
+        anchor = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        fragment = [(200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0)]
+        turned = [
+            _posed_ring(anchor, 0.90, 10.0),
+            _posed_ring(fragment, 0.70, 70.0),
+        ]
+        kept = georef._pick_page_basins(turned, hydro)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["ring"], anchor)
+        aligned = [
+            _posed_ring(anchor, 0.90, 10.0),
+            _posed_ring(fragment, 0.70, 15.0),
+        ]
+        self.assertEqual(len(georef._pick_page_basins(aligned, hydro)), 2)
+
+    def test_a_rejected_clear_keeps_the_rings_and_the_score(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        lake = [(40, 36), (78, 24), (118, 40), (132, 78), (96, 112), (48, 104), (28, 70)]
+        _mask_polyline(mask, width, lake, close=True)
+        for y in range(height):
+            mask[y * width + 100] = 1
+        rgb = bytearray(width * height * 3)
+        for index, ink in enumerate(mask):
+            value = 0 if ink else 255
+            rgb[index * 3 : index * 3 + 3] = bytes((value, value, value))
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        hydro = [(0.0, 0.0), (400.0, 0.0), (400.0, 200.0), (0.0, 200.0)]
+        other = [(200.0, 0.0), (280.0, 0.0), (280.0, 80.0), (200.0, 80.0)]
+        old = [_posed_ring(lake, 0.80, 0.0), _posed_ring(other, 0.50, 0.0)]
+        replacement = [_posed_ring(other, 0.66, 0.0)]
+        before_rings = [list(row["ring"]) for row in old]
+        before_score = georef._carto_published_score(old, hydro)
+        with (
+            patch.object(georef, "_collect_page_candidates", return_value=([], None)),
+            patch.object(georef, "_spur_cleaned_candidates", return_value=[]),
+            patch.object(georef, "_pick_page_basins", return_value=replacement),
+        ):
+            result = georef._apply_cartographic_mask(image, Path("page.png"), hydro, 8, old)
+        self.assertEqual([list(row["ring"]) for row in result], before_rings)
+        self.assertEqual(georef._carto_published_score(result, hydro), before_score)
+        self.assertEqual(image.rgb, bytes(rgb))
+        self.assertGreater(result[0]["cartographic_pixels_cleared"], 0)
+        self.assertFalse(result[0]["cartographic_basin_opened"])
+        self.assertFalse(result[0]["cartographic_mask_accepted"])
+
+
+def _posed_ring(ring: list[tuple[float, float]], iou: float, rotation: float, cut: float = 0.0) -> dict:
+    rad = math.radians(rotation)
+    affine = Affine(a=1.0, b=-math.sin(rad), tx=0.0, c=0.0, d=-math.cos(rad), ty=0.0)
+    tps = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 1.0, 0.0),
+        northing_affine=(0.0, 0.0, 1.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=tps,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="tps",
+    )
+    return {"ring": [(float(x), float(y)) for x, y in ring], "registration": registration, "cut_fraction": cut}
+
 
 def _scored_ring(ring: list[tuple[float, float]], iou: float, cut: float = 0.0) -> dict:
     affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)

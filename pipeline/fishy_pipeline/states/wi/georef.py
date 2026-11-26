@@ -821,6 +821,11 @@ LARGE_RING_MIN_INK = 0.12
 _ANCHOR_IOU_BAND = 0.10
 # A contoured basin is several times a blank section cell. The cell must not win.
 _BASIN_AREA_MULTIPLE = 3.0
+# Two figures traced from one scan share that scan's rotation. Independent
+# fits of the same sheet disagree by only a few degrees. Twenty degrees is
+# several steps of the six-degree search, so a fragment registered near a
+# right angle from the anchor is a different match, not a second basin.
+_SAME_SCAN_ROTATION_DEG = 20.0
 # Doclink PDFs append a letter citation page. Rendered at the request DPI it
 # looks sharp, but it is a few lines of type, not a map sheet. A large sheet
 # can be this light and still be the map.
@@ -1549,6 +1554,14 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
         dist = _centroid_distance(anchor_ring, mapped_rings([candidate])[0])
         if dist < 0.12 * span:
             continue
+        # A second basin on this scan cannot be rotated tens of degrees from
+        # the anchor. That pose is a different match, and keeping the fragment
+        # would pull the lake minimum down.
+        if (
+            _rotation_gap(anchor["registration"].rotation_deg, candidate["registration"].rotation_deg)
+            > _SAME_SCAN_ROTATION_DEG
+        ):
+            continue
         candidate_ring = mapped_rings([candidate])[0]
         candidate_hydro = polygon_iou(candidate_ring, list(hydro_ring))
         # A second basin must land on this WBIC's hydro footprint, not only
@@ -1572,6 +1585,12 @@ def _centroid_span(ring: list[tuple[float, float]]) -> float:
     xs = [point[0] for point in ring]
     ys = [point[1] for point in ring]
     return max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+
+
+def _rotation_gap(left: float, right: float) -> float:
+    """Smallest angle between two scan rotations, in degrees."""
+    gap = abs(left - right) % 360.0
+    return min(gap, 360.0 - gap)
 
 
 def _centroid_distance(left: list[tuple[float, float]], right: list[tuple[float, float]]) -> float:

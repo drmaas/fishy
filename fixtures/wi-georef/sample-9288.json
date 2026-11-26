@@ -2647,8 +2647,8 @@
   "summary": {
     "lakes": 40,
     "pass_before": 25,
-    "pass_after": 24,
-    "pass_to_queue": ["2650900"],
+    "pass_after": 25,
+    "pass_to_queue": [],
     "passing_score_decreased": []
   },
   "lakes": [
@@ -3010,12 +3010,9 @@
         "warp_status": "ok"
       },
       "after": {
-        "gate_iou": 0.627756,
-        "qa_status": "needs_review",
-        "reasons": [
-          "iou_below_threshold",
-          "multi_sheet"
-        ],
+        "gate_iou": 0.805949,
+        "qa_status": "auto",
+        "reasons": [],
         "warp_status": "ok"
       }
     },
