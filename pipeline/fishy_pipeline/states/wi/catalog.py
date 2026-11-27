@@ -312,7 +312,9 @@ def fetch_catalog_page(
 
     time.sleep(max(0.0, rate_limit_seconds))
     if page_index == 1 or previous_html is None or event_target is None:
-        body = fetch_dnr_bytes(CATALOG_FORM_URL, opener=opener, user_agent=user_agent)
+        body, _content_type = fetch_dnr_bytes(
+            CATALOG_FORM_URL, opener=opener, user_agent=user_agent
+        )
     else:
         viewstate = VIEWSTATE_RE.search(previous_html)
         generator = VIEWSTATE_GENERATOR_RE.search(previous_html)
@@ -327,7 +329,7 @@ def fetch_catalog_page(
             "__EVENTVALIDATION": eventvalidation.group(1),
         }
         encoded = urllib.parse.urlencode(form).encode("utf-8")
-        body = fetch_dnr_bytes(
+        body, _content_type = fetch_dnr_bytes(
             CATALOG_FORM_URL,
             opener=opener,
             data=encoded,

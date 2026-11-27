@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import json
 import math
+import random
 import subprocess
 import tempfile
 import unittest
@@ -14,12 +15,14 @@ from fishy_pipeline.states.wi.pngutil import RasterImage, read_png, write_png
 from fishy_pipeline.states.wi.register import (
     MAX_ANISOTROPY,
     Affine,
+    GroundControlPoint,
     Registration,
     ThinPlateSpline,
     anisotropy,
     fit_affine,
     fit_similarity,
     polygon_iou,
+    prepare_control_points,
     register_shoreline,
     union_polygon_iou,
 )
@@ -29,6 +32,7 @@ from fishy_pipeline.states.wi.shoreline import (
     MAX_ROAD_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
+    clear_cartographic_lines,
     clear_projected_casings,
     extract_shoreline,
     extract_shoreline_candidates,
@@ -43,6 +47,7 @@ from fishy_pipeline.states.wi.shoreline import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_PATH = ROOT / "fixtures" / "wi-georef" / "known-transform.json"
+SAMPLE_PATH = ROOT / "fixtures" / "wi-georef" / "sample-9288.json"
 
 
 def _by_pair(results: dict) -> dict[tuple[str, str], dict]:
@@ -2520,6 +2525,389 @@ class RoadCenterlineTest(unittest.TestCase):
         column, row = roads.pixel_from_map(affine, east, north)
         self.assertAlmostEqual(column, 30.0)
         self.assertAlmostEqual(row, 40.0)
+
+
+class CartographicLineTest(unittest.TestCase):
+    def test_section_line_across_a_lake_is_cleared_and_the_basin_stays_shut(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        lake = [(40, 36), (78, 24), (118, 40), (132, 78), (96, 112), (48, 104), (28, 70)]
+        _mask_polyline(mask, width, lake, close=True)
+        for y in range(height):
+            mask[y * width + 100] = 1
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[lake])
+        self.assertGreater(cleared, 20)
+        self.assertFalse(opened)
+        self.assertEqual(mask[70 * width + 100], 0)
+        self.assertEqual(mask[36 * width + 40], 1)
+
+    def test_a_rectangular_shore_survives(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        rect = [(20, 20), (160, 20), (160, 110), (20, 110)]
+        _mask_polyline(mask, width, rect, close=True)
+        before = bytes(mask)
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[rect])
+        self.assertEqual(cleared, 0)
+        self.assertTrue(opened)
+        self.assertEqual(bytes(mask), before)
+        self.assertEqual(mask[20 * width + 90], 1)
+
+    def test_a_gapped_rectangular_shore_survives(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        rect = [(20, 20), (160, 20), (160, 110), (20, 110)]
+        _mask_polyline(mask, width, rect, close=True)
+        mask[20 * width + 90] = 0
+        before = bytes(mask)
+        cleared, opened = clear_cartographic_lines(mask, width, height, shore_rings=[rect])
+        self.assertEqual(cleared, 0)
+        self.assertTrue(opened)
+        self.assertEqual(bytes(mask), before)
+        self.assertEqual(mask[20 * width + 40], 1)
+
+    def test_a_neatline_tick_is_cleared_and_a_continuing_shore_is_not(self):
+        width = height = 800
+        mask = bytearray(width * height)
+        for x in range(width):
+            mask[x] = 1
+        for y in range(24):
+            mask[y * width + 400] = 1
+            mask[y * width + 200] = 1
+        for x in range(200, 280):
+            mask[23 * width + x] = 1
+        clear_cartographic_lines(mask, width, height)
+        self.assertEqual(mask[12 * width + 400], 0)
+        self.assertEqual(mask[12 * width + 200], 1)
+
+    def test_opening_an_irregular_shore_is_reported(self):
+        width, height = 180, 120
+        mask = bytearray(width * height)
+        for x in range(width):
+            mask[8 * width + x] = 1
+        left = [(36, 28), (40, 48), (34, 70), (42, 90)]
+        right = [(150, 90), (158, 70), (148, 48), (154, 28)]
+        ring = left + [(42, 100), (154, 100)] + right
+        _mask_polyline(mask, width, ring, close=True)
+        _cleared, opened = clear_cartographic_lines(mask, width, height)
+        self.assertTrue(opened)
+
+
+class CartographicReplacementTest(unittest.TestCase):
+    def test_a_weaker_ring_cannot_replace_a_stronger_one(self):
+        # Old rings score 0.80 on x 0-100 and 0.50 on x 200-280. The new
+        # ring scores 0.66 on the weak box. A closed page publishes 0.80,
+        # and a partial page must not raise its minimum by deleting 0.80.
+        strong = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+        weak = [(200.0, 0.0), (280.0, 0.0), (280.0, 80.0), (200.0, 80.0)]
+        hydro = [(0.0, 0.0), (280.0, 0.0), (280.0, 100.0), (0.0, 100.0)]
+        old = [_scored_ring(strong, 0.80), _scored_ring(weak, 0.50)]
+        new = [_scored_ring(weak, 0.66)]
+        self.assertAlmostEqual(georef._carto_published_score(old, hydro), 0.80)
+        self.assertFalse(georef._replacement_overlaps(old, new))
+        self.assertFalse(georef._cartographic_replacement_accepted(old, new, hydro))
+        old_partial = [_scored_ring(strong, 0.80, cut=0.2), _scored_ring(weak, 0.50, cut=0.2)]
+        new_partial = [_scored_ring(weak, 0.66, cut=0.2)]
+        self.assertFalse(georef._cartographic_replacement_accepted(old_partial, new_partial, hydro))
+
+    def test_a_rotated_fragment_is_not_a_second_basin(self):
+        # The geometry would complete the anchor. The fragment's pose is 60°
+        # from the scan, so it is not kept. Five degrees of fit noise is.
+        hydro = [(0.0, 0.0), (300.0, 0.0), (300.0, 100.0), (0.0, 100.0)]
+        anchor = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (0.0, 100.0)]
+        fragment = [(200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0)]
+        turned = [
+            _posed_ring(anchor, 0.90, 10.0),
+            _posed_ring(fragment, 0.70, 70.0),
+        ]
+        kept = georef._pick_page_basins(turned, hydro)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["ring"], anchor)
+        aligned = [
+            _posed_ring(anchor, 0.90, 10.0),
+            _posed_ring(fragment, 0.70, 15.0),
+        ]
+        self.assertEqual(len(georef._pick_page_basins(aligned, hydro)), 2)
+
+    def test_a_rejected_clear_keeps_the_rings_and_the_score(self):
+        width, height = 180, 140
+        mask = bytearray(width * height)
+        lake = [(40, 36), (78, 24), (118, 40), (132, 78), (96, 112), (48, 104), (28, 70)]
+        _mask_polyline(mask, width, lake, close=True)
+        for y in range(height):
+            mask[y * width + 100] = 1
+        rgb = bytearray(width * height * 3)
+        for index, ink in enumerate(mask):
+            value = 0 if ink else 255
+            rgb[index * 3 : index * 3 + 3] = bytes((value, value, value))
+        image = RasterImage(width=width, height=height, rgb=bytes(rgb))
+        hydro = [(0.0, 0.0), (400.0, 0.0), (400.0, 200.0), (0.0, 200.0)]
+        other = [(200.0, 0.0), (280.0, 0.0), (280.0, 80.0), (200.0, 80.0)]
+        old = [_posed_ring(lake, 0.80, 0.0), _posed_ring(other, 0.50, 0.0)]
+        replacement = [_posed_ring(other, 0.66, 0.0)]
+        before_rings = [list(row["ring"]) for row in old]
+        before_score = georef._carto_published_score(old, hydro)
+        with (
+            patch.object(georef, "_collect_page_candidates", return_value=([], None)),
+            patch.object(georef, "_spur_cleaned_candidates", return_value=[]),
+            patch.object(georef, "_pick_page_basins", return_value=replacement),
+        ):
+            result = georef._apply_cartographic_mask(image, Path("page.png"), hydro, 8, old)
+        self.assertEqual([list(row["ring"]) for row in result], before_rings)
+        self.assertEqual(georef._carto_published_score(result, hydro), before_score)
+        self.assertEqual(image.rgb, bytes(rgb))
+        self.assertGreater(result[0]["cartographic_pixels_cleared"], 0)
+        self.assertFalse(result[0]["cartographic_basin_opened"])
+        self.assertFalse(result[0]["cartographic_mask_accepted"])
+
+
+def _posed_ring(ring: list[tuple[float, float]], iou: float, rotation: float, cut: float = 0.0) -> dict:
+    rad = math.radians(rotation)
+    affine = Affine(a=1.0, b=-math.sin(rad), tx=0.0, c=0.0, d=-math.cos(rad), ty=0.0)
+    tps = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 1.0, 0.0),
+        northing_affine=(0.0, 0.0, 1.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=tps,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="tps",
+    )
+    return {"ring": [(float(x), float(y)) for x, y in ring], "registration": registration, "cut_fraction": cut}
+
+
+def _scored_ring(ring: list[tuple[float, float]], iou: float, cut: float = 0.0) -> dict:
+    affine = Affine(a=1.0, b=0.0, tx=0.0, c=0.0, d=1.0, ty=0.0)
+    tps = ThinPlateSpline(
+        sources=[],
+        easting_weights=[],
+        northing_weights=[],
+        easting_affine=(0.0, 1.0, 0.0),
+        northing_affine=(0.0, 0.0, 1.0),
+    )
+    registration = Registration(
+        affine=affine,
+        tps=tps,
+        gcps=(),
+        affine_iou=iou,
+        tps_iou=iou,
+        method="affine",
+    )
+    return {"ring": ring, "registration": registration, "cut_fraction": cut}
+
+
+class ControlPointTest(unittest.TestCase):
+    def test_a_coincident_pair_that_disagrees_fails_closed(self):
+        points = [
+            GroundControlPoint(0, 0, 500000, 300000),
+            GroundControlPoint(100, 0, 500100, 300000),
+            GroundControlPoint(100, 80, 500100, 300080),
+            GroundControlPoint(0, 80, 500000, 300080),
+            GroundControlPoint(40, 10, 500100, 300080),
+        ]
+        prepared = prepare_control_points(points)
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("disagrees", prepared.reason)
+
+    def test_a_singular_affine_fails_closed(self):
+        span = 1.0e7
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(span, 0, 2, 0),
+                GroundControlPoint(span, span, 2, 2),
+                GroundControlPoint(0, span, 0, 2),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("singular", prepared.reason)
+
+    def test_map_collinear_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(0, 100, 50, 0),
+                GroundControlPoint(100, 0, 100, 0),
+                GroundControlPoint(100, 100, 150, 0),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("collinear", prepared.reason)
+
+    def test_too_few_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 1, 1),
+                GroundControlPoint(0, 0, 1, 1),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        self.assertIsNotNone(prepared.reason)
+        assert prepared.reason is not None
+        self.assertTrue(prepared.reason.startswith("degenerate control points"))
+        self.assertIn("1 remain", prepared.reason)
+
+    def test_collinear_points_fail_closed(self):
+        prepared = prepare_control_points(
+            [
+                GroundControlPoint(0, 0, 0, 0),
+                GroundControlPoint(10, 0, 10, 0),
+                GroundControlPoint(30, 0, 30, 0),
+            ]
+        )
+        self.assertFalse(prepared.usable)
+        assert prepared.reason is not None
+        self.assertIn("collinear", prepared.reason)
+
+    def test_outlier_residual_is_dropped_and_a_consistent_set_is_not(self):
+        square = [
+            GroundControlPoint(0, 0, 0, 0),
+            GroundControlPoint(100, 0, 100, 0),
+            GroundControlPoint(100, 100, 100, 100),
+            GroundControlPoint(0, 100, 0, 100),
+        ]
+        consistent = prepare_control_points(square)
+        self.assertTrue(consistent.usable)
+        self.assertEqual(consistent.dropped, 0)
+        wild = prepare_control_points(square + [GroundControlPoint(50, 50, 50, 5000)])
+        self.assertTrue(wild.usable)
+        self.assertEqual(len(wild.points), 4)
+        self.assertNotIn(5000, [point.northing for point in wild.points])
+
+    def test_a_rejected_control_set_fails_without_gdal(self):
+        status, _path, reason = georef._warp(
+            raster=Path("missing.tif"),
+            out_dir=Path("."),
+            gcps=[
+                {"pixel": 0, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 10, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 0, "line": 10, "easting": 10, "northing": 10},
+                {"pixel": 10, "line": 10, "easting": 10, "northing": 0},
+            ],
+            gdal_available=False,
+        )
+        self.assertEqual(status, "failed")
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertTrue(reason.startswith("degenerate control points"))
+
+    def test_a_usable_set_stays_unavailable_without_gdal(self):
+        status, _path, reason = georef._warp(
+            raster=Path("missing.tif"),
+            out_dir=Path("."),
+            gcps=[
+                {"pixel": 0, "line": 0, "easting": 0, "northing": 0},
+                {"pixel": 100, "line": 0, "easting": 100, "northing": 0},
+                {"pixel": 100, "line": 100, "easting": 100, "northing": 100},
+                {"pixel": 0, "line": 100, "easting": 0, "northing": 100},
+            ],
+            gdal_available=False,
+        )
+        self.assertEqual(status, "unavailable")
+        self.assertIsNone(reason)
+
+
+class Sample9288FixtureTest(unittest.TestCase):
+    """The 40-lake no-regression claim is only reproducible while this file agrees with itself.
+
+    Nothing else reads ``fixtures/wi-georef/sample-9288.json``, so these checks
+    are what keep the committed measurement honest: the seeded selection has to
+    replay from the committed doclink list, the summary has to count the rows,
+    and no lake that passed may queue or lose score.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.body = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+
+    def test_the_seeded_selection_replays_from_the_committed_doclink_list(self):
+        selection = self.body["selection"]
+        doclinks = selection["doclink_wbics_sorted"]
+        pilots = set(selection["pilots"])
+        self.assertEqual(self.body["seed"], 9288)
+        self.assertEqual(doclinks, sorted(doclinks))
+        self.assertEqual(len(doclinks), len(set(doclinks)))
+        self.assertTrue(pilots <= set(doclinks))
+        candidates = sorted(wbic for wbic in doclinks if wbic not in pilots)
+        random.Random(self.body["seed"]).shuffle(candidates)
+        extras = [wbic for wbic in selection["kept"] if wbic not in pilots]
+        self.assertEqual(len(selection["kept"]), len(pilots) + len(extras))
+        self.assertEqual(candidates[: len(extras)], extras)
+
+    def test_every_kept_lake_has_a_before_and_after_row(self):
+        kept = self.body["selection"]["kept"]
+        lakes = {row["wbic"]: row for row in self.body["lakes"]}
+        self.assertEqual(sorted(lakes), sorted(kept))
+        for wbic, row in lakes.items():
+            self.assertRegex(wbic, r"^\d{7}$")
+            for side in ("before", "after"):
+                entry = row[side]
+                self.assertEqual(
+                    set(entry), {"gate_iou", "qa_status", "reasons", "warp_status"}, (wbic, side)
+                )
+                self.assertIn(entry["qa_status"], {"auto", "needs_review"}, (wbic, side))
+                self.assertIsInstance(entry["reasons"], list, (wbic, side))
+                if entry["gate_iou"] is None:
+                    # A page with no figure at all has no score and no warp.
+                    self.assertNotEqual(entry["qa_status"], "auto", (wbic, side))
+                    self.assertEqual(entry["warp_status"], "not_run", (wbic, side))
+                    continue
+                self.assertGreaterEqual(entry["gate_iou"], 0.0, (wbic, side))
+                self.assertLessEqual(entry["gate_iou"], 1.0, (wbic, side))
+
+    def test_the_summary_counts_the_rows(self):
+        summary = self.body["summary"]
+        lakes = self.body["lakes"]
+        self.assertEqual(summary["lakes"], len(lakes))
+        before = [row for row in lakes if row["before"]["qa_status"] == "auto"]
+        after = [row for row in lakes if row["after"]["qa_status"] == "auto"]
+        self.assertEqual(summary["pass_before"], len(before))
+        self.assertEqual(summary["pass_after"], len(after))
+
+    def test_no_lake_passed_before_and_queues_after(self):
+        summary = self.body["summary"]
+        self.assertEqual(summary["pass_to_queue"], [])
+        self.assertEqual(summary["passing_score_decreased"], [])
+        for row in self.body["lakes"]:
+            if row["before"]["qa_status"] != "auto":
+                continue
+            self.assertEqual(row["after"]["qa_status"], "auto", row["wbic"])
+            self.assertGreaterEqual(row["after"]["gate_iou"], row["before"]["gate_iou"], row["wbic"])
+
+    def test_the_gate_is_the_minimum_sheet_score(self):
+        self.assertIn("0.75", self.body["gate"])
+        self.assertIn("min", self.body["gate"])
+
+    def test_traced_counts_are_the_baseline_joiner(self):
+        # The earlier drop to 171 and 613 came from joins that treated a missing
+        # label as agreement. The committed counts are the baseline ones, so a
+        # contour qa_status that moved would mean the joiner changed again.
+        contours = {key: entry for key, entry in self.body["contours"].items() if key != "note"}
+        self.assertTrue(contours)
+        for wbic, entry in contours.items():
+            self.assertEqual(entry["before_unassigned"], entry["after_unassigned"], wbic)
+            self.assertEqual(entry["depths_ft"], sorted(entry["depths_ft"]), wbic)
+            self.assertEqual(entry["depths_ft"][0], 0, wbic)
+            self.assertIn(entry["qa_status"], {"auto", "needs_review"}, wbic)
+
+
+def _mask_polyline(mask: bytearray, width: int, ring: list[tuple[int, int]], *, close: bool) -> None:
+    points = list(ring)
+    if close:
+        points = points + [points[0]]
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        for x, y in _bresenham(x1, y1, x2, y2):
+            if 0 <= x < width and 0 <= y < len(mask) // width:
+                mask[y * width + x] = 1
 
 
 if __name__ == "__main__":

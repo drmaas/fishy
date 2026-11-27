@@ -28,6 +28,7 @@ import traceback
 from pathlib import Path
 
 from fishy_pipeline.states.wi.depth_tag import (
+    JOIN_GAP_MIN_M,
     Label,
     Line,
     WaterPart,
@@ -35,6 +36,7 @@ from fishy_pipeline.states.wi.depth_tag import (
     assignment_to_feet,
     cutline_collection,
     features_to_geojson,
+    join_gap_m_for_pixel,
 )
 from fishy_pipeline.states.wi.hydro import HydroGeometry, HydroPart, load_hydro_geometries
 from fishy_pipeline.states.wi.manifest import read_manifest
@@ -148,6 +150,7 @@ def run_fixture(work_dir: Path) -> dict:
         [WaterPart(exterior=shore)],
         max_depth_ft=20,
         snap_m=5,
+        join_gap_m=0,
     )
     qa_status = "needs_review" if assignment.reasons or any(line.needs_review for line in assignment.features) else "auto"
     collection = features_to_geojson(
@@ -400,6 +403,7 @@ def _trace_sheet(
     )
     max_depth = _max_depth(entry)
     assign_max = max_depth * 0.3048 if traced.unit == "m" and max_depth is not None else max_depth
+    join_gap_m = join_gap_m_for_pixel(traced.pixel_size_m)
     depths_ocr: list[int] | None = None
     if compare_ocr and ocr_fallback:
         traced_ocr = trace_sheet(
@@ -419,6 +423,7 @@ def _trace_sheet(
             parts,
             max_depth_ft=ocr_max,
             snap_m=traced_ocr.snap_m,
+            join_gap_m=join_gap_m_for_pixel(traced_ocr.pixel_size_m),
         )
         if traced_ocr.unit == "m":
             assignment_ocr = assignment_to_feet(assignment_ocr)
@@ -439,6 +444,7 @@ def _trace_sheet(
         parts,
         max_depth_ft=assign_max,
         snap_m=traced.snap_m,
+        join_gap_m=join_gap_m,
     )
     if traced.unit == "m":
         assignment = assignment_to_feet(assignment)
@@ -504,6 +510,7 @@ def _trace_sheet(
         "_parts": parts,
         "_assign_max": assign_max,
         "_snap_m": traced.snap_m,
+        "_join_gap_m": join_gap_m,
         "contour_count": len(emitted),
         "label_count": len(traced.labels),
         "needs_review_count": sum(1 for line in emitted if line.needs_review),
@@ -521,7 +528,7 @@ def _trace_sheet(
 
 
 def _drop_trace_scratch(piece: dict) -> None:
-    for key in ("_lines", "_assign_labels", "_parts", "_assign_max", "_snap_m"):
+    for key in ("_lines", "_assign_labels", "_parts", "_assign_max", "_snap_m", "_join_gap_m"):
         piece.pop(key, None)
 
 
@@ -569,6 +576,8 @@ def _carry_label_interval(pieces: list[dict]) -> None:
         parts = piece.get("_parts")
         if not lines or not parts:
             continue
+        stored_gap = piece.get("_join_gap_m")
+        join_gap_m = float(stored_gap) if isinstance(stored_gap, (int, float)) else JOIN_GAP_MIN_M
         assignment = assign_depths(
             lines,
             list(piece.get("_assign_labels") or []),
@@ -576,6 +585,7 @@ def _carry_label_interval(pieces: list[dict]) -> None:
             max_depth_ft=piece.get("_assign_max"),
             snap_m=float(piece.get("_snap_m") or piece.get("snap_m") or 1.0),
             interval_ft=interval,
+            join_gap_m=join_gap_m,
         )
         _replace_assignment(piece, assignment)
 

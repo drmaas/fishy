@@ -52,13 +52,15 @@ from fishy_pipeline.states.wi.manifest import read_manifest
 from fishy_pipeline.states.wi.pngutil import read_png
 from fishy_pipeline.states.wi.register import (
     DEFAULT_GCP_COUNT,
+    GroundControlPoint,
     polygon_iou,
+    prepare_control_points,
     register_shoreline,
     union_polygon_iou,
 )
 from fishy_pipeline.states.wi.pilot_data import load_reviewed_gcps
 from fishy_pipeline.states.wi.raster import LETTER_LONG_INCHES, select_sheet_pages
-from fishy_pipeline.states.wi.register import GroundControlPoint, registration_from_reviewed
+from fishy_pipeline.states.wi.register import registration_from_reviewed
 from fishy_pipeline.states.wi.roads import (
     fetch_road_centerlines,
     project_roads_to_pixels,
@@ -71,6 +73,7 @@ from fishy_pipeline.states.wi.shoreline import (
     NEATLINE_MIN_STRAIGHTNESS,
     NEATLINE_SPAN,
     cleanup_shore_ring,
+    clear_cartographic_lines,
     clear_projected_casings,
     cleared_hits_basin_seal,
     extract_shoreline,
@@ -94,6 +97,7 @@ _REASON_ORDER = (
     "shoreline_not_found",
     "registration_error",
     "warp_failed",
+    "degenerate_gcps",
 )
 
 
@@ -610,8 +614,9 @@ def _georeference_entry(
         multi_sheet=multi_sheet,
         shoreline_found=True,
         registration_error=False,
-        warp_failed=warp_status == "failed",
+        warp_failed=warp_status == "failed" and not _is_degenerate_gcp_error(warp_error),
         several_pages_passed=queue_unvalidated_stitch,
+        degenerate_gcps=_is_degenerate_gcp_error(warp_error),
     )
     public_sheets = [_public_sheet(sheet) for sheet in sheets]
     for page in missed_pages:
@@ -705,6 +710,8 @@ def _georeference_reviewed(
     try:
         registration = registration_from_reviewed(shoreline, list(water.ring), gcps, method=method)
     except Exception as error:
+        message = str(error)[:500]
+        degenerate = _is_degenerate_gcp_error(message)
         return _unscored(
             base,
             reasons=_reasons(
@@ -713,14 +720,15 @@ def _georeference_reviewed(
                 low_iou=False,
                 multi_sheet=multi_sheet,
                 shoreline_found=True,
-                registration_error=True,
+                registration_error=not degenerate,
                 warp_failed=False,
+                degenerate_gcps=degenerate,
             ),
             hydrotype=hydrotype,
             waterbody_name=waterbody_name,
             multi_sheet=multi_sheet,
             flowage=flowage,
-            error=str(error)[:500],
+            error=message,
         )
     gcp_dicts = [gcp.as_dict() for gcp in registration.gcps]
     iou = round(registration.iou, 6)
@@ -764,7 +772,8 @@ def _georeference_reviewed(
         multi_sheet=multi_sheet,
         shoreline_found=True,
         registration_error=False,
-        warp_failed=warp_status == "failed",
+        warp_failed=warp_status == "failed" and not _is_degenerate_gcp_error(warp_error),
+        degenerate_gcps=_is_degenerate_gcp_error(warp_error),
     )
     return {
         **base,
@@ -812,6 +821,11 @@ LARGE_RING_MIN_INK = 0.12
 _ANCHOR_IOU_BAND = 0.10
 # A contoured basin is several times a blank section cell. The cell must not win.
 _BASIN_AREA_MULTIPLE = 3.0
+# Two figures traced from one scan share that scan's rotation. Independent
+# fits of the same sheet disagree by only a few degrees. Twenty degrees is
+# several steps of the six-degree search, so a fragment registered near a
+# right angle from the anchor is a different match, not a second basin.
+_SAME_SCAN_ROTATION_DEG = 20.0
 # Doclink PDFs append a letter citation page. Rendered at the request DPI it
 # looks sharp, but it is a few lines of type, not a map sheet. A large sheet
 # can be this light and still be the map.
@@ -826,6 +840,12 @@ _LEGEND_MIN_BOXINESS = 0.90
 # Nine percent of the page, and six percent with ink just over the legend cap,
 # used to skip that check once overlap reached 0.68.
 _SMALL_RING_AREA = 0.12
+# Wiping a sheet grid re-fits the same shore by a few hundredths. A rise
+# under 0.05 stays on the first registration. The replacement also has to
+# cover at least half of the previous ring, so a different figure cannot
+# win on a small gain in the minimum.
+_CARTO_MIN_GAIN = 0.05
+_CARTO_RING_OVERLAP = 0.50
 
 
 def _score_sheet_pages(
@@ -867,6 +887,14 @@ def _score_sheet_pages(
                 hydro_ring,
                 gcp_count,
                 road_lines,
+                picked,
+            )
+        if picked:
+            picked = _apply_cartographic_mask(
+                image,
+                page_raster,
+                hydro_ring,
+                gcp_count,
                 picked,
             )
         for row in picked:
@@ -1048,6 +1076,78 @@ def _apply_vector_road_mask(
         row["road_mask_accepted"] = True
         row["road_iou_before"] = old_iou
         row["road_iou_after"] = new_iou
+    return new_picked
+
+
+def _apply_cartographic_mask(
+    image,
+    page: Path,
+    hydro_ring: list[tuple[float, float]],
+    gcp_count: int,
+    picked: list[dict],
+) -> list[dict]:
+    """Clear grid lines, then keep the new shore only when the published score rises.
+
+    The compared value is the score ``_select_lake_sheets`` will publish:
+    the best ring on a closed page, and the minimum when any ring is partial.
+    Every old ring and every new ring has to share at least half its area
+    with the other set. Dropping a ring must not raise that minimum. A clear
+    that opens any contained hole is dropped unless the cleared pixels miss
+    the current shore.
+    """
+    old_iou = _carto_published_score(picked, hydro_ring)
+    try:
+        mask = _dark_mask(image)
+        _clear_cased_roads(mask, image.width, image.height)
+        rings = [list(row["ring"]) for row in picked]
+        cleared, opened = clear_cartographic_lines(
+            mask,
+            image.width,
+            image.height,
+            shore_rings=rings,
+        )
+    except (OSError, ValueError, ZeroDivisionError):
+        return picked
+    if cleared <= 0 or opened:
+        for row in picked:
+            row["cartographic_pixels_cleared"] = cleared
+            row["cartographic_mask_accepted"] = False
+            row["cartographic_basin_opened"] = opened
+        return picked
+    candidates, _error = _collect_page_candidates(
+        image,
+        page,
+        hydro_ring,
+        gcp_count,
+        mask,
+    )
+    candidates.extend(
+        _spur_cleaned_candidates(
+            candidates,
+            image=image,
+            hydro_ring=hydro_ring,
+            gcp_count=gcp_count,
+            page=page,
+        )
+    )
+    candidates = _drop_margin_enclosures(candidates)
+    new_picked = _pick_page_basins(candidates, hydro_ring)
+    new_iou = _carto_published_score(new_picked, hydro_ring)
+    accept = _cartographic_replacement_accepted(picked, new_picked, hydro_ring)
+    if not accept or new_iou is None:
+        for row in picked:
+            row["cartographic_pixels_cleared"] = cleared
+            row["cartographic_mask_accepted"] = False
+            row["cartographic_basin_opened"] = False
+            if new_iou is not None:
+                row["cartographic_iou_after"] = new_iou
+        return picked
+    for row in new_picked:
+        row["cartographic_pixels_cleared"] = cleared
+        row["cartographic_mask_accepted"] = True
+        row["cartographic_basin_opened"] = False
+        row["cartographic_iou_before"] = old_iou
+        row["cartographic_iou_after"] = new_iou
     return new_picked
 
 
@@ -1286,7 +1386,12 @@ def _score_ring(
     # ``_keep_margin`` is only for a page whose sole figure is that outline.
     if _rejects_low_ink(area_fraction, ink, iou=None, keep_margin=_keep_margin):
         return None
-    registration = register_shoreline(list(ring), list(hydro_ring), gcp_count, on_frame=flags)
+    try:
+        registration = register_shoreline(list(ring), list(hydro_ring), gcp_count, on_frame=flags)
+    except ValueError as error:
+        if _is_degenerate_gcp_error(str(error)):
+            return None
+        raise
     if _rejects_low_ink(area_fraction, ink, registration.iou, keep_margin=_keep_margin):
         return None
     if not _hydro_footprint_matches(
@@ -1449,6 +1554,14 @@ def _pick_page_basins(candidates: list[dict], hydro_ring: list[tuple[float, floa
         dist = _centroid_distance(anchor_ring, mapped_rings([candidate])[0])
         if dist < 0.12 * span:
             continue
+        # A second basin on this scan cannot be rotated tens of degrees from
+        # the anchor. That pose is a different match, and keeping the fragment
+        # would pull the lake minimum down.
+        if (
+            _rotation_gap(anchor["registration"].rotation_deg, candidate["registration"].rotation_deg)
+            > _SAME_SCAN_ROTATION_DEG
+        ):
+            continue
         candidate_ring = mapped_rings([candidate])[0]
         candidate_hydro = polygon_iou(candidate_ring, list(hydro_ring))
         # A second basin must land on this WBIC's hydro footprint, not only
@@ -1472,6 +1585,12 @@ def _centroid_span(ring: list[tuple[float, float]]) -> float:
     xs = [point[0] for point in ring]
     ys = [point[1] for point in ring]
     return max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+
+
+def _rotation_gap(left: float, right: float) -> float:
+    """Smallest angle between two scan rotations, in degrees."""
+    gap = abs(left - right) % 360.0
+    return min(gap, 360.0 - gap)
 
 
 def _centroid_distance(left: list[tuple[float, float]], right: list[tuple[float, float]]) -> float:
@@ -1669,7 +1788,88 @@ def _public_sheet(sheet: dict) -> dict:
     if sheet.get("road_pixels_cleared"):
         row["road_pixels_cleared"] = int(sheet["road_pixels_cleared"])
         row["road_mask_accepted"] = bool(sheet.get("road_mask_accepted"))
+    if sheet.get("cartographic_pixels_cleared"):
+        row["cartographic_pixels_cleared"] = int(sheet["cartographic_pixels_cleared"])
+        row["cartographic_mask_accepted"] = bool(sheet.get("cartographic_mask_accepted"))
+        if "cartographic_basin_opened" in sheet:
+            row["cartographic_basin_opened"] = bool(sheet["cartographic_basin_opened"])
+        if sheet.get("cartographic_iou_after") is not None:
+            row["cartographic_iou_after"] = round(float(sheet["cartographic_iou_after"]), 6)
     return row
+
+
+def _published_iou(row: dict, hydro_ring: list[tuple[float, float]]) -> float:
+    """The gate score for one ring: registration IoU, or the worse of that and full hydro."""
+    registration = row["registration"]
+    cut = float(row.get("cut_fraction") or 0.0)
+    if cut < _PARTIAL_CUT:
+        return float(registration.iou)
+    project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+    mapped = [project(col, line) for col, line in row["ring"]]
+    return min(float(registration.iou), polygon_iou(mapped, list(hydro_ring)))
+
+
+def _carto_published_score(rows: list[dict], hydro_ring: list[tuple[float, float]]) -> float | None:
+    """The score ``_select_lake_sheets`` publishes for this page's rings.
+
+    A closed page keeps its best ring. When any ring is partial, every ring
+    stays in the lake minimum.
+    """
+    if not rows:
+        return None
+    scores = [_published_iou(row, hydro_ring) for row in rows]
+    if any(float(row.get("cut_fraction") or 0.0) >= _PARTIAL_CUT for row in rows):
+        return min(scores)
+    return max(scores)
+
+
+def _replacement_overlaps(old_rows: list[dict], new_rows: list[dict]) -> bool:
+    """True when overlap holds in both directions at ``_CARTO_RING_OVERLAP``.
+
+    Every new ring has to cover some old ring, and every old ring has to be
+    covered by some new ring. A second figure cannot take the place of a
+    ring it does not overlap.
+    """
+
+    def mapped(row: dict) -> list[tuple[float, float]]:
+        registration = row["registration"]
+        project = registration.affine.apply if registration.method == "affine" else registration.tps.apply
+        return [project(col, line) for col, line in row["ring"]]
+
+    def covers(ring: list[tuple[float, float]], others: list[list[tuple[float, float]]]) -> bool:
+        return any(polygon_iou(ring, other) >= _CARTO_RING_OVERLAP for other in others)
+
+    old_rings = [mapped(row) for row in old_rows]
+    new_rings = [mapped(row) for row in new_rows]
+    if not old_rings or not new_rings:
+        return False
+    if not all(covers(ring, old_rings) for ring in new_rings):
+        return False
+    return all(covers(ring, new_rings) for ring in old_rings)
+
+
+def _cartographic_replacement_accepted(
+    old_rows: list[dict],
+    new_rows: list[dict],
+    hydro_ring: list[tuple[float, float]],
+) -> bool:
+    """True when the clear raises the score this page will actually publish."""
+    old_score = _carto_published_score(old_rows, hydro_ring)
+    new_score = _carto_published_score(new_rows, hydro_ring)
+    if old_score is None or new_score is None:
+        return False
+    if new_score < old_score + _CARTO_MIN_GAIN:
+        return False
+    if not _replacement_overlaps(old_rows, new_rows):
+        return False
+    # Dropping a ring must not lift the minimum. That is how a weak
+    # replacement inflates a partial page.
+    if len(new_rows) < len(old_rows):
+        old_min = min(_published_iou(row, hydro_ring) for row in old_rows)
+        new_min = min(_published_iou(row, hydro_ring) for row in new_rows)
+        if new_min > old_min:
+            return False
+    return True
 
 
 def _full_hydro_iou(sheet: dict, hydro_ring: list[tuple[float, float]]) -> float:
@@ -1807,6 +2007,7 @@ def _reasons(
     registration_error: bool,
     warp_failed: bool,
     several_pages_passed: bool = False,
+    degenerate_gcps: bool = False,
 ) -> list[str]:
     found = []
     if flowage:
@@ -1827,6 +2028,8 @@ def _reasons(
     _ = multi_sheet
     if warp_failed:
         found.append("warp_failed")
+    if degenerate_gcps:
+        found.append("degenerate_gcps")
     order = {name: index for index, name in enumerate(_REASON_ORDER)}
     return sorted(found, key=lambda name: order[name])
 
@@ -1916,6 +2119,30 @@ def _page_rasters(entry: dict, raster: Path) -> list[Path]:
     return maps or [path for path, _long_inches in described]
 
 
+def _is_degenerate_gcp_error(error: str | None) -> bool:
+    return bool(error) and error.startswith("degenerate control points")
+
+
+def _prepared_gcp_dicts(gcps: list[dict]) -> tuple[list[dict] | None, str | None]:
+    points: list[GroundControlPoint] = []
+    for item in gcps:
+        try:
+            points.append(
+                GroundControlPoint(
+                    pixel=float(item["pixel"]),
+                    line=float(item["line"]),
+                    easting=float(item["easting"]),
+                    northing=float(item["northing"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    prepared = prepare_control_points(points)
+    if not prepared.usable:
+        return None, prepared.reason or "degenerate control points"
+    return [point.as_dict() for point in prepared.points], None
+
+
 def _warp(
     *,
     raster: Path,
@@ -1926,11 +2153,20 @@ def _warp(
     affine: dict[str, float] | None = None,
     tif_name: str = "warped.tif",
 ) -> tuple[str, Path | None, str | None]:
+    cleaned, reject = _prepared_gcp_dicts(gcps)
+    if cleaned is None:
+        # A rejected control set fails closed with or without GDAL.
+        # It does not fall back to the affine.
+        return "failed", None, reject
     if not gdal_available:
         return "unavailable", None, None
+    use_method = method
+    use_gcps = gcps
+    if method != "affine":
+        use_gcps = cleaned
     tif_path = out_dir / tif_name
     try:
-        if method == "affine" and affine is not None:
+        if use_method == "affine" and affine is not None:
             staged = out_dir / f"{Path(tif_name).stem}-affine.tif"
             _run(gdal_translate_affine_args(str(raster), str(staged), affine))
             # -dstalpha matches the spline warp: black ink stays a color, not nodata.
@@ -1949,7 +2185,7 @@ def _warp(
             )
         else:
             vrt_path = out_dir / f"{Path(tif_name).stem}.vrt"
-            _run(gdal_translate_gcp_args(str(raster), str(vrt_path), gcps))
+            _run(gdal_translate_gcp_args(str(raster), str(vrt_path), use_gcps))
             _run(gdalwarp_tps_args(str(vrt_path), str(tif_path)))
     except RuntimeError as error:
         return "failed", None, str(error)[:500]

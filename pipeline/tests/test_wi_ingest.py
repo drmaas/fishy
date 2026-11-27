@@ -86,6 +86,23 @@ class CatalogTest(unittest.TestCase):
             "ctl00$LeftPageContent$gvDocumentTable$ctl24$LinkButton3",
         )
 
+    def test_fetch_catalog_page_unpacks_byte_tuple(self):
+        html = "<html>Page\n1\nof\n2\n</html>"
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch(
+                "fishy_pipeline.states.wi.dnr_fetch.fetch_dnr_bytes",
+                return_value=(html.encode("utf-8"), "text/html"),
+            ) as fetch:
+                text = catalog.fetch_catalog_page(
+                    cache_dir=Path(tmp),
+                    page_index=1,
+                    opener=object(),
+                    rate_limit_seconds=0,
+                )
+            fetch.assert_called_once()
+            self.assertEqual(text, html)
+            self.assertEqual((Path(tmp) / "catalog-page-001.html").read_text(encoding="utf-8"), html)
+
     def test_third_distinct_url_raises(self):
         drafts = [
             catalog.CatalogRowDraft("http://a", "1111111", "A", "X", None, None, "loc"),
