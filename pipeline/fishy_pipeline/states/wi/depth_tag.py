@@ -31,11 +31,15 @@ INSIDE_FRACTION = 0.5
 # A printed break (a numeral, a tick, or a section stroke) is a few pixels on
 # the sheet. 22 px is just past the 18 px self-closure in the tracer and under
 # the 28 px label snap, so the next contour, which sits off to the side, does
-# not meet. The meter cap is the short-fragment length: a longer bridge would
-# connect two separate lines.
+# not meet. The break is a paper distance, so the window is 22 px of this
+# sheet's pixel size, not a fixed number of metres.
 JOIN_GAP_PX = 22.0
 JOIN_GAP_MIN_M = 8.0
-JOIN_GAP_MAX_M = 35.0
+# Only the pixel size is bounded, so a bad georeference cannot turn the window
+# into an unbounded bridge. The lower bound is the cell that produces the 8 m
+# floor; 3.5 m/px keeps all 22 px on a 1:31680 sheet at 300 dpi (2.68 m/px).
+JOIN_PIXEL_MIN_M = JOIN_GAP_MIN_M / JOIN_GAP_PX
+JOIN_PIXEL_MAX_M = 3.5
 # Tangents and the gap chord must agree. 25° admits a gentle curve across a
 # short break and rejects a cove corner or a jump to the next depth.
 JOIN_MAX_ANGLE_DEG = 25.0
@@ -270,14 +274,19 @@ def assignment_to_feet(assignment: Assignment) -> Assignment:
 
 
 def join_gap_m_for_pixel(pixel_size_m: float) -> float:
-    """Ground gap for ``JOIN_GAP_PX`` at this sheet's pixel size, clamped.
+    """Ground gap for ``JOIN_GAP_PX`` at this sheet's pixel size.
+
+    The window follows the sheet. A 35 m cap bound every 1:24000 sheet at
+    383 dpi or below and cut the window to 17-22 px there, so the break it
+    exists to bridge never joined. The pixel size is clamped instead.
 
     A missing or non-positive pixel size uses the shortest gap. It must not
-    open the maximum bridge.
+    open the widest window.
     """
     if not math.isfinite(pixel_size_m) or pixel_size_m <= 0:
         return JOIN_GAP_MIN_M
-    return min(JOIN_GAP_MAX_M, max(JOIN_GAP_MIN_M, pixel_size_m * JOIN_GAP_PX))
+    pixel = min(JOIN_PIXEL_MAX_M, max(JOIN_PIXEL_MIN_M, pixel_size_m))
+    return max(JOIN_GAP_MIN_M, pixel * JOIN_GAP_PX)
 
 
 def join_open_strokes(
