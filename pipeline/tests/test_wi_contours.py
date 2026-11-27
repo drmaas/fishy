@@ -1044,12 +1044,48 @@ class StrokeJoinTest(unittest.TestCase):
         )
         self.assertEqual(len(full), 1)
 
-    def test_pixel_gap_stays_inside_the_global_caps(self):
+    def test_pixel_gap_tracks_the_sheet_not_a_metre_cap(self):
         self.assertEqual(join_gap_m_for_pixel(0.2), 8.0)
         self.assertAlmostEqual(join_gap_m_for_pixel(1.0), 22.0)
-        self.assertEqual(join_gap_m_for_pixel(4.0), 35.0)
+        # 1:24000 at 300 dpi is 2.03 m/px and 1:31680 at 300 dpi is 2.68 m/px.
+        self.assertAlmostEqual(join_gap_m_for_pixel(2.03), 2.03 * 22.0)
+        self.assertAlmostEqual(join_gap_m_for_pixel(2.68), 2.68 * 22.0)
+        # Only the pixel size is clamped, so a bad georeference stays bounded.
+        self.assertEqual(join_gap_m_for_pixel(3.5), 77.0)
+        self.assertEqual(join_gap_m_for_pixel(50.0), 77.0)
         self.assertEqual(join_gap_m_for_pixel(0), JOIN_GAP_MIN_M)
         self.assertEqual(join_gap_m_for_pixel(float("nan")), JOIN_GAP_MIN_M)
+
+    def test_a_break_past_the_old_35_m_cap_still_joins(self):
+        # The same 40 m break on a 1:24000 sheet at 300 dpi. The 35 m cap used
+        # to leave it apart; the sheet's own 22 px window closes it.
+        left = Line(coords=((10, 50), (30, 50)), closed=False)
+        right = Line(coords=((70, 50), (90, 50)), closed=False)
+        labels = [
+            Label(x=20, y=50, depth_ft=10, confidence=0.9),
+            Label(x=80, y=50, depth_ft=10, confidence=0.9),
+        ]
+        capped = join_open_strokes(
+            [left, right],
+            labels,
+            _shore(),
+            max_gap_m=35.0,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(capped), 2)
+        sheet_gap = join_gap_m_for_pixel(2.03)
+        self.assertGreater(sheet_gap, 35.0)
+        joined = join_open_strokes(
+            [left, right],
+            labels,
+            _shore(),
+            max_gap_m=sheet_gap,
+            max_angle_deg=JOIN_MAX_ANGLE_DEG,
+            snap_m=5,
+        )
+        self.assertEqual(len(joined), 1)
+        self.assertFalse(joined[0].closed)
 
     def test_assign_depths_requires_an_explicit_gap(self):
         with self.assertRaises(TypeError):
